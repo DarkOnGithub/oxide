@@ -19,27 +19,28 @@
 \fancyfoot[R]{Page \thepage}
 
 \title{
-\rule{0.65\linewidth}{3pt}\\[0.7em]
-\textbf{\textbf{Oxide}}\\[0.5em] 
-\large Cahier des charges S4 2026\\
-\rule{0.65\linewidth}{1pt}
+\vspace{6cm}
+\textbf{Cahier des charges S4 2026}\\
+\rule{0.65\linewidth}{3pt}\\[0.7em]  % Upper line, 2pt thick
+\textbf{Oxide}\\[0.5em]
+\rule{0.65\linewidth}{1pt}           % Lower line, 1pt thick
 }
 
 \author{
     \begin{tabular}{cc}
-        \textbf{Alexandre Joaquim Lima Salgueiro} & \textbf{Willian Huang Hong} \\
-        \texttt{alexandre-joaquim.lima-salgueiro} & \texttt{william.huang-hong} \\[1.5ex]
-        \textbf{Romain Bailly} & \textbf{Tom Huynh} \\
-        \texttt{romain.bailly} & \texttt{tom.huynh}
+        \textbf{Alexandre Joaquim Lima Salgueiro} & \textbf{Romain Bailly} \\
+        \texttt{alexandre-joaquim.lima-salgueiro} & \texttt{romain.bailly} \\[2ex]
+        \textbf{Willian Huang Hong} & \textbf{Tom Huynh} \\
+        \texttt{william.huang-hong} & \texttt{tom.huynh}
     \end{tabular}
 }
 
-\date{\today}
+\date{}
 
 \begin{document}
 
 \maketitle\thispagestyle{empty}
-\vspace{1cm}
+\newpage
 
 \tableofcontents
 \newpage
@@ -95,7 +96,7 @@ Concrètement, Oxide analysera les fichiers en entrée pour déterminer la chaî
 \end{itemize}
 
 Cette architecture hybride permet de combiner la puissance des modèles spécialisés (pour la préparation des données) avec l'efficacité d'un compresseur généraliste robuste.
-
+\newpage
 \section{Fonctionnalités et Algorithmes}
 
 Oxide met en œuvre une chaîne de traitement en deux étapes : le pré-traitement (Pre-processing) et la compression (Compression). Le pré-traitement vise à transformer les données pour les rendre plus compressibles par l'algorithme final.
@@ -148,7 +149,7 @@ Après l'étape de pré-traitement, les données transformées passent par l'ét
     \item \textbf{Modes de Compression Configurables :} Support de plusieurs niveaux de compression (ex: Rapide, Équilibré, Ultra) permettant à l'utilisateur de choisir le compromis idéal entre la vitesse d'exécution et la réduction de taille.
     \item \textbf{Interface Graphique :} Oxide sera accompagné d'une application graphique intuitive permettant la manipulation simplifiée des archives.
 \end{itemize}
-
+\newpage
 \section{Répartition des tâches}
 
 La répartition des fonctionnalités est divisée en deux phases correspondant aux deux soutenances.
@@ -167,7 +168,6 @@ LZ4 (Mode Rapide) & & & & X \\
 \hline
 LZ77 + Huffman (Mode Équilibré) & & & & X \\
 \hline
-
 \multicolumn{5}{|l|}{\textbf{Pré-traitement Image}} \\
 \hline
 YCoCg-R & X & & & \\
