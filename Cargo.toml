@@ -1,6 +1,5 @@
-[package]
-name = "oxide"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
+[workspace]
+members = [
+    "crates/*",
+]
+resolver = "2"
