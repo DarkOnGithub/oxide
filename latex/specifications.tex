@@ -1,0 +1,256 @@
+\documentclass[a4paper,11pt]{article}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage[T1]{fontenc}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titling}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+
+\pagestyle{fancy}
+\fancyhf{} 
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0.4pt}
+\fancyfoot[L]{Projet S4 - Cahier des charges} 
+\fancyfoot[R]{Page \thepage}
+
+\title{
+\rule{0.65\linewidth}{3pt}\\[0.7em]
+\textbf{\textbf{Oxide}}\\[0.5em] 
+\large Cahier des charges S4 2026\\
+\rule{0.65\linewidth}{1pt}
+}
+
+\author{
+    \begin{tabular}{cc}
+        \textbf{Alexandre Joaquim Lima Salgueiro} & \textbf{Willian Huang Hong} \\
+        \texttt{alexandre-joaquim.lima-salgueiro} & \texttt{william.huang-hong} \\[1.5ex]
+        \textbf{Romain Bailly} & \textbf{Tom Huynh} \\
+        \texttt{romain.bailly} & \texttt{tom.huynh}
+    \end{tabular}
+}
+
+\date{\today}
+
+\begin{document}
+
+\maketitle\thispagestyle{empty}
+\vspace{1cm}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+Oxide est un projet de développement d'un logiciel d'archivage de fichiers, conçu pour effectuer des opérations de compression et de décompression de manière efficace et sécurisée. S'inspirant de solutions reconnues telles que 7-Zip et WinRAR, Oxide a pour ambition de fournir une alternative moderne, tirant parti des performances et de la sûreté de mémoire offertes par le langage Rust.
+
+L'objectif principal de ce projet est d'implémenter des algorithmes de compression robustes tout en offrant une interface utilisateur simple et performante. Oxide permettra aux utilisateurs de réduire la taille de leurs fichiers pour faciliter le stockage et le partage, tout en garantissant l'intégrité des données lors de l'extraction.
+
+\section{État de l'art}
+
+\subsection{7-Zip (Format .7z)}
+\begin{itemize}
+    \item \textbf{Extension utilisée :} \texttt{.7z}
+    \item \textbf{Algorithmes et Pipeline :} Utilise principalement LZMA et LZMA2. Le pipeline inclut des filtres de pré-traitement (BCJ/BCJ2 pour les exécutables) suivis d'une compression par dictionnaire et d'un codage par intervalle (Range Coder).
+    \item \textbf{Capacité :} Taux de compression très élevé, souvent considéré comme la référence pour l'archivage généraliste open-source. Supporte des fichiers jusqu'à 16 exabytes.
+    \item \textbf{Limites :} La vitesse de compression est relativement lente en mode "Ultra" et l'extraction nécessite plus de ressources processeur que les formats plus anciens.
+\end{itemize}
+
+\subsection{WinRAR (Format .rar)}
+\begin{itemize}
+    \item \textbf{Extension utilisée :} \texttt{.rar}
+    \item \textbf{Algorithmes et Pipeline :} Utilise une variante propriétaire de LZSS avec prédiction par contexte (PPM) pour le texte et des filtres spécialisés pour le multimédia et les exécutables.
+    \item \textbf{Capacité :} Excellent équilibre entre vitesse et taux de compression. Sa fonctionnalité clé est l'enregistrement de restauration, qui permet de réparer une archive physiquement endommagée.
+    \item \textbf{Limites :} Format propriétaire et fermé. La création d'archives .rar nécessite une licence payante.
+\end{itemize}
+
+\subsection{WinZip (Format .zip et .zipx)}
+\begin{itemize}
+    \item \textbf{Extension utilisée :} \texttt{.zip}, \texttt{.zipx}
+    \item \textbf{Algorithmes et Pipeline :} Le \texttt{.zip} classique utilise DEFLATE. Le format moderne \texttt{.zipx} utilise une approche "content-aware" : LZMA pour les données génériques, Jpeg pour les images, WavPack pour l'audio et PPMd pour le texte.
+    \item \textbf{Capacité :} Le standard absolu pour la compatibilité (ouvert nativement par tous les systèmes d'exploitation). Le \texttt{.zipx} offre une compression compétitive face au 7z.
+    \item \textbf{Limites :} Le format \texttt{.zip} classique compresse peu. Le format \texttt{.zipx} souffre de problèmes de fragmentation : il est difficile de trouver un décompresseur compatible hors de l'écosystème WinZip.
+\end{itemize}
+
+\subsection{Zstandard (Format .zst)}
+\begin{itemize}
+    \item \textbf{Extension utilisée :} \texttt{.zst} (Développé par Facebook/Meta)
+    \item \textbf{Algorithmes et Pipeline :} Basé sur un codage entropique à états finis (tANS) et LZ77. Conçu pour scaler massivement.
+    \item \textbf{Capacité :} Vitesse de décompression extrêmement rapide tout en maintenant un taux de compression comparable à zlib ou LZMA selon le niveau réglé. Devenu le standard pour le Big Data, Linux et le Gaming.
+    \item \textbf{Limites :} Moins orienté "archivage utilisateur" (pas de chiffrement natif ou de gestion de fichiers multiples sans l'aide du format \texttt{.tar}).
+\end{itemize}
+
+\section{Stratégie d'Oxide}
+
+Oxide adopte une stratégie "content-aware" (sensible au contenu) inspirée de WinZip, mais structurée autour d'un pipeline en deux étapes : Pré-traitement $\rightarrow$ Compression. L'objectif n'est pas seulement de changer d'algorithme de compression, mais d'appliquer des transformations intelligentes en amont pour faciliter le travail du compresseur final.
+
+Concrètement, Oxide analysera les fichiers en entrée pour déterminer la chaîne de traitement optimale :
+\begin{itemize}
+    \item Pour les types de fichiers spécifiques (images, audio, texte, exécutables), des filtres de pré-traitement dédiés sont appliqués. Ces transformations réversibles visent à réduire l'entropie ou à exposer la redondance cachée des données.
+    \item Le flux de données résultant (ou les données brutes pour les types génériques) est ensuite confié à un algorithme de compression universel.
+\end{itemize}
+
+Cette architecture hybride permet de combiner la puissance des modèles spécialisés (pour la préparation des données) avec l'efficacité d'un compresseur généraliste robuste.
+
+\section{Fonctionnalités et Algorithmes}
+
+Oxide met en œuvre une chaîne de traitement en deux étapes : le pré-traitement (Pre-processing) et la compression (Compression). Le pré-traitement vise à transformer les données pour les rendre plus compressibles par l'algorithme final.
+
+\subsection{Algorithmes de Pré-traitement}
+
+Ces algorithmes ne compressent pas nécessairement les données (voire peuvent augmenter légèrement leur taille), mais réorganisent l'information pour réduire l'entropie ou exposer des motifs répétitifs.
+
+\begin{itemize}
+    \item \textbf{Images :}
+    \begin{itemize}
+        \item \textit{YCoCg-R :} Transformation d'espace colorimétrique réversible qui décorrèle les canaux RVB en luminance (Y) et chrominance (Co, Cg), facilitant la compression ultérieure.
+        \item \textit{PAETH :} Filtre prédictif 2D qui réduit l'entropie en stockant la différence entre la valeur d'un pixel et une prédiction basée sur ses voisins.
+        \item \textit{LOCO-I / MED :} Détection de contours (Median Edge Detection) pour choisir le meilleur prédicteur local, utilisé pour préparer les données d'image.
+    \end{itemize}
+    
+    \item \textbf{Texte :}
+    \begin{itemize}
+        \item \textit{BWT (Burrows-Wheeler Transform) :} Réorganise les caractères pour regrouper les occurrences identiques, créant de longues suites de caractères identiques idéales pour un codeur RLE ou entropique.
+        \item \textit{BPE (Byte Pair Encoding) :} Remplace les paires d'octets fréquentes par des symboles uniques, réduisant la redondance avant la compression finale.
+    \end{itemize}
+    
+    \item \textbf{Audio :}
+    \begin{itemize}
+        \item \textit{LPC (Linear Predictive Coding) :} Modélise l'onde sonore et ne conserve que le résidu (l'erreur de prédiction), qui est beaucoup plus facile à compresser que le signal brut.
+    \end{itemize}
+    
+    \item \textbf{Fichiers Binaires (Exécutables) :}
+    \begin{itemize}
+        \item \textit{BCJ (Branch / Call / Jump) :} Normalise les instructions de saut dans le code machine (x86/ARM) en convertissant les adresses relatives en absolues, ce qui augmente les répétitions pour le compresseur.
+    \end{itemize}
+\end{itemize}
+
+\subsection{Compression et Codage Entropique}
+
+Après l'étape de pré-traitement, les données transformées passent par l'étage final de compression. Le choix de l'algorithme universel dépend du mode sélectionné par l'utilisateur :
+
+\begin{itemize}
+    \item \textbf{Mode Rapide :} Utilise \textit{LZ4}, un algorithme axé sur une vitesse de compression et de décompression extrêmement élevée, idéal pour les systèmes temps réel ou le stockage rapide.
+    \item \textbf{Mode Équilibré :} Combine \textit{LZ77} et le \textit{codage de Huffman} (similaire à DEFLATE). Ce mode offre un excellent compromis entre ratio de compression et vitesse, adapté à un usage général.
+    \item \textbf{Mode Ultra :} Utilise \textit{LZMA} (Lempel-Ziv-Markov chain Algorithm) pour les données génériques et \textit{PPM} (Prediction by Partial Matching) pour le texte. Ce mode privilégie un taux de compression maximal au prix d'un temps de traitement plus long et d'une utilisation mémoire accrue.
+\end{itemize}
+
+\subsection{Autres Fonctionnalités}
+
+\begin{itemize}
+    \item \textbf{Chiffrement :} Protection des archives via un système de chiffrement.
+    \item \textbf{Vérification d'intégrité :} Mécanisme de détection de corruption via hashage pour s'assurer que les fichiers extraits sont strictement identiques aux originaux.
+    \item \textbf{Multithreading :} Utilisation de la parallélisation pour accélérer les opérations de compression et de décompression en traitant plusieurs fichiers simultanément.
+    \item \textbf{Modes de Compression Configurables :} Support de plusieurs niveaux de compression (ex: Rapide, Équilibré, Ultra) permettant à l'utilisateur de choisir le compromis idéal entre la vitesse d'exécution et la réduction de taille.
+    \item \textbf{Interface Graphique :} Oxide sera accompagné d'une application graphique intuitive permettant la manipulation simplifiée des archives.
+\end{itemize}
+
+\section{Répartition des tâches}
+
+La répartition des fonctionnalités est divisée en deux phases correspondant aux deux soutenances.
+
+\subsection{Soutenance 1 (23 - 27 Mars 2026)}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Fonctionnalité} & \textbf{Alexandre} & \textbf{Willian} & \textbf{Romain} & \textbf{Tom} \\
+\hline
+\multicolumn{5}{|l|}{\textbf{Compression Universelle}} \\
+\hline
+LZ4 (Mode Rapide) & & & & X \\
+\hline
+LZ77 + Huffman (Mode Équilibré) & & & & X \\
+\hline
+
+\multicolumn{5}{|l|}{\textbf{Pré-traitement Image}} \\
+\hline
+YCoCg-R & X & & & \\
+\hline
+LOCO-I / MED & & & X & \\
+\hline
+\multicolumn{5}{|l|}{\textbf{Pré-traitement Texte}} \\
+\hline
+BPE & X & & & \\
+\hline
+\multicolumn{5}{|l|}{\textbf{Pré-traitement Binaire}} \\
+\hline
+BCJ & & X & & \\
+\hline
+\multicolumn{5}{|l|}{\textbf{Intégrité}} \\
+\hline
+Hashing & & & X & \\
+\hline
+\multicolumn{5}{|l|}{\textbf{Architecture et Interface}} \\
+\hline
+CLI & & X & & \\
+\hline
+Format de fichier & & & & X \\
+\hline
+Pipeline Manager (Routing) & & & & X \\
+\hline
+\multicolumn{5}{|l|}{\textbf{Communication}} \\
+\hline
+Site Web & & & X & \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Soutenance 2 (18 - 22 Mai 2026)}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Fonctionnalité} & \textbf{Alexandre} & \textbf{Willian} & \textbf{Romain} & \textbf{Tom} \\
+\hline
+\multicolumn{5}{|l|}{\textbf{Compression Avancée (Mode Ultra)}} \\
+\hline
+LZMA & & & & X \\
+\hline
+\multicolumn{5}{|l|}{\textbf{Pré-traitement Audio}} \\
+\hline
+LPC & & X & & \\
+\hline
+\multicolumn{5}{|l|}{\textbf{Pré-traitement Texte Avancé}} \\
+\hline
+BWT & X & & & \\
+\hline
+PPM & & & & X\\
+\hline
+\multicolumn{5}{|l|}{\textbf{Sécurité}} \\
+\hline
+Chiffrement & X & & & \\
+\hline
+\multicolumn{5}{|l|}{\textbf{Application et Communication}} \\
+\hline
+Interface Graphique (GUI) & & & X & \\
+\hline
+Site Web & & & X & \\
+\hline
+\end{tabular}
+\end{center}
+
+\vspace{0.5cm}
+
+\subsection{Descriptif des tâches spécifiques}
+
+Voici une description des éléments de la matrice n'ayant pas fait l'objet d'un descriptif détaillé dans les sections précédentes :
+
+\begin{itemize}[label=\textbullet]
+    \item \textbf{Format de fichier :} Définition et implémentation de la structure binaire du conteneur (magic number, en-têtes de fichiers, blocs de données compressées, métadonnées d'intégrité et index final).
+    \item \textbf{Pipeline Manager (Routing) :} Développement de la logique d'analyse des fichiers en entrée pour aiguiller automatiquement les données vers les filtres de pré-traitement adéquats avant la compression finale.
+\end{itemize}
+
+
+
+\section{Conclusion}
+
+Oxide est un projet qui vise à explorer en profondeur les mécanismes de compression modernes en tirant parti des atouts du langage Rust. En combinant une approche "content-aware" inspirée de l'état de l'art avec une architecture performante et sécurisée, l'objectif est de livrer un outil d'archivage performant, modulaire et facile d'utilisation. Ce projet permettra la maîtrise d'algorithmes complexes tout en assurant une expérience utilisateur finale soignée.
+
+\end{document}
