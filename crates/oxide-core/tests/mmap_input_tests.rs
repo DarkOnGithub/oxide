@@ -50,3 +50,19 @@ fn invalid_ranges_return_error() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[test]
+fn mapped_slice_survives_after_input_drop() -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = NamedTempFile::new()?;
+    file.write_all(b"mapped payload")?;
+    file.flush()?;
+
+    let mapped = {
+        let mmap = MmapInput::open(file.path())?;
+        mmap.mapped_slice(1, 7)?
+    };
+
+    assert_eq!(mapped.as_slice(), b"apped ");
+
+    Ok(())
+}

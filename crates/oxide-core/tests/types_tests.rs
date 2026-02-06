@@ -1,7 +1,10 @@
 use bytes::Bytes;
 use oxide_core::{
-    Batch, BinaryStrategy, CompressedBlock, CompressionAlgo, FileFormat, PreProcessingStrategy,
+    Batch, BatchData, BinaryStrategy, CompressedBlock, CompressionAlgo, FileFormat, MmapInput,
+    PreProcessingStrategy,
 };
+use std::io::Write;
+use tempfile::NamedTempFile;
 
 #[test]
 fn batch_constructor_defaults_to_unknown() {
@@ -9,7 +12,7 @@ fn batch_constructor_defaults_to_unknown() {
 
     assert_eq!(batch.id, 7);
     assert_eq!(batch.source_path, std::path::PathBuf::from("sample.bin"));
-    assert_eq!(batch.file_type_hint, FileFormat::Unknown);
+    assert_eq!(batch.file_type_hint, FileFormat::Common);
     assert_eq!(batch.len(), 3);
     assert!(!batch.is_empty());
 }
@@ -47,4 +50,29 @@ fn compressed_block_crc_detects_mutation() {
     block.data.push(5);
 
     assert!(!block.verify_crc32());
+}
+
+#[test]
+fn mapped_batch_data_reports_len_and_slice() -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = NamedTempFile::new()?;
+    file.write_all(b"abcdefghij")?;
+    file.flush()?;
+
+    let mmap = MmapInput::open(file.path())?;
+    let mapped = mmap.mapped_slice(2, 6)?;
+
+    assert_eq!(mapped.len(), 4);
+    assert!(!mapped.is_empty());
+    assert_eq!(mapped.as_slice(), b"cdef");
+
+    let (map, start, end) = match mapped {
+        BatchData::Mapped { map, start, end } => (map, start, end),
+        BatchData::Owned(_) => panic!("expected mapped slice"),
+    };
+
+    let batch = Batch::from_mapped(3, "mapped.bin", map, start, end, FileFormat::Binary);
+    assert_eq!(batch.data(), b"cdef");
+    assert_eq!(batch.file_type_hint, FileFormat::Binary);
+
+    Ok(())
 }

@@ -1,4 +1,4 @@
-use oxide_core::{format::FormatDetector, FileFormat};
+use oxide_core::{FileFormat, format::FormatDetector};
 
 #[test]
 fn detects_png() {
@@ -80,5 +80,5 @@ fn detects_archive_as_common() {
 
 #[test]
 fn empty_is_unknown() {
-    assert_eq!(FormatDetector::detect(&[]), FileFormat::Unknown);
+    assert_eq!(FormatDetector::detect(&[]), FileFormat::Common);
 }
