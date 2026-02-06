@@ -470,10 +470,10 @@ impl<'a, T> Worker<'a, T> {
 ```
 
 **Deliverables:**
-- [ ] Global injector queue
-- [ ] Per-worker LIFO queues
-- [ ] Work-stealing algorithm
-- [ ] Lock-free implementation
+- [x] Global injector queue
+- [x] Per-worker LIFO queues
+- [x] Work-stealing algorithm
+- [x] Lock-free implementation
 
 **Verification:**
 - Unit tests for queue operations
@@ -552,10 +552,10 @@ pub struct WorkerPoolHandle {
 ```
 
 **Deliverables:**
-- [ ] Thread pool with work stealing
-- [ ] Configurable number of workers
-- [ ] Graceful shutdown mechanism
-- [ ] Integration with buffer pool
+- [x] Thread pool with work stealing
+- [x] Configurable number of workers
+- [x] Graceful shutdown mechanism
+- [x] Integration with buffer pool
 
 **Verification:**
 - Integration test with sample workloads
