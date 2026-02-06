@@ -34,7 +34,7 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Target block size (supports suffixes K/M/G, e.g. 64K, 1M).
-        #[arg(long, default_value = "64K", value_parser = parse_size)]
+        #[arg(long, default_value = "1M", value_parser = parse_size)]
         block_size: usize,
 
         /// Number of worker threads (defaults to CPU count).
@@ -46,7 +46,7 @@ enum Commands {
         compression: CompressionArg,
 
         /// Buffer pool default capacity (supports suffixes K/M/G).
-        #[arg(long, default_value = "64K", value_parser = parse_size)]
+        #[arg(long, default_value = "1M", value_parser = parse_size)]
         pool_capacity: usize,
 
         /// Maximum number of buffers retained by the pool.
