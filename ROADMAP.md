@@ -10,10 +10,10 @@ This roadmap details the complete implementation of the Oxide content-aware arch
 
 Updates in this revision: output reordering buffer, full OXZ flag/footers spec alignment, complete image preprocessing set (Paeth/YCoCgR/LocoI), and advanced content heuristics tuning.
 
-**Current Status:** Phase 1 - Foundation (In Progress)
+**Current Status:** Phase 1 - Foundation (Completed)
 - [x] Project structure and dependencies
 - [x] Core type definitions (strategies, modes)
-- [ ] Core pipeline components (pending)
+- [x] Core pipeline components
 
 ---
 
@@ -898,11 +898,11 @@ impl<T> ReorderBuffer<T> {
 ### Phase 1 Deliverables
 
 **Success Criteria:**
-- [ ] Zero-allocation hot path working end-to-end (mmap + buffer pool), with documented exceptions
+- [x] Zero-allocation hot path working end-to-end (mmap + buffer pool), with documented exceptions
 - [x] Can create and read OXZ files
 - [x] All unit tests passing
-- [ ] Buffer pool maintains stable memory usage
-- [ ] Work-stealing shows improved throughput with mixed workloads
+- [x] Buffer pool maintains stable memory usage
+- [x] Work-stealing shows improved throughput with mixed workloads
 - [x] Output ordering preserved for parallel processing
 
 **Integration Test:**
