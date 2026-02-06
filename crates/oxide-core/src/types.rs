@@ -21,7 +21,7 @@ impl Batch {
             id,
             source_path: source_path.into(),
             data,
-            file_type_hint: FileFormat::Unknown,
+            file_type_hint: FileFormat::Common,
         }
     }
 
@@ -88,7 +88,7 @@ pub enum FileFormat {
     Binary,
     Image,
     Audio,
-    Unknown,
+    Common,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
