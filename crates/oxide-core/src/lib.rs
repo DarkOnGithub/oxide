@@ -3,6 +3,7 @@ pub mod core;
 pub mod error;
 pub mod format;
 pub mod io;
+pub mod pipeline;
 pub mod telemetry;
 pub mod types;
 
@@ -15,6 +16,7 @@ pub use format::{
     GlobalHeader, OXZ_MAGIC, OXZ_VERSION, ReorderBuffer,
 };
 pub use io::{BoundaryMode, InputScanner, MmapInput};
+pub use pipeline::ArchivePipeline;
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use types::{
     AudioStrategy, Batch, BatchData, BinaryStrategy, CompressedBlock, CompressionAlgo, FileFormat,
