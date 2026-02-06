@@ -1,15 +1,5 @@
 use crate::types::FileFormat;
-
-const MAGIC_PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
-const MAGIC_BMP: &[u8] = b"BM";
-const MAGIC_RIFF: &[u8] = b"RIFF";
-const MAGIC_WAVE: &[u8] = b"WAVE";
-const MAGIC_FORM: &[u8] = b"FORM";
-const MAGIC_AIFF: &[u8] = b"AIFF";
-const MAGIC_AIFC: &[u8] = b"AIFC";
-const MAGIC_ELF: &[u8] = b"\x7fELF";
-const MAGIC_MZ: &[u8] = b"MZ";
-const MAGIC_PE: &[u8] = b"PE\0\0";
+use infer::MatcherType;
 
 const TEXT_SAMPLE_LIMIT: usize = 16 * 1024;
 const UTF8_RATIO_THRESHOLD: f32 = 0.85;
@@ -29,34 +19,37 @@ impl FormatDetector {
             return FileFormat::Unknown;
         }
 
-        if Self::is_image(data) {
-            return FileFormat::Image;
+        if let Some(format) = Self::detect_with_library(data) {
+            return format;
         }
 
-        if Self::is_audio(data) {
-            return FileFormat::Audio;
+        // Keep non-signature heuristics for cases infer does not classify.
+        if Self::has_x86_prologue(data) {
+            return FileFormat::Binary;
         }
 
         if Self::is_text(data) {
             return FileFormat::Text;
         }
 
-        if Self::is_x86_executable(data) {
-            return FileFormat::Binary;
-        }
-
         FileFormat::Binary
     }
 
-    fn is_image(data: &[u8]) -> bool {
-        data.starts_with(MAGIC_PNG) || data.starts_with(MAGIC_BMP)
-    }
+    fn detect_with_library(data: &[u8]) -> Option<FileFormat> {
+        let kind = infer::get(data)?;
 
-    fn is_audio(data: &[u8]) -> bool {
-        (data.len() >= 12 && data.starts_with(MAGIC_RIFF) && &data[8..12] == MAGIC_WAVE)
-            || (data.len() >= 12
-                && data.starts_with(MAGIC_FORM)
-                && (&data[8..12] == MAGIC_AIFF || &data[8..12] == MAGIC_AIFC))
+        match kind.matcher_type() {
+            MatcherType::Image => Some(FileFormat::Image),
+            MatcherType::Audio => Some(FileFormat::Audio),
+            MatcherType::Text => Some(FileFormat::Text),
+            MatcherType::App => Some(FileFormat::Binary),
+            MatcherType::Archive
+            | MatcherType::Book
+            | MatcherType::Doc
+            | MatcherType::Font
+            | MatcherType::Video
+            | MatcherType::Custom => Some(FileFormat::Binary),
+        }
     }
 
     // Heuristics:
@@ -92,36 +85,6 @@ impl FormatDetector {
         let control_ratio = control as f32 / len;
 
         printable_ratio >= PRINTABLE_RATIO_THRESHOLD && control_ratio <= CONTROL_RATIO_THRESHOLD
-    }
-
-    fn is_x86_executable(data: &[u8]) -> bool {
-        Self::is_elf_x86(data) || Self::is_pe_x86(data) || Self::has_x86_prologue(data)
-    }
-
-    fn is_elf_x86(data: &[u8]) -> bool {
-        if data.len() < 20 || !data.starts_with(MAGIC_ELF) {
-            return false;
-        }
-        let machine = u16::from_le_bytes([data[18], data[19]]);
-        machine == 0x03 || machine == 0x3E
-    }
-
-    fn is_pe_x86(data: &[u8]) -> bool {
-        if data.len() < 0x40 || !data.starts_with(MAGIC_MZ) {
-            return false;
-        }
-
-        let pe_offset =
-            u32::from_le_bytes([data[0x3C], data[0x3D], data[0x3E], data[0x3F]]) as usize;
-        if pe_offset + 6 > data.len() {
-            return false;
-        }
-        if &data[pe_offset..pe_offset + 4] != MAGIC_PE {
-            return false;
-        }
-
-        let machine = u16::from_le_bytes([data[pe_offset + 4], data[pe_offset + 5]]);
-        machine == 0x014c || machine == 0x8664
     }
 
     fn has_x86_prologue(data: &[u8]) -> bool {
