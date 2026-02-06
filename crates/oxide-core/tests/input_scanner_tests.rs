@@ -35,9 +35,11 @@ fn text_splits_on_newline_and_preserves_order() -> Result<(), Box<dyn std::error
     assert!(!batches.is_empty());
     assert_contiguous_ids(&batches);
     assert_eq!(flatten_batches(&batches), data);
-    assert!(batches
-        .iter()
-        .all(|batch| batch.file_type_hint == FileFormat::Text));
+    assert!(
+        batches
+            .iter()
+            .all(|batch| batch.file_type_hint == FileFormat::Text)
+    );
     assert!(batches.iter().all(|batch| !batch.is_empty()));
 
     Ok(())

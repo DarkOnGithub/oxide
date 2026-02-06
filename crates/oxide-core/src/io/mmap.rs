@@ -6,11 +6,11 @@ use std::time::Instant;
 use bytes::Bytes;
 use memmap2::{Mmap, MmapOptions};
 
+use crate::OxideError;
 use crate::telemetry;
 use crate::telemetry::profile;
 use crate::telemetry::tags;
 use crate::types::{BatchData, Result};
-use crate::OxideError;
 
 const PROFILE_TAG_STACK_MMAP: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_MMAP];
 
