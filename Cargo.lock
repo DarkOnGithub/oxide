@@ -956,6 +956,7 @@ dependencies = [
  "memchr",
  "memmap2",
  "num_cpus",
+ "rayon",
  "serde",
  "symphonia",
  "tempfile",

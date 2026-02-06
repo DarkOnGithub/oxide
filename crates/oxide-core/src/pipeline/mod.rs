@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use rayon::prelude::*;
 
 use crate::buffer::BufferPool;
 use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerRuntimeSnapshot};
@@ -19,6 +20,7 @@ use crate::types::{
 const DIRECTORY_BUNDLE_MAGIC: [u8; 4] = *b"OXDB";
 const DIRECTORY_BUNDLE_VERSION: u16 = 1;
 const SOURCE_KIND_DIRECTORY_FLAG: u32 = 1 << 0;
+const PARALLEL_DIRECTORY_READ_THRESHOLD: usize = 1024;
 
 #[derive(Debug)]
 enum DirectoryBundleEntry {
@@ -469,11 +471,27 @@ impl ArchivePipeline {
             entries.push(DirectoryBundleEntry::Directory { rel_path });
         }
 
-        for file_rel in files {
-            let rel_path = Self::relative_path_to_utf8(&file_rel)?;
-            let full_path = root.join(&file_rel);
-            let data = fs::read(full_path)?;
-            entries.push(DirectoryBundleEntry::File { rel_path, data });
+        if files.len() >= PARALLEL_DIRECTORY_READ_THRESHOLD {
+            let parallel_entries: std::result::Result<
+                Vec<DirectoryBundleEntry>,
+                crate::OxideError,
+            > = files
+                .par_iter()
+                .map(|file_rel| {
+                    let rel_path = Self::relative_path_to_utf8(file_rel)?;
+                    let full_path = root.join(file_rel);
+                    let data = fs::read(full_path)?;
+                    Ok(DirectoryBundleEntry::File { rel_path, data })
+                })
+                .collect();
+            entries.extend(parallel_entries?);
+        } else {
+            for file_rel in files {
+                let rel_path = Self::relative_path_to_utf8(&file_rel)?;
+                let full_path = root.join(&file_rel);
+                let data = fs::read(full_path)?;
+                entries.push(DirectoryBundleEntry::File { rel_path, data });
+            }
         }
 
         Ok(entries)
