@@ -38,7 +38,11 @@ fn parse_tags(raw: &str) -> Option<BTreeSet<String>> {
         tags.insert(normalized);
     }
 
-    if tags.is_empty() { None } else { Some(tags) }
+    if tags.is_empty() {
+        None
+    } else {
+        Some(tags)
+    }
 }
 
 #[cfg(feature = "profiling")]
@@ -167,6 +171,9 @@ pub fn event(
         }
         tags::PROFILE_BUFFER => {
             tracing::debug!(target: tags::PROFILE_BUFFER, op, result, elapsed_us, tags = ?tag_stack, "{message}");
+        }
+        tags::PROFILE_SCANNER => {
+            tracing::debug!(target: tags::PROFILE_SCANNER, op, result, elapsed_us, tags = ?tag_stack, "{message}");
         }
         tags::PROFILE_WORKER => {
             tracing::debug!(target: tags::PROFILE_WORKER, op, result, elapsed_us, tags = ?tag_stack, "{message}");
