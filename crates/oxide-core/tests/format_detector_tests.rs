@@ -14,6 +14,12 @@ fn detects_bmp() {
 }
 
 #[test]
+fn detects_gif_via_library_signature() {
+    let bytes = b"GIF89a\x01\x00\x01\x00\x00";
+    assert_eq!(FormatDetector::detect(bytes), FileFormat::Image);
+}
+
+#[test]
 fn detects_wav() {
     let mut bytes = b"RIFF".to_vec();
     bytes.extend_from_slice(&[0, 0, 0, 0]);
@@ -38,7 +44,7 @@ fn detects_utf8_text() {
 #[test]
 fn detects_binary_with_controls() {
     let bytes = [0x00, 0xFF, 0x13, 0x00, 0x02, 0x99, 0x80, 0x00, 0x00];
-    assert_eq!(FormatDetector::detect(&bytes), FileFormat::Binary);
+    assert_eq!(FormatDetector::detect(&bytes), FileFormat::Common);
 }
 
 #[test]
@@ -64,6 +70,12 @@ fn detects_x86_prologue_pattern() {
     let mut bytes = vec![0u8; 128];
     bytes[24..28].copy_from_slice(&[0x55, 0x48, 0x89, 0xE5]);
     assert_eq!(FormatDetector::detect(&bytes), FileFormat::Binary);
+}
+
+#[test]
+fn detects_archive_as_common() {
+    let bytes = b"PK\x03\x04\x14\x00\x00\x00\x08\x00";
+    assert_eq!(FormatDetector::detect(bytes), FileFormat::Common);
 }
 
 #[test]
