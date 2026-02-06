@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -9,7 +10,7 @@ use crate::OxideError;
 use crate::telemetry;
 use crate::telemetry::profile;
 use crate::telemetry::tags;
-use crate::types::Result;
+use crate::types::{BatchData, Result};
 
 const PROFILE_TAG_STACK_MMAP: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_MMAP];
 
@@ -33,9 +34,9 @@ const PROFILE_TAG_STACK_MMAP: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_MMAP];
 /// let data = input.as_bytes()?;
 /// # Ok::<(), oxide_core::OxideError>(())
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MmapInput {
-    mmap: Option<Mmap>,
+    mmap: Option<Arc<Mmap>>,
     path: PathBuf,
     len: u64,
 }
@@ -57,7 +58,7 @@ impl MmapInput {
             let mmap = if len == 0 {
                 None
             } else {
-                Some(unsafe { MmapOptions::new().map(&file)? })
+                Some(Arc::new(unsafe { MmapOptions::new().map(&file)? }))
             };
 
             Ok(Self {
@@ -151,6 +152,39 @@ impl MmapInput {
     /// Returns true if the file is empty (zero bytes).
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Returns a slice of the file as a BatchData object (zero-copy if possible).
+    ///
+    /// # Arguments
+    /// * `start` - Start byte position (inclusive)
+    /// * `end` - End byte position (exclusive)
+    ///
+    /// # Errors
+    /// Returns an error if the range is invalid.
+    pub fn mapped_slice(&self, start: usize, end: usize) -> Result<BatchData> {
+        self.mapped_slice_u64(start as u64, end as u64)
+    }
+
+    /// Returns a slice of the file as a BatchData object using u64 indices.
+    ///
+    /// # Arguments
+    /// * `start` - Start byte position (inclusive)
+    /// * `end` - End byte position (exclusive)
+    ///
+    /// # Errors
+    /// Returns an error if the range is invalid or overflows usize.
+    pub fn mapped_slice_u64(&self, start: u64, end: u64) -> Result<BatchData> {
+        let (start, end) = self.validate_range(start, end)?;
+
+        match &self.mmap {
+            Some(map) => Ok(BatchData::Mapped {
+                map: Arc::clone(map),
+                start,
+                end,
+            }),
+            None => Ok(BatchData::Owned(Bytes::new())),
+        }
     }
 
     /// Returns a slice of the file as a Bytes object.
