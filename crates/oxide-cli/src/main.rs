@@ -674,7 +674,6 @@ fn decode_directory_bundle(payload: &[u8]) -> Result<Vec<DirectoryBundleEntry>, 
             }
         }
     }
-
     if cursor != payload.len() {
         return Err(OxideError::InvalidFormat(
             "directory bundle has trailing data",

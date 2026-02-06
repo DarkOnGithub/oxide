@@ -22,6 +22,8 @@ const DIRECTORY_BUNDLE_MAGIC: [u8; 4] = *b"OXDB";
 const DIRECTORY_BUNDLE_VERSION: u16 = 1;
 const SOURCE_KIND_DIRECTORY_FLAG: u32 = 1 << 0;
 const PARALLEL_DIRECTORY_READ_THRESHOLD: usize = 1024;
+const STREAM_READ_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+const SUBMISSION_DRAIN_BUDGET: usize = 128;
 
 #[derive(Debug)]
 enum DirectoryBundleEntry {
@@ -398,12 +400,13 @@ impl ArchivePipeline {
         bundle_header.extend_from_slice(&DIRECTORY_BUNDLE_VERSION.to_le_bytes());
         bundle_header.extend_from_slice(&entry_count.to_le_bytes());
         submitter.push_bytes(&bundle_header, |batch| handle.submit(batch))?;
-        Self::drain_ready_results(
+        Self::drain_some_ready_results(
             &handle,
             &mut blocks,
             &mut first_error,
             &mut completed_bytes,
             &mut received_count,
+            SUBMISSION_DRAIN_BUDGET,
         );
         Self::emit_archive_progress_if_due(
             &handle,
@@ -423,12 +426,13 @@ impl ArchivePipeline {
             encoded.push(0);
             Self::encode_path(&mut encoded, rel_path)?;
             submitter.push_bytes(&encoded, |batch| handle.submit(batch))?;
-            Self::drain_ready_results(
+            Self::drain_some_ready_results(
                 &handle,
                 &mut blocks,
                 &mut first_error,
                 &mut completed_bytes,
                 &mut received_count,
+                SUBMISSION_DRAIN_BUDGET,
             );
             Self::emit_archive_progress_if_due(
                 &handle,
@@ -444,7 +448,7 @@ impl ArchivePipeline {
             );
         }
 
-        let mut read_buffer = vec![0u8; 256 * 1024];
+        let mut read_buffer = vec![0u8; STREAM_READ_BUFFER_SIZE];
         for file in &discovery.files {
             let mut encoded = Vec::with_capacity(1 + 4 + file.rel_path.len() + 8);
             encoded.push(1);
@@ -460,12 +464,13 @@ impl ArchivePipeline {
                 }
 
                 submitter.push_bytes(&read_buffer[..read], |batch| handle.submit(batch))?;
-                Self::drain_ready_results(
+                Self::drain_some_ready_results(
                     &handle,
                     &mut blocks,
                     &mut first_error,
                     &mut completed_bytes,
                     &mut received_count,
+                    SUBMISSION_DRAIN_BUDGET,
                 );
                 Self::emit_archive_progress_if_due(
                     &handle,
@@ -483,12 +488,13 @@ impl ArchivePipeline {
         }
 
         submitter.finish(|batch| handle.submit(batch))?;
-        Self::drain_ready_results(
+        Self::drain_some_ready_results(
             &handle,
             &mut blocks,
             &mut first_error,
             &mut completed_bytes,
             &mut received_count,
+            usize::MAX,
         );
 
         let expected = handle.submitted_count();
@@ -687,21 +693,28 @@ impl ArchivePipeline {
         }
     }
 
-    fn drain_ready_results(
+    fn drain_some_ready_results(
         handle: &WorkerPoolHandle,
         blocks: &mut Vec<CompressedBlock>,
         first_error: &mut Option<crate::OxideError>,
         completed_bytes: &mut u64,
         received_count: &mut usize,
+        max_results: usize,
     ) {
-        while let Some(result) = handle.recv_timeout(Duration::from_millis(0)) {
-            Self::record_worker_result(
-                result,
-                blocks,
-                first_error,
-                completed_bytes,
-                received_count,
-            );
+        let mut drained = 0usize;
+        while drained < max_results {
+            if let Some(result) = handle.recv_timeout(Duration::from_millis(0)) {
+                Self::record_worker_result(
+                    result,
+                    blocks,
+                    first_error,
+                    completed_bytes,
+                    received_count,
+                );
+                drained += 1;
+            } else {
+                break;
+            }
         }
     }
 
