@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use bytes::Bytes;
+use std::sync::Arc;
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::OxideError;
@@ -15,7 +17,7 @@ pub type Result<T> = std::result::Result<T, OxideError>;
 pub struct Batch {
     pub id: usize,
     pub source_path: PathBuf,
-    pub data: Bytes,
+    pub data: BatchData,
     pub file_type_hint: FileFormat,
 }
 
@@ -24,7 +26,7 @@ pub struct Batch {
 pub enum BatchData {
     Owned(Bytes),
     Mapped{
-        map: std::sync::Arc<memmap2::Mmap>,
+        map: Arc<Mmap>,
         start: usize,
         end: usize,
     },
@@ -41,7 +43,7 @@ impl Batch {
         Self {
             id,
             source_path: source_path.into(),
-            data,
+            data: BatchData::Owned(data),
             file_type_hint: FileFormat::Common,
         }
     }
@@ -62,10 +64,36 @@ impl Batch {
         Self {
             id,
             source_path: source_path.into(),
-            data,
+            data: BatchData::Owned(data),
             file_type_hint,
         }
     }
+
+    /// Creates a new batch from a mapped region of a file.
+    ///
+    /// # Arguments
+    /// * `id` - Unique identifier for this batch
+    /// * `source_path` - Path to the source file
+    /// * `map` - The mapped region of the file
+    /// * `start` - The start of the mapped region
+    /// * `end` - The end of the mapped region
+    /// * `file_type_hint` - Explicit file format hint
+    pub fn from_mapped(
+        id: usize,
+        source_path: impl Into<PathBuf>,
+        map: Arc<Mmap>,
+        start: usize,
+        end: usize,
+        file_type_hint: FileFormat,
+    ) -> Self {
+        Self {
+            id, 
+            source_path: source_path.into(),
+            data: BatchData::Mapped { map, start, end },
+            file_type_hint,
+        }        
+    }
+
 
     pub fn len(&self) -> usize {
         self.data.len()
@@ -73,6 +101,22 @@ impl Batch {
 
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+
+    /// Returns a reference to the underlying data as a byte slice.
+    pub fn data(&self) -> &[u8] {
+        self.data.as_slice()
+    }
+
+    /// Converts the batch data to an owned Bytes object.
+    pub fn to_owned(&self) -> Bytes {
+        self.data.to_owned()
+    }
+}
+
+impl From<Batch> for Bytes {
+    fn from(batch: Batch) -> Self {
+        batch.to_owned()
     }
 }
 
@@ -93,6 +137,24 @@ impl BatchData {
             Self::Owned(data) => &data[..],
             Self::Mapped { map, start, end } => &map[*start..*end],
         }
+    }
+
+    /// Converts the data to an owned Bytes object.
+    ///
+    /// If the data is already owned, it returns a clone of the Bytes object
+    /// (which is a cheap reference-counted operation). If the data is mapped,
+    /// it copies the mapped region into a new Bytes object.
+    pub fn to_owned(&self) -> Bytes {
+        match self {
+            Self::Owned(data) => data.clone(),
+            Self::Mapped { map, start, end } => Bytes::copy_from_slice(&map[*start..*end]),
+        }
+    }
+}
+
+impl From<BatchData> for Bytes {
+    fn from(data: BatchData) -> Self {
+        data.to_owned()
     }
 }
 
