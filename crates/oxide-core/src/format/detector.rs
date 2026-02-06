@@ -6,14 +6,40 @@ const UTF8_RATIO_THRESHOLD: f32 = 0.85;
 const PRINTABLE_RATIO_THRESHOLD: f32 = 0.90;
 const CONTROL_RATIO_THRESHOLD: f32 = 0.02;
 
+/// File format detector using library-based and heuristic methods.
+///
+/// Detects file formats using the `infer` crate for known file signatures,
+/// with fallback heuristics for text detection and binary identification.
+///
+/// # Example
+/// ```
+/// use oxide_core::format::FormatDetector;
+///
+/// let file_bytes = b"Hello, world!";
+/// let format = FormatDetector::detect(file_bytes);
+/// ```
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FormatDetector;
 
 impl FormatDetector {
+    /// Creates a new format detector instance.
+    ///
+    /// Note: This is equivalent to using `FormatDetector::default()`.
     pub fn new() -> Self {
         Self
     }
 
+    /// Detects the format of the provided data.
+    ///
+    /// First attempts detection using the `infer` library for known
+    /// file signatures. Falls back to heuristic detection for text
+    /// and binary formats.
+    ///
+    /// # Arguments
+    /// * `data` - The data bytes to analyze
+    ///
+    /// # Returns
+    /// The detected [`FileFormat`], or [`FileFormat::Common`] if unknown.
     pub fn detect(data: &[u8]) -> FileFormat {
         if data.is_empty() {
             return FileFormat::Common;

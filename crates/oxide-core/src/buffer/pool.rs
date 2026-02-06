@@ -4,6 +4,21 @@ use std::sync::Arc;
 
 use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 
+/// A pool of reusable byte buffers to reduce allocation overhead.
+///
+/// The buffer pool maintains a set of pre-allocated buffers that can be
+/// acquired and released back to the pool for reuse. This reduces memory
+/// allocation pressure during high-throughput data processing.
+///
+/// # Example
+/// ```
+/// use oxide_core::BufferPool;
+///
+/// let pool = BufferPool::new(4096, 100);
+/// let buffer = pool.acquire();
+/// // use buffer...
+/// drop(buffer); // returns to pool automatically
+/// ```
 #[derive(Debug)]
 pub struct BufferPool {
     recycler: Sender<Vec<u8>>,
@@ -14,6 +29,11 @@ pub struct BufferPool {
 }
 
 impl BufferPool {
+    /// Creates a new buffer pool with the specified configuration.
+    ///
+    /// # Arguments
+    /// * `default_capacity` - Initial capacity for newly created buffers
+    /// * `max_buffers` - Maximum number of buffers to keep in the pool
     pub fn new(default_capacity: usize, max_buffers: usize) -> Self {
         let (tx, rx) = bounded(max_buffers);
         Self {
@@ -25,6 +45,10 @@ impl BufferPool {
         }
     }
 
+    /// Acquires a buffer from the pool.
+    ///
+    /// Returns a recycled buffer if available, otherwise creates a new one.
+    /// The buffer will be automatically returned to the pool when dropped.
     pub fn acquire(&self) -> PooledBuffer {
         match self.receiver.try_recv() {
             Ok(mut buffer) => {
@@ -43,6 +67,7 @@ impl BufferPool {
         }
     }
 
+    /// Returns a snapshot of the current pool metrics.
     pub fn metrics(&self) -> PoolMetricsSnapshot {
         PoolMetricsSnapshot {
             created: self.metrics.created.load(Ordering::Relaxed),
@@ -51,19 +76,25 @@ impl BufferPool {
         }
     }
 
+    /// Returns the default capacity for newly created buffers.
     pub fn default_capacity(&self) -> usize {
         self.default_capacity
     }
 
+    /// Returns the maximum number of buffers the pool can hold.
     pub fn max_buffers(&self) -> usize {
         self.max_buffers
     }
 }
 
+/// A snapshot of buffer pool metrics at a point in time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PoolMetricsSnapshot {
+    /// Number of buffers created by the pool
     pub created: usize,
+    /// Number of buffers successfully recycled
     pub recycled: usize,
+    /// Number of buffers dropped (pool full)
     pub dropped: usize,
 }
 
@@ -74,6 +105,11 @@ struct PoolMetricsInner {
     dropped: AtomicUsize,
 }
 
+/// A buffer allocated from a [`BufferPool`].
+///
+/// When dropped, this buffer is automatically returned to the pool
+/// for reuse. Implements `Deref` and `DerefMut` for transparent
+/// access to the underlying `Vec<u8>`.
 #[derive(Debug)]
 pub struct PooledBuffer {
     buffer: Vec<u8>,
@@ -90,10 +126,12 @@ impl PooledBuffer {
         }
     }
 
+    /// Returns a slice reference to the buffer contents.
     pub fn as_slice(&self) -> &[u8] {
         &self.buffer
     }
 
+    /// Returns a mutable reference to the underlying Vec.
     pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
         &mut self.buffer
     }
