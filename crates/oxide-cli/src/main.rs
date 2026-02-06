@@ -160,12 +160,23 @@ fn archive_command(
     let mut last_bytes = 0u64;
     let mut last_elapsed = Duration::ZERO;
     let mut peak_instant_bps = 0.0f64;
+    let discovery_started = Instant::now();
+    let mut discovery_reported = false;
+    eprintln!("discovering input and planning blocks...");
 
     let (_writer, stats) = pipeline.archive_path_with_progress(
         &input,
         output_file,
         progress_interval,
         |snapshot: ArchiveProgressSnapshot| {
+            if !discovery_reported {
+                discovery_reported = true;
+                eprintln!(
+                    "discovery complete in {}, starting workers...",
+                    format_duration(discovery_started.elapsed())
+                );
+            }
+
             let elapsed = snapshot.elapsed;
             let total = snapshot.input_bytes_total;
             let done = snapshot.input_bytes_completed.min(total);
@@ -221,6 +232,13 @@ fn archive_command(
             last_elapsed = elapsed;
         },
     )?;
+
+    if !discovery_reported {
+        eprintln!(
+            "discovery complete in {}, starting workers...",
+            format_duration(discovery_started.elapsed())
+        );
+    }
 
     eprintln!();
     print_summary(

@@ -18,6 +18,7 @@ use crate::types::{Batch, FileFormat, Result};
 
 /// Tag stack for scanner profiling events.
 const PROFILE_TAG_STACK_SCANNER: &[&str] = &[tags::TAG_SYSTEM, tags::TAG_SCANNER];
+const FORMAT_PROBE_LIMIT: usize = 64 * 1024;
 
 /// Boundary mode selected for chunking a file into batches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,13 +156,17 @@ impl InputScanner {
         }
 
         let len = mmap.len();
+        let probe_len = len.min(FORMAT_PROBE_LIMIT);
+        let probe = mmap.mapped_slice(0, probe_len)?;
+        let format = FormatDetector::detect(probe.as_slice());
         let mapped_data = mmap.mapped_slice(0, len)?;
         let data = mapped_data.as_slice();
-        let format = FormatDetector::detect(data);
         let boundary_mode = self.detect_boundary_mode(path, format);
         self.record_mode(boundary_mode);
 
-        let mut batches = Vec::new();
+        let estimated_batches =
+            len.saturating_add(self.target_block_size - 1) / self.target_block_size;
+        let mut batches = Vec::with_capacity(estimated_batches.max(1));
         let mut start = 0usize;
         let source_path = path.to_path_buf();
         let mut id = 0usize;
