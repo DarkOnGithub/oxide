@@ -153,3 +153,56 @@ fn archive_path_supports_directory_inputs() -> Result<(), Box<dyn std::error::Er
     );
     Ok(())
 }
+
+#[test]
+fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "sample.txt", b"directory mode")?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline.archive_path(source.path(), Vec::new())?;
+    let reader = ArchiveReader::new(Cursor::new(archive))?;
+    assert_eq!(reader.global_header().flags & 1, 1);
+    Ok(())
+}
+
+#[test]
+fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(64 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Deflate);
+
+    let archive = pipeline.archive_path(file.path(), Vec::new())?;
+    let out_root = tempfile::tempdir()?;
+    let out_file = out_root.path().join("restored.txt");
+    let kind = pipeline.extract_path(Cursor::new(archive), &out_file)?;
+
+    assert_eq!(kind, oxide_core::ArchiveSourceKind::File);
+    assert_eq!(std::fs::read(out_file)?, data);
+    Ok(())
+}
+
+#[test]
+fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "nested/data.bin", &[9, 8, 7])?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline.archive_path(source.path(), Vec::new())?;
+    let out_root = tempfile::tempdir()?;
+    let out_dir = out_root.path().join("restored-tree");
+    let kind = pipeline.extract_path(Cursor::new(archive), &out_dir)?;
+
+    assert_eq!(kind, oxide_core::ArchiveSourceKind::Directory);
+    assert_eq!(
+        std::fs::read(out_dir.join("nested/data.bin"))?,
+        vec![9, 8, 7]
+    );
+    Ok(())
+}

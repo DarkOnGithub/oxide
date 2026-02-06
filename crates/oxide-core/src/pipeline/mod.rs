@@ -18,6 +18,7 @@ use crate::types::{
 
 const DIRECTORY_BUNDLE_MAGIC: [u8; 4] = *b"OXDB";
 const DIRECTORY_BUNDLE_VERSION: u16 = 1;
+const SOURCE_KIND_DIRECTORY_FLAG: u32 = 1 << 0;
 
 #[derive(Debug)]
 enum DirectoryBundleEntry {
@@ -140,15 +141,8 @@ impl ArchivePipeline {
 
     /// Extracts all block payload bytes from an OXZ archive in block order.
     pub fn extract_archive<R: Read + std::io::Seek>(&self, reader: R) -> Result<Vec<u8>> {
-        let mut archive = ArchiveReader::new(reader)?;
-        let mut output = Vec::new();
-
-        for entry in archive.iter_blocks() {
-            let (_header, block_data) = entry?;
-            output.extend_from_slice(&block_data);
-        }
-
-        Ok(output)
+        let (_flags, payload) = Self::read_archive_payload(reader)?;
+        Ok(payload)
     }
 
     /// Extracts a directory tree archive produced by [`archive_directory`].
@@ -157,10 +151,68 @@ impl ArchivePipeline {
         R: Read + std::io::Seek,
         P: AsRef<Path>,
     {
-        let payload = self.extract_archive(reader)?;
-        let entries = Self::decode_directory_bundle(&payload)?;
+        let (flags, payload) = Self::read_archive_payload(reader)?;
+        let entries = Self::decode_directory_entries(&payload, flags)?.ok_or(
+            crate::OxideError::InvalidFormat("archive does not contain a directory bundle"),
+        )?;
+        Self::write_directory_entries(output_dir.as_ref(), entries)
+    }
 
-        let root = output_dir.as_ref();
+    /// Extracts an archive to `output_path`.
+    ///
+    /// File payloads are written to `output_path` as a single file.
+    /// Directory payloads are restored under `output_path` as a root directory.
+    pub fn extract_path<R, P>(&self, reader: R, output_path: P) -> Result<ArchiveSourceKind>
+    where
+        R: Read + std::io::Seek,
+        P: AsRef<Path>,
+    {
+        let (flags, payload) = Self::read_archive_payload(reader)?;
+        let output_path = output_path.as_ref();
+
+        if let Some(entries) = Self::decode_directory_entries(&payload, flags)? {
+            Self::write_directory_entries(output_path, entries)?;
+            return Ok(ArchiveSourceKind::Directory);
+        }
+
+        if let Some(parent) = output_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(output_path, payload)?;
+        Ok(ArchiveSourceKind::File)
+    }
+
+    fn read_archive_payload<R: Read + std::io::Seek>(reader: R) -> Result<(u32, Vec<u8>)> {
+        let mut archive = ArchiveReader::new(reader)?;
+        let flags = archive.global_header().flags;
+        let mut output = Vec::new();
+
+        for entry in archive.iter_blocks() {
+            let (_header, block_data) = entry?;
+            output.extend_from_slice(&block_data);
+        }
+
+        Ok((flags, output))
+    }
+
+    fn decode_directory_entries(
+        payload: &[u8],
+        flags: u32,
+    ) -> Result<Option<Vec<DirectoryBundleEntry>>> {
+        if flags & SOURCE_KIND_DIRECTORY_FLAG != 0 {
+            return Self::decode_directory_bundle(payload).map(Some);
+        }
+
+        match Self::decode_directory_bundle(payload) {
+            Ok(entries) => Ok(Some(entries)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn write_directory_entries(root: &Path, entries: Vec<DirectoryBundleEntry>) -> Result<()> {
         fs::create_dir_all(root)?;
 
         for entry in entries {
@@ -180,6 +232,13 @@ impl ArchivePipeline {
         }
 
         Ok(())
+    }
+
+    fn source_kind_flags(source_kind: ArchiveSourceKind) -> u32 {
+        match source_kind {
+            ArchiveSourceKind::File => 0,
+            ArchiveSourceKind::Directory => SOURCE_KIND_DIRECTORY_FLAG,
+        }
     }
 
     fn archive_prepared<W: Write>(
@@ -293,7 +352,8 @@ impl ArchivePipeline {
         blocks.sort_by_key(|block| block.id);
 
         let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.buffer_pool));
-        archive_writer.write_global_header(block_count)?;
+        archive_writer
+            .write_global_header_with_flags(block_count, Self::source_kind_flags(source_kind))?;
         let mut output_bytes_total = (GLOBAL_HEADER_SIZE + FOOTER_SIZE) as u64;
         for block in blocks {
             output_bytes_total = output_bytes_total

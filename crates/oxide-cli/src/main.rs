@@ -1,8 +1,8 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use oxide_core::{
@@ -14,7 +14,7 @@ use oxide_core::{
     name = "oxide",
     version,
     about = "Oxide archiver CLI",
-    long_about = "Archive files or folders into .oxz with live processing stats."
+    long_about = "Archive and extract .oxz files with processing stats."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -55,6 +55,18 @@ enum Commands {
         /// Progress refresh interval in milliseconds.
         #[arg(long, default_value_t = 250)]
         stats_interval_ms: u64,
+    },
+    /// Extract an .oxz archive to a file or directory.
+    Extract {
+        /// Source archive to extract.
+        input: PathBuf,
+
+        /// Destination output path.
+        ///
+        /// For file archives this is the output file path.
+        /// For directory archives this is the restored root directory path.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -105,6 +117,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             pool_buffers,
             stats_interval_ms,
         )?,
+        Commands::Extract { input, output } => extract_command(input, output)?,
     }
 
     Ok(())
@@ -213,6 +226,64 @@ fn archive_command(
     Ok(())
 }
 
+fn extract_command(
+    input: PathBuf,
+    output: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output_path = output.unwrap_or_else(|| default_extract_output_path(&input));
+
+    let buffer_pool = Arc::new(BufferPool::new(64 * 1024, 64));
+    let pipeline = ArchivePipeline::new(64 * 1024, 1, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive_bytes = fs::metadata(&input)?.len();
+    let started_at = Instant::now();
+    let source_kind = pipeline.extract_path(File::open(&input)?, &output_path)?;
+    let elapsed = started_at.elapsed();
+    let restored_bytes = path_total_bytes(&output_path)?;
+
+    print_extract_summary(
+        &input,
+        &output_path,
+        source_kind,
+        archive_bytes,
+        restored_bytes,
+        elapsed,
+    );
+    Ok(())
+}
+
+fn print_extract_summary(
+    archive_path: &Path,
+    output_path: &Path,
+    source_kind: ArchiveSourceKind,
+    archive_bytes: u64,
+    restored_bytes: u64,
+    elapsed: Duration,
+) {
+    let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
+    let read_bps = archive_bytes as f64 / elapsed_secs;
+    let restore_bps = restored_bytes as f64 / elapsed_secs;
+    let source_kind = match source_kind {
+        ArchiveSourceKind::File => "file",
+        ArchiveSourceKind::Directory => "directory",
+    };
+    let restored_ratio = if archive_bytes > 0 {
+        restored_bytes as f64 / archive_bytes as f64
+    } else {
+        1.0
+    };
+
+    println!("extract complete");
+    println!("  archive: {}", archive_path.display());
+    println!("  output: {} ({source_kind})", output_path.display());
+    println!("  elapsed: {}", format_duration(elapsed));
+    println!("  archive bytes read: {}", format_bytes(archive_bytes));
+    println!("  restored bytes: {}", format_bytes(restored_bytes));
+    println!("  restored/archive ratio: {restored_ratio:.3}x");
+    println!("  read throughput: {}/s", format_rate(read_bps));
+    println!("  restore throughput: {}/s", format_rate(restore_bps));
+}
+
 fn print_summary(
     input: &Path,
     output: &Path,
@@ -300,6 +371,44 @@ fn default_output_path(input: &Path) -> PathBuf {
     let mut out = input.as_os_str().to_os_string();
     out.push(".oxz");
     PathBuf::from(out)
+}
+
+fn default_extract_output_path(input: &Path) -> PathBuf {
+    let has_oxz_extension = input
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("oxz"))
+        .unwrap_or(false);
+
+    if has_oxz_extension {
+        let mut out = input.to_path_buf();
+        out.set_extension("");
+        if out != input {
+            return out;
+        }
+    }
+
+    let mut fallback = input.as_os_str().to_os_string();
+    fallback.push(".out");
+    PathBuf::from(fallback)
+}
+
+fn path_total_bytes(path: &Path) -> io::Result<u64> {
+    let metadata = fs::metadata(path)?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+
+    if metadata.is_dir() {
+        let mut total = 0u64;
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            total = total.saturating_add(path_total_bytes(&entry.path())?);
+        }
+        return Ok(total);
+    }
+
+    Ok(0)
 }
 
 fn parse_size(value: &str) -> Result<usize, String> {

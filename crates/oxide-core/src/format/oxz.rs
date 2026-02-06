@@ -342,11 +342,15 @@ impl<W: Write> ArchiveWriter<W> {
     }
 
     pub fn write_global_header(&mut self, block_count: u32) -> Result<()> {
+        self.write_global_header_with_flags(block_count, 0)
+    }
+
+    pub fn write_global_header_with_flags(&mut self, block_count: u32, flags: u32) -> Result<()> {
         if self.expected_block_count.is_some() {
             return Err(OxideError::InvalidFormat("global header already written"));
         }
 
-        let header = GlobalHeader::new(block_count);
+        let header = GlobalHeader::with_flags(block_count, flags);
         let bytes = header.to_bytes();
         self.writer.write_all(&bytes)?;
         self.global_crc32.update(&bytes);
