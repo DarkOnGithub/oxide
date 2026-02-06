@@ -1,11 +1,17 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use bytes::Bytes;
 use memmap2::{Mmap, MmapOptions};
 
-use crate::types::Result;
 use crate::OxideError;
+use crate::telemetry;
+use crate::telemetry::profile;
+use crate::telemetry::tags;
+use crate::types::Result;
+
+const PROFILE_TAG_STACK_MMAP: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_MMAP];
 
 /// Memory-mapped file input for efficient large file access.
 ///
@@ -43,20 +49,88 @@ impl MmapInput {
     /// # Errors
     /// Returns an error if the file cannot be opened or mapped.
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)?;
-        let len = file.metadata()?.len();
+        let started_at = Instant::now();
+        let result = (|| {
+            let file = File::open(path)?;
+            let len = file.metadata()?.len();
 
-        let mmap = if len == 0 {
-            None
-        } else {
-            Some(unsafe { MmapOptions::new().map(&file)? })
-        };
+            let mmap = if len == 0 {
+                None
+            } else {
+                Some(unsafe { MmapOptions::new().map(&file)? })
+            };
 
-        Ok(Self {
-            mmap,
-            path: path.to_path_buf(),
-            len,
-        })
+            Ok(Self {
+                mmap,
+                path: path.to_path_buf(),
+                len,
+            })
+        })();
+
+        let elapsed_us = profile::elapsed_us(started_at);
+        telemetry::increment_counter(
+            tags::METRIC_MMAP_OPEN_COUNT,
+            1,
+            &[("subsystem", "mmap"), ("op", "open")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_MMAP_OPEN_LATENCY_US,
+            elapsed_us,
+            &[("subsystem", "mmap"), ("op", "open")],
+        );
+        telemetry::sample_process_memory();
+
+        match &result {
+            Ok(_input) => {
+                profile::event(
+                    tags::PROFILE_MMAP,
+                    &PROFILE_TAG_STACK_MMAP,
+                    "open",
+                    "ok",
+                    elapsed_us,
+                    "mmap open completed",
+                );
+                #[cfg(feature = "profiling")]
+                if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_MMAP) {
+                    tracing::debug!(
+                        target: tags::PROFILE_MMAP,
+                        op = "open",
+                        result = "ok",
+                        elapsed_us,
+                        tags = ?PROFILE_TAG_STACK_MMAP,
+                        file_len = _input.len_u64(),
+                        empty_file = _input.is_empty(),
+                        path = %path.display(),
+                        "mmap open context"
+                    );
+                }
+            }
+            Err(_error) => {
+                profile::event(
+                    tags::PROFILE_MMAP,
+                    &PROFILE_TAG_STACK_MMAP,
+                    "open",
+                    "error",
+                    elapsed_us,
+                    "mmap open failed",
+                );
+                #[cfg(feature = "profiling")]
+                if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_MMAP) {
+                    tracing::debug!(
+                        target: tags::PROFILE_MMAP,
+                        op = "open",
+                        result = "error",
+                        elapsed_us,
+                        tags = ?PROFILE_TAG_STACK_MMAP,
+                        path = %path.display(),
+                        error = %_error,
+                        "mmap open context"
+                    );
+                }
+            }
+        }
+
+        result
     }
 
     /// Returns the path of the opened file.
@@ -100,12 +174,80 @@ impl MmapInput {
     /// # Errors
     /// Returns an error if the range is invalid or overflows usize.
     pub fn slice_u64(&self, start: u64, end: u64) -> Result<Bytes> {
-        let (start, end) = self.validate_range(start, end)?;
+        let started_at = Instant::now();
+        let result = (|| {
+            let (start, end) = self.validate_range(start, end)?;
 
-        match &self.mmap {
-            Some(mmap) => Ok(Bytes::copy_from_slice(&mmap[start..end])),
-            None => Ok(Bytes::new()),
+            match &self.mmap {
+                Some(mmap) => Ok(Bytes::copy_from_slice(&mmap[start..end])),
+                None => Ok(Bytes::new()),
+            }
+        })();
+
+        let elapsed_us = profile::elapsed_us(started_at);
+        telemetry::increment_counter(
+            tags::METRIC_MMAP_SLICE_COUNT,
+            1,
+            &[("subsystem", "mmap"), ("op", "slice")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_MMAP_SLICE_LATENCY_US,
+            elapsed_us,
+            &[("subsystem", "mmap"), ("op", "slice")],
+        );
+
+        match &result {
+            Ok(_bytes) => {
+                profile::event(
+                    tags::PROFILE_MMAP,
+                    &PROFILE_TAG_STACK_MMAP,
+                    "slice",
+                    "ok",
+                    elapsed_us,
+                    "mmap slice completed",
+                );
+                #[cfg(feature = "profiling")]
+                if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_MMAP) {
+                    tracing::debug!(
+                        target: tags::PROFILE_MMAP,
+                        op = "slice",
+                        result = "ok",
+                        elapsed_us,
+                        tags = ?PROFILE_TAG_STACK_MMAP,
+                        start,
+                        end,
+                        slice_len = _bytes.len(),
+                        "mmap slice context"
+                    );
+                }
+            }
+            Err(_error) => {
+                profile::event(
+                    tags::PROFILE_MMAP,
+                    &PROFILE_TAG_STACK_MMAP,
+                    "slice",
+                    "error",
+                    elapsed_us,
+                    "mmap slice failed",
+                );
+                #[cfg(feature = "profiling")]
+                if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_MMAP) {
+                    tracing::debug!(
+                        target: tags::PROFILE_MMAP,
+                        op = "slice",
+                        result = "error",
+                        elapsed_us,
+                        tags = ?PROFILE_TAG_STACK_MMAP,
+                        start,
+                        end,
+                        error = %_error,
+                        "mmap slice context"
+                    );
+                }
+            }
         }
+
+        result
     }
 
     /// Returns the entire file contents as a Bytes object.
@@ -113,7 +255,58 @@ impl MmapInput {
     /// # Errors
     /// Returns an error if the file is too large for memory.
     pub fn as_bytes(&self) -> Result<Bytes> {
-        self.slice_u64(0, self.len)
+        let started_at = Instant::now();
+        let result = self.slice_u64(0, self.len);
+        let elapsed_us = profile::elapsed_us(started_at);
+
+        match &result {
+            Ok(_bytes) => {
+                profile::event(
+                    tags::PROFILE_MMAP,
+                    &PROFILE_TAG_STACK_MMAP,
+                    "as_bytes",
+                    "ok",
+                    elapsed_us,
+                    "mmap as_bytes completed",
+                );
+                #[cfg(feature = "profiling")]
+                if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_MMAP) {
+                    tracing::debug!(
+                        target: tags::PROFILE_MMAP,
+                        op = "as_bytes",
+                        result = "ok",
+                        elapsed_us,
+                        tags = ?PROFILE_TAG_STACK_MMAP,
+                        len = _bytes.len(),
+                        "mmap as_bytes context"
+                    );
+                }
+            }
+            Err(_error) => {
+                profile::event(
+                    tags::PROFILE_MMAP,
+                    &PROFILE_TAG_STACK_MMAP,
+                    "as_bytes",
+                    "error",
+                    elapsed_us,
+                    "mmap as_bytes failed",
+                );
+                #[cfg(feature = "profiling")]
+                if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_MMAP) {
+                    tracing::debug!(
+                        target: tags::PROFILE_MMAP,
+                        op = "as_bytes",
+                        result = "error",
+                        elapsed_us,
+                        tags = ?PROFILE_TAG_STACK_MMAP,
+                        error = %_error,
+                        "mmap as_bytes context"
+                    );
+                }
+            }
+        }
+
+        result
     }
 
     fn validate_range(&self, start: u64, end: u64) -> Result<(usize, usize)> {

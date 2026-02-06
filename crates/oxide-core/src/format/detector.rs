@@ -1,5 +1,12 @@
+use std::time::Instant;
+
+use crate::telemetry;
+use crate::telemetry::profile;
+use crate::telemetry::tags;
 use crate::types::FileFormat;
 use infer::MatcherType;
+
+const PROFILE_TAG_STACK_FORMAT: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_FORMAT];
 
 const TEXT_SAMPLE_LIMIT: usize = 16 * 1024;
 const UTF8_RATIO_THRESHOLD: f32 = 0.85;
@@ -41,24 +48,56 @@ impl FormatDetector {
     /// # Returns
     /// The detected [`FileFormat`], or [`FileFormat::Common`] if unknown.
     pub fn detect(data: &[u8]) -> FileFormat {
-        if data.is_empty() {
-            return FileFormat::Common;
+        let started_at = Instant::now();
+
+        let (format, decision_path) = if data.is_empty() {
+            (FileFormat::Common, "empty_input")
+        } else if let Some(format) = Self::detect_with_library(data) {
+            (format, "library")
+        } else if Self::has_x86_prologue(data) {
+            // Keep non-signature heuristics for cases infer does not classify.
+            (FileFormat::Binary, "x86_prologue")
+        } else if Self::is_text(data) {
+            (FileFormat::Text, "text_heuristic")
+        } else {
+            (FileFormat::Common, "fallback_common")
+        };
+
+        let elapsed_us = profile::elapsed_us(started_at);
+        telemetry::increment_counter(
+            tags::METRIC_FORMAT_DETECT_COUNT,
+            1,
+            &[("subsystem", "format"), ("op", "detect")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_FORMAT_DETECT_LATENCY_US,
+            elapsed_us,
+            &[("subsystem", "format"), ("op", "detect")],
+        );
+
+        profile::event(
+            tags::PROFILE_FORMAT,
+            &PROFILE_TAG_STACK_FORMAT,
+            "detect",
+            decision_path,
+            elapsed_us,
+            "format detect completed",
+        );
+        #[cfg(feature = "profiling")]
+        if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_FORMAT) {
+            tracing::debug!(
+                target: tags::PROFILE_FORMAT,
+                op = "detect",
+                decision_path,
+                input_len = data.len(),
+                detected_format = ?format,
+                elapsed_us,
+                tags = ?PROFILE_TAG_STACK_FORMAT,
+                "format detect context"
+            );
         }
 
-        if let Some(format) = Self::detect_with_library(data) {
-            return format;
-        }
-
-        // Keep non-signature heuristics for cases infer does not classify.
-        if Self::has_x86_prologue(data) {
-            return FileFormat::Binary;
-        }
-
-        if Self::is_text(data) {
-            return FileFormat::Text;
-        }
-
-        FileFormat::Common
+        format
     }
 
     fn detect_with_library(data: &[u8]) -> Option<FileFormat> {

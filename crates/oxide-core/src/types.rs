@@ -20,7 +20,7 @@ pub struct Batch {
 }
 
 impl Batch {
-    /// Creates a new batch 
+    /// Creates a new batch
     ///
     /// # Arguments
     /// * `id` - Unique identifier for this batch

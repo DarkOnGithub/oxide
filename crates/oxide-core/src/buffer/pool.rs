@@ -1,8 +1,16 @@
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
+
+use crate::telemetry;
+#[cfg(feature = "profiling")]
+use crate::telemetry::profile;
+use crate::telemetry::tags;
+
+#[cfg(feature = "profiling")]
+const PROFILE_TAG_STACK_BUFFER: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_BUFFER];
 
 /// A pool of reusable byte buffers to reduce allocation overhead.
 ///
@@ -52,12 +60,58 @@ impl BufferPool {
     pub fn acquire(&self) -> PooledBuffer {
         match self.receiver.try_recv() {
             Ok(mut buffer) => {
+                let capacity = buffer.capacity();
                 buffer.clear();
                 self.metrics.recycled.fetch_add(1, Ordering::Relaxed);
+                telemetry::increment_counter(
+                    tags::METRIC_BUFFER_ACQUIRE_RECYCLED_COUNT,
+                    1,
+                    &[
+                        ("subsystem", "buffer"),
+                        ("op", "acquire"),
+                        ("result", "recycled"),
+                    ],
+                );
+                telemetry::sub_gauge_saturating(
+                    tags::METRIC_MEMORY_POOL_ESTIMATED_BYTES,
+                    capacity as u64,
+                    &[("subsystem", "buffer"), ("op", "acquire")],
+                );
+                #[cfg(feature = "profiling")]
+                if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_BUFFER) {
+                    tracing::debug!(
+                        target: tags::PROFILE_BUFFER,
+                        op = "acquire",
+                        result = "recycled",
+                        tags = ?PROFILE_TAG_STACK_BUFFER,
+                        buffer_capacity = capacity,
+                        "buffer recycled from pool"
+                    );
+                }
                 PooledBuffer::new(buffer, self.recycler.clone(), Arc::clone(&self.metrics))
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
                 self.metrics.created.fetch_add(1, Ordering::Relaxed);
+                telemetry::increment_counter(
+                    tags::METRIC_BUFFER_ACQUIRE_CREATED_COUNT,
+                    1,
+                    &[
+                        ("subsystem", "buffer"),
+                        ("op", "acquire"),
+                        ("result", "created"),
+                    ],
+                );
+                #[cfg(feature = "profiling")]
+                if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_BUFFER) {
+                    tracing::debug!(
+                        target: tags::PROFILE_BUFFER,
+                        op = "acquire",
+                        result = "created",
+                        tags = ?PROFILE_TAG_STACK_BUFFER,
+                        buffer_capacity = self.default_capacity,
+                        "buffer created for pool"
+                    );
+                }
                 PooledBuffer::new(
                     Vec::with_capacity(self.default_capacity),
                     self.recycler.clone(),
@@ -154,10 +208,48 @@ impl DerefMut for PooledBuffer {
 impl Drop for PooledBuffer {
     fn drop(&mut self) {
         let buffer = std::mem::take(&mut self.buffer);
+        let capacity = buffer.capacity();
         if let Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) =
             self.recycler.try_send(buffer)
         {
             self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
+            telemetry::increment_counter(
+                tags::METRIC_BUFFER_RECYCLE_DROPPED_COUNT,
+                1,
+                &[
+                    ("subsystem", "buffer"),
+                    ("op", "recycle"),
+                    ("result", "dropped"),
+                ],
+            );
+            #[cfg(feature = "profiling")]
+            if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_BUFFER) {
+                tracing::debug!(
+                    target: tags::PROFILE_BUFFER,
+                    op = "recycle",
+                    result = "dropped",
+                    tags = ?PROFILE_TAG_STACK_BUFFER,
+                    buffer_capacity = capacity,
+                    "buffer dropped instead of recycled"
+                );
+            }
+        } else {
+            telemetry::add_gauge(
+                tags::METRIC_MEMORY_POOL_ESTIMATED_BYTES,
+                capacity as u64,
+                &[("subsystem", "buffer"), ("op", "recycle")],
+            );
+            #[cfg(feature = "profiling")]
+            if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_BUFFER) {
+                tracing::debug!(
+                    target: tags::PROFILE_BUFFER,
+                    op = "recycle",
+                    result = "recycled",
+                    tags = ?PROFILE_TAG_STACK_BUFFER,
+                    buffer_capacity = capacity,
+                    "buffer recycled to pool"
+                );
+            }
         }
     }
 }
