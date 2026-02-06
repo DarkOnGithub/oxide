@@ -7,9 +7,9 @@ pub mod types;
 
 pub use buffer::{BufferPool, PoolMetricsSnapshot, PooledBuffer};
 pub use error::OxideError;
-pub use io::MmapInput;
+pub use io::{BoundaryMode, InputScanner, MmapInput};
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use types::{
-    AudioStrategy, Batch, BinaryStrategy, CompressedBlock, CompressionAlgo, FileFormat,
+    AudioStrategy, Batch, BatchData, BinaryStrategy, CompressedBlock, CompressionAlgo, FileFormat,
     ImageStrategy, PreProcessingStrategy, Result, TextStrategy,
 };
