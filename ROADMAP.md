@@ -685,11 +685,11 @@ impl BlockHeader {
 ```
 
 **Deliverables:**
-- [ ] Global header serialization/deserialization
-- [ ] Block header serialization/deserialization
-- [ ] Flag encoding for strategies and compression (bit layout per ARCHITECTURE.md)
-- [ ] Footer layout and global CRC32 verification
-- [ ] Validation and error handling
+- [x] Global header serialization/deserialization
+- [x] Block header serialization/deserialization
+- [x] Flag encoding for strategies and compression (bit layout per ARCHITECTURE.md)
+- [x] Footer layout and global CRC32 verification
+- [x] Validation and error handling
 
 **Verification:**
 - Unit tests for round-trip serialization
@@ -769,11 +769,11 @@ impl<W: Write> ArchiveWriter<W> {
 ```
 
 **Deliverables:**
-- [ ] Sequential block writing
-- [ ] Global CRC32 calculation
-- [ ] Proper header ordering
-- [ ] Integration with buffer pool
-- [ ] Optional reorder-buffer hook to accept out-of-order blocks
+- [x] Sequential block writing
+- [x] Global CRC32 calculation
+- [x] Proper header ordering
+- [x] Integration with buffer pool
+- [x] Optional reorder-buffer hook to accept out-of-order blocks
 
 **Verification:**
 - Integration test: create OXZ file
@@ -843,10 +843,10 @@ pub struct BlockIterator<'a, R: Read + Seek> {
 ```
 
 **Deliverables:**
-- [ ] Sequential block reading
-- [ ] Random access to blocks
-- [ ] CRC32 verification
-- [ ] Iterator interface
+- [x] Sequential block reading
+- [x] Random access to blocks
+- [x] CRC32 verification
+- [x] Iterator interface
 
 **Verification:**
 - Test reading OXZ files
@@ -885,9 +885,9 @@ impl<T> ReorderBuffer<T> {
 ```
 
 **Deliverables:**
-- [ ] Reorder buffer for out-of-order worker completion
-- [ ] Integrate with writer to preserve block ordering
-- [ ] Bounded memory behavior under skewed workloads
+- [x] Reorder buffer for out-of-order worker completion
+- [x] Integrate with writer to preserve block ordering
+- [x] Bounded memory behavior under skewed workloads
 
 **Verification:**
 - Unit test with out-of-order block IDs
@@ -899,11 +899,11 @@ impl<T> ReorderBuffer<T> {
 
 **Success Criteria:**
 - [ ] Zero-allocation hot path working end-to-end (mmap + buffer pool), with documented exceptions
-- [ ] Can create and read OXZ files
-- [ ] All unit tests passing
+- [x] Can create and read OXZ files
+- [x] All unit tests passing
 - [ ] Buffer pool maintains stable memory usage
 - [ ] Work-stealing shows improved throughput with mixed workloads
-- [ ] Output ordering preserved for parallel processing
+- [x] Output ordering preserved for parallel processing
 
 **Integration Test:**
 ```rust
