@@ -273,3 +273,69 @@ pub enum CompressionAlgo {
     /// Deflate (zlib) compression - Ultra
     Deflate,
 }
+
+impl PreProcessingStrategy {
+    /// Encodes the preprocessing strategy into OXZ strategy flags.
+    ///
+    /// Layout:
+    /// - Bits 0-2: category
+    /// - Bits 3-5: sub-strategy
+    /// - Bits 6-7: reserved
+    pub fn to_flags(&self) -> u8 {
+        match self {
+            Self::None => 0x00,
+            Self::Text(TextStrategy::Bpe) => 0x01,
+            Self::Text(TextStrategy::Bwt) => 0x01 | (1 << 3),
+            Self::Image(ImageStrategy::YCoCgR) => 0x02,
+            Self::Image(ImageStrategy::Paeth) => 0x02 | (1 << 3),
+            Self::Image(ImageStrategy::LocoI) => 0x02 | (2 << 3),
+            Self::Audio(AudioStrategy::Lpc) => 0x03,
+            Self::Binary(BinaryStrategy::Bcj) => 0x04,
+        }
+    }
+
+    /// Decodes OXZ strategy flags into a preprocessing strategy.
+    pub fn from_flags(flags: u8) -> Result<Self> {
+        if flags & 0b1100_0000 != 0 {
+            return Err(OxideError::InvalidFormat(
+                "invalid strategy flags reserved bits",
+            ));
+        }
+
+        let category = flags & 0x07;
+        let sub_strategy = (flags >> 3) & 0x07;
+
+        match (category, sub_strategy) {
+            (0x00, 0x00) => Ok(Self::None),
+            (0x01, 0x00) => Ok(Self::Text(TextStrategy::Bpe)),
+            (0x01, 0x01) => Ok(Self::Text(TextStrategy::Bwt)),
+            (0x02, 0x00) => Ok(Self::Image(ImageStrategy::YCoCgR)),
+            (0x02, 0x01) => Ok(Self::Image(ImageStrategy::Paeth)),
+            (0x02, 0x02) => Ok(Self::Image(ImageStrategy::LocoI)),
+            (0x03, 0x00) => Ok(Self::Audio(AudioStrategy::Lpc)),
+            (0x04, 0x00) => Ok(Self::Binary(BinaryStrategy::Bcj)),
+            _ => Err(OxideError::InvalidFormat("invalid strategy flags")),
+        }
+    }
+}
+
+impl CompressionAlgo {
+    /// Encodes the compression algorithm into OXZ compression flags.
+    pub fn to_flags(self) -> u8 {
+        match self {
+            Self::Lz4 => 0x01,
+            Self::Lzma => 0x02,
+            Self::Deflate => 0x03,
+        }
+    }
+
+    /// Decodes OXZ compression flags into a compression algorithm.
+    pub fn from_flags(flags: u8) -> Result<Self> {
+        match flags {
+            0x01 => Ok(Self::Lz4),
+            0x02 => Ok(Self::Lzma),
+            0x03 => Ok(Self::Deflate),
+            _ => Err(OxideError::InvalidFormat("invalid compression flags")),
+        }
+    }
+}
