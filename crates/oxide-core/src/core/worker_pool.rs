@@ -1,6 +1,6 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -107,11 +107,15 @@ struct WorkerPoolState {
     buffer_pool: Arc<BufferPool>,
     compression_algo: CompressionAlgo,
     telemetry: Arc<dyn WorkerTelemetry>,
+    started_at: Instant,
     accepting: AtomicBool,
     shutdown_requested: AtomicBool,
     submitted: AtomicUsize,
     completed: AtomicUsize,
     task_counts: Vec<AtomicUsize>,
+    worker_started_offsets_us: Vec<AtomicU64>,
+    worker_stopped_offsets_us: Vec<AtomicU64>,
+    worker_busy_us: Vec<AtomicU64>,
 }
 
 impl WorkerPoolState {
@@ -123,16 +127,23 @@ impl WorkerPoolState {
         num_workers: usize,
     ) -> Self {
         let task_counts = (0..num_workers).map(|_| AtomicUsize::new(0)).collect();
+        let worker_started_offsets_us = (0..num_workers).map(|_| AtomicU64::new(0)).collect();
+        let worker_stopped_offsets_us = (0..num_workers).map(|_| AtomicU64::new(0)).collect();
+        let worker_busy_us = (0..num_workers).map(|_| AtomicU64::new(0)).collect();
         Self {
             queue,
             buffer_pool,
             compression_algo,
             telemetry,
+            started_at: Instant::now(),
             accepting: AtomicBool::new(true),
             shutdown_requested: AtomicBool::new(false),
             submitted: AtomicUsize::new(0),
             completed: AtomicUsize::new(0),
             task_counts,
+            worker_started_offsets_us,
+            worker_stopped_offsets_us,
+            worker_busy_us,
         }
     }
 
@@ -140,6 +151,27 @@ impl WorkerPoolState {
         self.shutdown_requested.load(Ordering::Acquire)
             && self.completed.load(Ordering::Acquire) >= self.submitted.load(Ordering::Acquire)
     }
+}
+
+/// Per-worker runtime metrics captured by the worker pool.
+#[derive(Debug, Clone)]
+pub struct WorkerRuntimeSnapshot {
+    pub worker_id: usize,
+    pub tasks_completed: usize,
+    pub uptime: Duration,
+    pub busy: Duration,
+    pub idle: Duration,
+    pub utilization: f64,
+}
+
+/// Runtime metrics snapshot for the worker pool.
+#[derive(Debug, Clone)]
+pub struct PoolRuntimeSnapshot {
+    pub elapsed: Duration,
+    pub submitted: usize,
+    pub completed: usize,
+    pub pending: usize,
+    pub workers: Vec<WorkerRuntimeSnapshot>,
 }
 
 /// Runtime handle for a spawned worker pool.
@@ -192,6 +224,60 @@ impl WorkerPoolHandle {
             .iter()
             .map(|counter| counter.load(Ordering::Acquire))
             .collect()
+    }
+
+    /// Returns runtime metrics for the pool and each worker.
+    pub fn runtime_snapshot(&self) -> PoolRuntimeSnapshot {
+        let elapsed = self.state.started_at.elapsed();
+        let elapsed_us = elapsed.as_micros().min(u64::MAX as u128) as u64;
+        let submitted = self.submitted_count();
+        let completed = self.completed_count();
+        let pending = submitted.saturating_sub(completed);
+
+        let mut workers = Vec::with_capacity(self.state.task_counts.len());
+        for worker_id in 0..self.state.task_counts.len() {
+            let started_raw =
+                self.state.worker_started_offsets_us[worker_id].load(Ordering::Acquire);
+            let stopped_raw =
+                self.state.worker_stopped_offsets_us[worker_id].load(Ordering::Acquire);
+            let busy_us_raw = self.state.worker_busy_us[worker_id].load(Ordering::Acquire);
+
+            let start_us = started_raw.saturating_sub(1);
+            let stop_us = if stopped_raw == 0 {
+                elapsed_us
+            } else {
+                stopped_raw.saturating_sub(1)
+            };
+            let uptime_us = if started_raw == 0 {
+                0
+            } else {
+                stop_us.saturating_sub(start_us)
+            };
+            let busy_us = busy_us_raw.min(uptime_us);
+            let idle_us = uptime_us.saturating_sub(busy_us);
+            let utilization = if uptime_us == 0 {
+                0.0
+            } else {
+                busy_us as f64 / uptime_us as f64
+            };
+
+            workers.push(WorkerRuntimeSnapshot {
+                worker_id,
+                tasks_completed: self.state.task_counts[worker_id].load(Ordering::Acquire),
+                uptime: Duration::from_micros(uptime_us),
+                busy: Duration::from_micros(busy_us),
+                idle: Duration::from_micros(idle_us),
+                utilization,
+            });
+        }
+
+        PoolRuntimeSnapshot {
+            elapsed,
+            submitted,
+            completed,
+            pending,
+            workers,
+        }
     }
 
     /// Receives one worker result, waiting up to `timeout`.
@@ -276,6 +362,10 @@ fn run_worker_loop<F>(
 ) where
     F: Fn(usize, Batch, &BufferPool, CompressionAlgo) -> Result<CompressedBlock> + Send + Sync,
 {
+    let worker_started_us = state.started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
+    state.worker_started_offsets_us[worker.id()]
+        .store(worker_started_us.saturating_add(1), Ordering::Release);
+
     loop {
         if let Some(batch) = worker.steal() {
             state
@@ -299,6 +389,8 @@ fn run_worker_loop<F>(
             };
 
             let elapsed = started_at.elapsed();
+            let elapsed_us = elapsed.as_micros().min(u64::MAX as u128) as u64;
+            state.worker_busy_us[worker.id()].fetch_add(elapsed_us, Ordering::AcqRel);
             match &result {
                 Ok(_) => state
                     .telemetry
@@ -322,9 +414,17 @@ fn run_worker_loop<F>(
             .on_queue_depth(worker.id(), worker.queue_depth());
 
         if state.should_shutdown() {
+            let worker_stopped_us =
+                state.started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            state.worker_stopped_offsets_us[worker.id()]
+                .store(worker_stopped_us.saturating_add(1), Ordering::Release);
             break;
         }
 
         thread::sleep(Duration::from_millis(1));
     }
+
+    let worker_stopped_us = state.started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
+    state.worker_stopped_offsets_us[worker.id()]
+        .store(worker_stopped_us.saturating_add(1), Ordering::Release);
 }

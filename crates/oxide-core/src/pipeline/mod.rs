@@ -2,12 +2,15 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
 use crate::buffer::BufferPool;
-use crate::core::WorkerPool;
-use crate::format::{ArchiveReader, ArchiveWriter};
+use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerRuntimeSnapshot};
+use crate::format::{
+    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
+};
 use crate::io::InputScanner;
 use crate::types::{
     Batch, CompressedBlock, CompressionAlgo, FileFormat, PreProcessingStrategy, Result,
@@ -20,6 +23,42 @@ const DIRECTORY_BUNDLE_VERSION: u16 = 1;
 enum DirectoryBundleEntry {
     Directory { rel_path: String },
     File { rel_path: String, data: Vec<u8> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveSourceKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArchiveProgressSnapshot {
+    pub source_kind: ArchiveSourceKind,
+    pub elapsed: Duration,
+    pub input_bytes_total: u64,
+    pub input_bytes_completed: u64,
+    pub blocks_total: u32,
+    pub blocks_completed: u32,
+    pub blocks_pending: u32,
+    pub runtime: PoolRuntimeSnapshot,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArchiveRunStats {
+    pub source_kind: ArchiveSourceKind,
+    pub elapsed: Duration,
+    pub input_bytes_total: u64,
+    pub output_bytes_total: u64,
+    pub blocks_total: u32,
+    pub blocks_completed: u32,
+    pub workers: Vec<WorkerRuntimeSnapshot>,
+}
+
+#[derive(Debug)]
+struct PreparedInput {
+    source_kind: ArchiveSourceKind,
+    batches: Vec<Batch>,
+    input_bytes_total: u64,
 }
 
 /// End-to-end Phase 1 pipeline that wires scanner, workers, and OXZ I/O.
@@ -55,8 +94,9 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write,
     {
-        let batches = self.scanner.scan_file(path.as_ref())?;
-        self.archive_batches(batches, writer)
+        let prepared = self.prepare_file(path.as_ref())?;
+        self.archive_prepared(prepared, writer)
+            .map(|(writer, _)| writer)
     }
 
     /// Archives either a single file or a directory tree.
@@ -65,17 +105,9 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write,
     {
-        let path = path.as_ref();
-        let metadata = fs::metadata(path)?;
-        if metadata.is_file() {
-            self.archive_file(path, writer)
-        } else if metadata.is_dir() {
-            self.archive_directory(path, writer)
-        } else {
-            Err(crate::OxideError::InvalidFormat(
-                "path must be a file or directory",
-            ))
-        }
+        let prepared = self.prepare_path(path.as_ref())?;
+        self.archive_prepared(prepared, writer)
+            .map(|(writer, _)| writer)
     }
 
     /// Archives a directory tree as a single OXZ payload.
@@ -84,18 +116,26 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write,
     {
-        let root = dir_path.as_ref();
-        if !root.is_dir() {
-            return Err(crate::OxideError::InvalidFormat(
-                "archive_directory expects a directory path",
-            ));
-        }
+        let prepared = self.prepare_directory(dir_path.as_ref())?;
+        self.archive_prepared(prepared, writer)
+            .map(|(writer, _)| writer)
+    }
 
-        let entries = self.collect_directory_entries(root)?;
-        let bundle = Self::encode_directory_bundle(entries)?;
-
-        let batches = self.bytes_to_batches(root.to_path_buf(), bundle, FileFormat::Binary);
-        self.archive_batches(batches, writer)
+    /// Archives a file or directory and emits progress snapshots while processing.
+    pub fn archive_path_with_progress<P, W, F>(
+        &self,
+        path: P,
+        writer: W,
+        progress_interval: Duration,
+        on_progress: F,
+    ) -> Result<(W, ArchiveRunStats)>
+    where
+        P: AsRef<Path>,
+        W: Write,
+        F: FnMut(ArchiveProgressSnapshot),
+    {
+        let prepared = self.prepare_path(path.as_ref())?;
+        self.archive_prepared_with_progress(prepared, writer, progress_interval, on_progress)
     }
 
     /// Extracts all block payload bytes from an OXZ archive in block order.
@@ -142,7 +182,34 @@ impl ArchivePipeline {
         Ok(())
     }
 
-    fn archive_batches<W: Write>(&self, batches: Vec<Batch>, writer: W) -> Result<W> {
+    fn archive_prepared<W: Write>(
+        &self,
+        prepared: PreparedInput,
+        writer: W,
+    ) -> Result<(W, ArchiveRunStats)> {
+        self.archive_prepared_with_progress(
+            prepared,
+            writer,
+            Duration::from_secs(3600),
+            |_snapshot| {},
+        )
+    }
+
+    fn archive_prepared_with_progress<W: Write, F>(
+        &self,
+        prepared: PreparedInput,
+        writer: W,
+        progress_interval: Duration,
+        mut on_progress: F,
+    ) -> Result<(W, ArchiveRunStats)>
+    where
+        F: FnMut(ArchiveProgressSnapshot),
+    {
+        let PreparedInput {
+            source_kind,
+            batches,
+            input_bytes_total,
+        } = prepared;
         let block_count = u32::try_from(batches.len())
             .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
 
@@ -172,14 +239,123 @@ impl ArchivePipeline {
         for batch in batches {
             handle.submit(batch)?;
         }
-        let blocks = handle.finish()?;
+        let expected = handle.submitted_count();
+        handle.shutdown();
+
+        let started_at = Instant::now();
+        let mut last_emit_at = Instant::now();
+        let emit_every = progress_interval.max(Duration::from_millis(100));
+        let mut blocks = Vec::with_capacity(expected);
+        let mut first_error: Option<crate::OxideError> = None;
+        let mut completed_bytes = 0u64;
+        let mut received_count = 0usize;
+
+        while received_count < expected {
+            if let Some(result) = handle.recv_timeout(Duration::from_millis(100)) {
+                match result {
+                    Ok(block) => {
+                        completed_bytes = completed_bytes.saturating_add(block.original_len);
+                        blocks.push(block);
+                    }
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+                received_count += 1;
+            }
+
+            if last_emit_at.elapsed() >= emit_every || received_count == expected {
+                let runtime = handle.runtime_snapshot();
+                on_progress(ArchiveProgressSnapshot {
+                    source_kind,
+                    elapsed: started_at.elapsed(),
+                    input_bytes_total,
+                    input_bytes_completed: completed_bytes.min(input_bytes_total),
+                    blocks_total: block_count,
+                    blocks_completed: runtime.completed as u32,
+                    blocks_pending: runtime.pending as u32,
+                    runtime,
+                });
+                last_emit_at = Instant::now();
+            }
+        }
+
+        let final_runtime = handle.runtime_snapshot();
+        if let Err(join_error) = handle.join() {
+            return Err(join_error);
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        blocks.sort_by_key(|block| block.id);
 
         let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.buffer_pool));
         archive_writer.write_global_header(block_count)?;
+        let mut output_bytes_total = (GLOBAL_HEADER_SIZE + FOOTER_SIZE) as u64;
         for block in blocks {
+            output_bytes_total = output_bytes_total
+                .saturating_add(BLOCK_HEADER_SIZE as u64)
+                .saturating_add(block.data.len() as u64);
             archive_writer.write_owned_block(block)?;
         }
-        archive_writer.write_footer()
+        let writer = archive_writer.write_footer()?;
+
+        let stats = ArchiveRunStats {
+            source_kind,
+            elapsed: started_at.elapsed(),
+            input_bytes_total,
+            output_bytes_total,
+            blocks_total: block_count,
+            blocks_completed: final_runtime.completed as u32,
+            workers: final_runtime.workers,
+        };
+
+        Ok((writer, stats))
+    }
+
+    fn prepare_path(&self, path: &Path) -> Result<PreparedInput> {
+        let metadata = fs::metadata(path)?;
+        if metadata.is_file() {
+            self.prepare_file(path)
+        } else if metadata.is_dir() {
+            self.prepare_directory(path)
+        } else {
+            Err(crate::OxideError::InvalidFormat(
+                "path must be a file or directory",
+            ))
+        }
+    }
+
+    fn prepare_file(&self, path: &Path) -> Result<PreparedInput> {
+        let batches = self.scanner.scan_file(path)?;
+        let input_bytes_total = batches.iter().map(|batch| batch.len() as u64).sum();
+        Ok(PreparedInput {
+            source_kind: ArchiveSourceKind::File,
+            batches,
+            input_bytes_total,
+        })
+    }
+
+    fn prepare_directory(&self, root: &Path) -> Result<PreparedInput> {
+        if !root.is_dir() {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive_directory expects a directory path",
+            ));
+        }
+
+        let entries = self.collect_directory_entries(root)?;
+        let bundle = Self::encode_directory_bundle(entries)?;
+        let input_bytes_total = bundle.len() as u64;
+        let batches = self.bytes_to_batches(root.to_path_buf(), bundle, FileFormat::Binary);
+
+        Ok(PreparedInput {
+            source_kind: ArchiveSourceKind::Directory,
+            batches,
+            input_bytes_total,
+        })
     }
 
     fn bytes_to_batches(
