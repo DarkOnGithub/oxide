@@ -19,6 +19,17 @@ pub struct Batch {
     pub file_type_hint: FileFormat,
 }
 
+/// A batch of data extracted from a file for processing.
+#[derive(Debug, Clone)]
+pub enum BatchData {
+    Owned(Bytes),
+    Mapped{
+        map: std::sync::Arc<memmap2::Mmap>,
+        start: usize,
+        end: usize,
+    },
+}
+
 impl Batch {
     /// Creates a new batch
     ///
@@ -62,6 +73,26 @@ impl Batch {
 
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+}
+
+impl BatchData {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Owned(data) => data.len(),
+            Self::Mapped { map: _g, start, end } => end - start,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(data) => &data[..],
+            Self::Mapped { map, start, end } => &map[*start..*end],
+        }
     }
 }
 
