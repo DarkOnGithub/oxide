@@ -36,6 +36,7 @@ infer = "0.16"
 image = "0.25.9"
 symphonia = "0.5.5"
 rayon = "1.10"
+jwalk = "0.8"
 
 [dev-dependencies]
 tempfile = "3.8"

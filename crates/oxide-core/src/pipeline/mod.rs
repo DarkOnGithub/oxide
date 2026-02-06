@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use jwalk::WalkDir;
 use rayon::prelude::*;
 
 use crate::buffer::BufferPool;
-use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerRuntimeSnapshot};
+use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerPoolHandle, WorkerRuntimeSnapshot};
 use crate::format::{
     ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
 };
@@ -62,6 +63,83 @@ struct PreparedInput {
     source_kind: ArchiveSourceKind,
     batches: Vec<Batch>,
     input_bytes_total: u64,
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryFileSpec {
+    rel_path: String,
+    full_path: PathBuf,
+    size: u64,
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryDiscovery {
+    root: PathBuf,
+    directories: Vec<String>,
+    files: Vec<DirectoryFileSpec>,
+    input_bytes_total: u64,
+}
+
+struct DirectoryBatchSubmitter {
+    source_path: PathBuf,
+    block_size: usize,
+    next_block_id: usize,
+    pending: Vec<u8>,
+}
+
+impl DirectoryBatchSubmitter {
+    fn new(source_path: PathBuf, block_size: usize) -> Self {
+        Self {
+            source_path,
+            block_size: block_size.max(1),
+            next_block_id: 0,
+            pending: Vec::with_capacity(block_size.max(1)),
+        }
+    }
+
+    fn push_bytes<F>(&mut self, mut bytes: &[u8], mut submit: F) -> Result<()>
+    where
+        F: FnMut(Batch) -> Result<()>,
+    {
+        while !bytes.is_empty() {
+            let room = self.block_size.saturating_sub(self.pending.len()).max(1);
+            let take = room.min(bytes.len());
+            self.pending.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+
+            if self.pending.len() == self.block_size {
+                self.flush_pending(&mut submit)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn finish<F>(&mut self, submit: F) -> Result<()>
+    where
+        F: FnMut(Batch) -> Result<()>,
+    {
+        if !self.pending.is_empty() {
+            self.flush_pending(submit)?;
+        }
+        Ok(())
+    }
+
+    fn flush_pending<F>(&mut self, mut submit: F) -> Result<()>
+    where
+        F: FnMut(Batch) -> Result<()>,
+    {
+        let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(self.block_size));
+        let batch = Batch::with_hint(
+            self.next_block_id,
+            self.source_path.clone(),
+            Bytes::from(chunk),
+            FileFormat::Binary,
+        );
+        submit(batch)?;
+        self.next_block_id += 1;
+        Ok(())
+    }
 }
 
 /// End-to-end Phase 1 pipeline that wires scanner, workers, and OXZ I/O.
@@ -137,8 +215,23 @@ impl ArchivePipeline {
         W: Write,
         F: FnMut(ArchiveProgressSnapshot),
     {
-        let prepared = self.prepare_path(path.as_ref())?;
-        self.archive_prepared_with_progress(prepared, writer, progress_interval, on_progress)
+        let path = path.as_ref();
+        let metadata = fs::metadata(path)?;
+        if metadata.is_file() {
+            let prepared = self.prepare_file(path)?;
+            self.archive_prepared_with_progress(prepared, writer, progress_interval, on_progress)
+        } else if metadata.is_dir() {
+            self.archive_directory_streaming_with_progress(
+                path,
+                writer,
+                progress_interval,
+                on_progress,
+            )
+        } else {
+            Err(crate::OxideError::InvalidFormat(
+                "path must be a file or directory",
+            ))
+        }
     }
 
     /// Extracts all block payload bytes from an OXZ archive in block order.
@@ -241,6 +334,396 @@ impl ArchivePipeline {
             ArchiveSourceKind::File => 0,
             ArchiveSourceKind::Directory => SOURCE_KIND_DIRECTORY_FLAG,
         }
+    }
+
+    fn archive_directory_streaming_with_progress<W: Write, F>(
+        &self,
+        root: &Path,
+        writer: W,
+        progress_interval: Duration,
+        mut on_progress: F,
+    ) -> Result<(W, ArchiveRunStats)>
+    where
+        F: FnMut(ArchiveProgressSnapshot),
+    {
+        let discovery = self.discover_directory_tree(root)?;
+        let input_bytes_total = discovery.input_bytes_total;
+        let estimated_blocks_total =
+            Self::block_count_for_bytes(input_bytes_total, self.scanner.target_block_size())?;
+
+        let worker_pool = WorkerPool::new(
+            self.num_workers,
+            Arc::clone(&self.buffer_pool),
+            self.compression_algo,
+        );
+        let handle = worker_pool.spawn(|_worker_id, batch, pool, compression| {
+            let mut scratch = pool.acquire();
+            scratch.extend_from_slice(batch.data());
+
+            let mut data = Vec::new();
+            std::mem::swap(scratch.as_mut_vec(), &mut data);
+
+            Ok(CompressedBlock::new(
+                batch.id,
+                data,
+                PreProcessingStrategy::None,
+                compression,
+                batch.len() as u64,
+            ))
+        });
+
+        let started_at = Instant::now();
+        let mut last_emit_at = Instant::now();
+        let emit_every = progress_interval.max(Duration::from_millis(100));
+        let mut completed_bytes = 0u64;
+        let mut received_count = 0usize;
+        let mut blocks = Vec::with_capacity(estimated_blocks_total as usize);
+        let mut first_error: Option<crate::OxideError> = None;
+
+        let mut submitter =
+            DirectoryBatchSubmitter::new(discovery.root.clone(), self.scanner.target_block_size());
+
+        let entry_count = discovery
+            .directories
+            .len()
+            .checked_add(discovery.files.len())
+            .ok_or(crate::OxideError::InvalidFormat(
+                "directory entry count overflow",
+            ))?;
+        let entry_count = u32::try_from(entry_count)
+            .map_err(|_| crate::OxideError::InvalidFormat("directory entry count overflow"))?;
+
+        let mut bundle_header = Vec::with_capacity(10);
+        bundle_header.extend_from_slice(&DIRECTORY_BUNDLE_MAGIC);
+        bundle_header.extend_from_slice(&DIRECTORY_BUNDLE_VERSION.to_le_bytes());
+        bundle_header.extend_from_slice(&entry_count.to_le_bytes());
+        submitter.push_bytes(&bundle_header, |batch| handle.submit(batch))?;
+        Self::drain_ready_results(
+            &handle,
+            &mut blocks,
+            &mut first_error,
+            &mut completed_bytes,
+            &mut received_count,
+        );
+        Self::emit_archive_progress_if_due(
+            &handle,
+            ArchiveSourceKind::Directory,
+            started_at,
+            input_bytes_total,
+            completed_bytes,
+            estimated_blocks_total,
+            emit_every,
+            &mut last_emit_at,
+            false,
+            &mut on_progress,
+        );
+
+        for rel_path in &discovery.directories {
+            let mut encoded = Vec::with_capacity(1 + 4 + rel_path.len());
+            encoded.push(0);
+            Self::encode_path(&mut encoded, rel_path)?;
+            submitter.push_bytes(&encoded, |batch| handle.submit(batch))?;
+            Self::drain_ready_results(
+                &handle,
+                &mut blocks,
+                &mut first_error,
+                &mut completed_bytes,
+                &mut received_count,
+            );
+            Self::emit_archive_progress_if_due(
+                &handle,
+                ArchiveSourceKind::Directory,
+                started_at,
+                input_bytes_total,
+                completed_bytes,
+                estimated_blocks_total,
+                emit_every,
+                &mut last_emit_at,
+                false,
+                &mut on_progress,
+            );
+        }
+
+        let mut read_buffer = vec![0u8; 256 * 1024];
+        for file in &discovery.files {
+            let mut encoded = Vec::with_capacity(1 + 4 + file.rel_path.len() + 8);
+            encoded.push(1);
+            Self::encode_path(&mut encoded, &file.rel_path)?;
+            encoded.extend_from_slice(&file.size.to_le_bytes());
+            submitter.push_bytes(&encoded, |batch| handle.submit(batch))?;
+
+            let mut file_reader = fs::File::open(&file.full_path)?;
+            loop {
+                let read = file_reader.read(&mut read_buffer)?;
+                if read == 0 {
+                    break;
+                }
+
+                submitter.push_bytes(&read_buffer[..read], |batch| handle.submit(batch))?;
+                Self::drain_ready_results(
+                    &handle,
+                    &mut blocks,
+                    &mut first_error,
+                    &mut completed_bytes,
+                    &mut received_count,
+                );
+                Self::emit_archive_progress_if_due(
+                    &handle,
+                    ArchiveSourceKind::Directory,
+                    started_at,
+                    input_bytes_total,
+                    completed_bytes,
+                    estimated_blocks_total,
+                    emit_every,
+                    &mut last_emit_at,
+                    false,
+                    &mut on_progress,
+                );
+            }
+        }
+
+        submitter.finish(|batch| handle.submit(batch))?;
+        Self::drain_ready_results(
+            &handle,
+            &mut blocks,
+            &mut first_error,
+            &mut completed_bytes,
+            &mut received_count,
+        );
+
+        let expected = handle.submitted_count();
+        let expected_u32 = u32::try_from(expected)
+            .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
+        if expected_u32 != estimated_blocks_total {
+            return Err(crate::OxideError::InvalidFormat(
+                "directory block count mismatch",
+            ));
+        }
+
+        handle.shutdown();
+
+        while received_count < expected {
+            if let Some(result) = handle.recv_timeout(Duration::from_millis(100)) {
+                Self::record_worker_result(
+                    result,
+                    &mut blocks,
+                    &mut first_error,
+                    &mut completed_bytes,
+                    &mut received_count,
+                );
+            }
+            Self::emit_archive_progress_if_due(
+                &handle,
+                ArchiveSourceKind::Directory,
+                started_at,
+                input_bytes_total,
+                completed_bytes,
+                estimated_blocks_total,
+                emit_every,
+                &mut last_emit_at,
+                received_count == expected,
+                &mut on_progress,
+            );
+        }
+
+        let final_runtime = handle.runtime_snapshot();
+        if let Err(join_error) = handle.join() {
+            return Err(join_error);
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        blocks.sort_by_key(|block| block.id);
+
+        let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.buffer_pool));
+        archive_writer.write_global_header_with_flags(
+            expected_u32,
+            Self::source_kind_flags(ArchiveSourceKind::Directory),
+        )?;
+        let mut output_bytes_total = (GLOBAL_HEADER_SIZE + FOOTER_SIZE) as u64;
+        for block in blocks {
+            output_bytes_total = output_bytes_total
+                .saturating_add(BLOCK_HEADER_SIZE as u64)
+                .saturating_add(block.data.len() as u64);
+            archive_writer.write_owned_block(block)?;
+        }
+        let writer = archive_writer.write_footer()?;
+
+        let stats = ArchiveRunStats {
+            source_kind: ArchiveSourceKind::Directory,
+            elapsed: started_at.elapsed(),
+            input_bytes_total,
+            output_bytes_total,
+            blocks_total: expected_u32,
+            blocks_completed: final_runtime.completed as u32,
+            workers: final_runtime.workers,
+        };
+
+        Ok((writer, stats))
+    }
+
+    fn discover_directory_tree(&self, root: &Path) -> Result<DirectoryDiscovery> {
+        if !root.is_dir() {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive_directory expects a directory path",
+            ));
+        }
+
+        let mut directory_paths = Vec::<PathBuf>::new();
+        let mut file_paths = Vec::<PathBuf>::new();
+
+        for entry in WalkDir::new(root) {
+            let entry = entry.map_err(anyhow::Error::from)?;
+            let path = entry.path();
+            if path == root {
+                continue;
+            }
+
+            let rel_path = path
+                .strip_prefix(root)
+                .map_err(|_| crate::OxideError::InvalidFormat("invalid relative path"))?
+                .to_path_buf();
+
+            if entry.file_type().is_dir() {
+                directory_paths.push(rel_path);
+            } else if entry.file_type().is_file() {
+                file_paths.push(rel_path);
+            } else {
+                return Err(crate::OxideError::InvalidFormat(
+                    "directory archive supports regular files/directories only",
+                ));
+            }
+        }
+
+        directory_paths.sort();
+        file_paths.sort();
+
+        let mut input_bytes_total = 10u64;
+        let mut directories = Vec::with_capacity(directory_paths.len());
+        for directory_rel in directory_paths {
+            let rel_path = Self::relative_path_to_utf8(&directory_rel)?;
+            input_bytes_total = Self::accumulate_bundle_size(input_bytes_total, rel_path.len())?;
+            directories.push(rel_path);
+        }
+
+        let mut files = Vec::with_capacity(file_paths.len());
+        for file_rel in file_paths {
+            let rel_path = Self::relative_path_to_utf8(&file_rel)?;
+            let full_path = root.join(&file_rel);
+            let size = fs::metadata(&full_path)?.len();
+            input_bytes_total = Self::accumulate_bundle_size(input_bytes_total, rel_path.len())?;
+            input_bytes_total = input_bytes_total
+                .checked_add(8)
+                .and_then(|total| total.checked_add(size))
+                .ok_or(crate::OxideError::InvalidFormat(
+                    "directory bundle size overflow",
+                ))?;
+            files.push(DirectoryFileSpec {
+                rel_path,
+                full_path,
+                size,
+            });
+        }
+
+        Ok(DirectoryDiscovery {
+            root: root.to_path_buf(),
+            directories,
+            files,
+            input_bytes_total,
+        })
+    }
+
+    fn accumulate_bundle_size(current: u64, path_len: usize) -> Result<u64> {
+        current
+            .checked_add(1)
+            .and_then(|value| value.checked_add(4))
+            .and_then(|value| value.checked_add(path_len as u64))
+            .ok_or(crate::OxideError::InvalidFormat(
+                "directory bundle size overflow",
+            ))
+    }
+
+    fn block_count_for_bytes(total_bytes: u64, block_size: usize) -> Result<u32> {
+        let block_size = block_size.max(1) as u64;
+        let blocks = if total_bytes == 0 {
+            0
+        } else {
+            total_bytes
+                .checked_add(block_size - 1)
+                .ok_or(crate::OxideError::InvalidFormat("block count overflow"))?
+                / block_size
+        };
+        u32::try_from(blocks).map_err(|_| crate::OxideError::InvalidFormat("too many blocks"))
+    }
+
+    fn emit_archive_progress_if_due<F>(
+        handle: &WorkerPoolHandle,
+        source_kind: ArchiveSourceKind,
+        started_at: Instant,
+        input_bytes_total: u64,
+        input_bytes_completed: u64,
+        blocks_total: u32,
+        emit_every: Duration,
+        last_emit_at: &mut Instant,
+        force: bool,
+        on_progress: &mut F,
+    ) where
+        F: FnMut(ArchiveProgressSnapshot),
+    {
+        if force || last_emit_at.elapsed() >= emit_every {
+            let runtime = handle.runtime_snapshot();
+            on_progress(ArchiveProgressSnapshot {
+                source_kind,
+                elapsed: started_at.elapsed(),
+                input_bytes_total,
+                input_bytes_completed: input_bytes_completed.min(input_bytes_total),
+                blocks_total,
+                blocks_completed: runtime.completed as u32,
+                blocks_pending: runtime.pending as u32,
+                runtime,
+            });
+            *last_emit_at = Instant::now();
+        }
+    }
+
+    fn drain_ready_results(
+        handle: &WorkerPoolHandle,
+        blocks: &mut Vec<CompressedBlock>,
+        first_error: &mut Option<crate::OxideError>,
+        completed_bytes: &mut u64,
+        received_count: &mut usize,
+    ) {
+        while let Some(result) = handle.recv_timeout(Duration::from_millis(0)) {
+            Self::record_worker_result(
+                result,
+                blocks,
+                first_error,
+                completed_bytes,
+                received_count,
+            );
+        }
+    }
+
+    fn record_worker_result(
+        result: Result<CompressedBlock>,
+        blocks: &mut Vec<CompressedBlock>,
+        first_error: &mut Option<crate::OxideError>,
+        completed_bytes: &mut u64,
+        received_count: &mut usize,
+    ) {
+        match result {
+            Ok(block) => {
+                *completed_bytes = (*completed_bytes).saturating_add(block.original_len);
+                blocks.push(block);
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    *first_error = Some(error);
+                }
+            }
+        }
+        *received_count += 1;
     }
 
     fn archive_prepared<W: Write>(
@@ -461,7 +944,28 @@ impl ArchivePipeline {
         let mut directories = Vec::<PathBuf>::new();
         let mut files = Vec::<PathBuf>::new();
 
-        Self::walk_directory(root, root, &mut directories, &mut files)?;
+        for entry in WalkDir::new(root) {
+            let entry = entry.map_err(anyhow::Error::from)?;
+            let path = entry.path();
+            if path == root {
+                continue;
+            }
+
+            let rel_path = path
+                .strip_prefix(root)
+                .map_err(|_| crate::OxideError::InvalidFormat("invalid relative path"))?
+                .to_path_buf();
+
+            if entry.file_type().is_dir() {
+                directories.push(rel_path);
+            } else if entry.file_type().is_file() {
+                files.push(rel_path);
+            } else {
+                return Err(crate::OxideError::InvalidFormat(
+                    "directory archive supports regular files/directories only",
+                ));
+            }
+        }
         directories.sort();
         files.sort();
 
@@ -495,40 +999,6 @@ impl ArchivePipeline {
         }
 
         Ok(entries)
-    }
-
-    fn walk_directory(
-        root: &Path,
-        current: &Path,
-        directories: &mut Vec<PathBuf>,
-        files: &mut Vec<PathBuf>,
-    ) -> Result<()> {
-        let mut children = Vec::new();
-        for child in fs::read_dir(current)? {
-            children.push(child?.path());
-        }
-        children.sort();
-
-        for child_path in children {
-            let metadata = fs::symlink_metadata(&child_path)?;
-            let rel_path = child_path
-                .strip_prefix(root)
-                .map_err(|_| crate::OxideError::InvalidFormat("invalid relative path"))?
-                .to_path_buf();
-
-            if metadata.is_dir() {
-                directories.push(rel_path.clone());
-                Self::walk_directory(root, &child_path, directories, files)?;
-            } else if metadata.is_file() {
-                files.push(rel_path);
-            } else {
-                return Err(crate::OxideError::InvalidFormat(
-                    "directory archive supports regular files/directories only",
-                ));
-            }
-        }
-
-        Ok(())
     }
 
     fn relative_path_to_utf8(path: &Path) -> Result<String> {
