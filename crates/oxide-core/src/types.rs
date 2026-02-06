@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use bytes::Bytes;
-use std::sync::Arc;
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::error::OxideError;
 
@@ -25,7 +25,7 @@ pub struct Batch {
 #[derive(Debug, Clone)]
 pub enum BatchData {
     Owned(Bytes),
-    Mapped{
+    Mapped {
         map: Arc<Mmap>,
         start: usize,
         end: usize,
@@ -87,13 +87,12 @@ impl Batch {
         file_type_hint: FileFormat,
     ) -> Self {
         Self {
-            id, 
+            id,
             source_path: source_path.into(),
             data: BatchData::Mapped { map, start, end },
             file_type_hint,
-        }        
+        }
     }
-
 
     pub fn len(&self) -> usize {
         self.data.len()
@@ -124,7 +123,11 @@ impl BatchData {
     pub fn len(&self) -> usize {
         match self {
             Self::Owned(data) => data.len(),
-            Self::Mapped { map: _g, start, end } => end - start,
+            Self::Mapped {
+                map: _g,
+                start,
+                end,
+            } => end - start,
         }
     }
 
