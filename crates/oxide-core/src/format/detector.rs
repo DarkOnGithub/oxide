@@ -16,7 +16,7 @@ impl FormatDetector {
 
     pub fn detect(data: &[u8]) -> FileFormat {
         if data.is_empty() {
-            return FileFormat::Unknown;
+            return FileFormat::Common;
         }
 
         if let Some(format) = Self::detect_with_library(data) {
@@ -32,7 +32,7 @@ impl FormatDetector {
             return FileFormat::Text;
         }
 
-        FileFormat::Binary
+        FileFormat::Common
     }
 
     fn detect_with_library(data: &[u8]) -> Option<FileFormat> {
@@ -48,7 +48,7 @@ impl FormatDetector {
             | MatcherType::Doc
             | MatcherType::Font
             | MatcherType::Video
-            | MatcherType::Custom => Some(FileFormat::Binary),
+            | MatcherType::Custom => Some(FileFormat::Common),
         }
     }
 
