@@ -5,7 +5,7 @@ use crc32fast::Hasher;
 
 use crate::{OxideError, Result};
 
-use super::{BlockHeader, Footer, GlobalHeader, BLOCK_HEADER_SIZE, GLOBAL_HEADER_SIZE};
+use super::{BLOCK_HEADER_SIZE, BlockHeader, Footer, GLOBAL_HEADER_SIZE, GlobalHeader};
 
 #[derive(Debug)]
 pub struct ArchiveReader<R: Read + Seek> {

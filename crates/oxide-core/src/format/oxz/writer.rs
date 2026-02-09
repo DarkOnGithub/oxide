@@ -5,7 +5,7 @@ use crc32fast::Hasher;
 
 use crate::{BufferPool, CompressedBlock, OxideError, Result};
 
-use super::{BlockHeader, Footer, GlobalHeader, ReorderBuffer, DEFAULT_REORDER_PENDING_LIMIT};
+use super::{BlockHeader, DEFAULT_REORDER_PENDING_LIMIT, Footer, GlobalHeader, ReorderBuffer};
 
 #[derive(Debug)]
 pub struct ArchiveWriter<W: Write> {

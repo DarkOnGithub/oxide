@@ -38,11 +38,7 @@ fn parse_tags(raw: &str) -> Option<BTreeSet<String>> {
         tags.insert(normalized);
     }
 
-    if tags.is_empty() {
-        None
-    } else {
-        Some(tags)
-    }
+    if tags.is_empty() { None } else { Some(tags) }
 }
 
 #[cfg(feature = "profiling")]
