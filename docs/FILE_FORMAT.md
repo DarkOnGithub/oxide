@@ -138,6 +138,10 @@ Bits 6-7: Reserved
 
 Raw compressed bytes as produced by the selected compression algorithm. No additional framing.
 
+Note: Strategy flags record transforms that were actually applied. Boundary eligibility
+(for example row/frame alignment required by image/audio predictors) is decided before
+transform selection and is not serialized as a separate flag in v1.
+
 ### Footer (8 bytes)
 
 | Offset | Size | Field | Description |
@@ -292,4 +296,4 @@ Reserved fields enable future enhancements:
 ---
 
 *Version: 1.0*
-*Last Updated: 2026-02-05*
+*Last Updated: 2026-02-06*

@@ -6,7 +6,7 @@ Oxide is a high-throughput, content-aware archival system implemented in Rust. U
 
 ### Key Performance Features
 
-- **Zero-Copy Input**: Memory-mapped files (mmap) with SIMD-accelerated splitting (memchr)
+- **Zero-Copy Input**: Memory-mapped files (mmap) with hybrid boundary detection (`memchr` + media metadata)
 - **Boomerang Allocation**: Zero-allocation recycled buffer pool for pipeline stages
 - **Smart Transformation**: Heuristic-based selection of preprocessing filters (e.g., x86 executable → BCJ → LZMA)
 - **Elastic Parallelism**: Work-stealing thread pool for CPU-heavy BWT/LZMA operations
@@ -20,11 +20,11 @@ The pipeline consists of three distinct layers:
 ### Layer 1: Input & Discovery
 
 ```
-File System → [mmap + SIMD Scan] → Input Scanner → Raw Batch → {Work Stealing Queue}
+File System → [mmap + Hybrid Boundary Scan] → Input Scanner → Raw Batch → {Work Stealing Queue}
 ```
 
 - Uses memory-mapped I/O for zero-copy file access
-- SIMD-accelerated boundary detection using `memchr`
+- Boundary detection by mode: text (`memchr`), image row alignment (`image`), audio frame alignment (`symphonia`), raw fallback
 - Pushes batches to a work-stealing queue for dynamic load balancing
 
 ### Layer 2: The Smart Worker
@@ -153,7 +153,7 @@ use memmap2::MmapOptions;
 
 pub struct InputScanner {
     target_size: usize,
-    recycler: Receiver<Vec<u8>>, // Boomerang return channel
+    boundary_mode: BoundaryMode,
 }
 
 impl InputScanner {
@@ -167,10 +167,12 @@ impl InputScanner {
         while start < mmap.len() {
             let end = (start + self.target_size).min(mmap.len());
             
-            // SIMD-accelerated boundary detection
-            let actual_end = match detect_format(path) {
-                Format::Text => memchr(b'\n', &mmap[start..end]).unwrap_or(end),
-                _ => end,
+            // Hybrid boundary detection, chosen once per file.
+            let actual_end = match self.boundary_mode {
+                BoundaryMode::TextNewline => memchr(b'\n', &mmap[start..end]).unwrap_or(end),
+                BoundaryMode::ImageRows { row_bytes } => align_down(end, row_bytes),
+                BoundaryMode::AudioFrames { frame_bytes } => align_down(end, frame_bytes),
+                BoundaryMode::Raw => end,
             };
 
             // Zero-copy slice via Bytes
@@ -192,7 +194,7 @@ impl InputScanner {
 
 **Key Optimizations:**
 1. **Memory Mapping**: Direct kernel-managed file access, no user-space buffers
-2. **SIMD Scanning**: `memchr` uses AVX2/SSE to scan 32-64 bytes per cycle
+2. **Hybrid Boundary Scanning**: `memchr` handles text, while `image` and `symphonia` provide media-safe alignment metadata
 3. **Zero-Copy**: `Bytes` provides refcounted views into mmap regions
 
 ### 3.2 Worker Layer: The Filter Pipeline
@@ -239,9 +241,9 @@ impl Worker {
                 PreProcessingStrategy::Binary(BinaryStrategy::BCJ),
             FileFormat::Text if self.compression_algo == CompressionAlgo::Lzma => 
                 PreProcessingStrategy::Text(TextStrategy::BWT),
-            FileFormat::Audio => 
+            FileFormat::Audio if batch.boundary_hint.audio_frame_aligned =>
                 PreProcessingStrategy::Audio(AudioStrategy::LPC),
-            FileFormat::Image => 
+            FileFormat::Image if batch.boundary_hint.image_row_aligned =>
                 PreProcessingStrategy::Image(ImageStrategy::Paeth),
             _ => PreProcessingStrategy::None,
         }
@@ -255,8 +257,8 @@ impl Worker {
 |-----------|------------------|----------|-----------|
 | x86 Binary | 0x55 0x89 0xE5 prologue pattern | BCJ | Converts relative jumps to absolute, improving LZ matches |
 | Text (High Entropy) | Repetitive patterns, DNA-like sequences | BWT | Groups similar characters for better compression |
-| Audio | PCM headers, WAVE/AIFF signatures | LPC | Removes temporal redundancy via prediction |
-| Raw Image | BMP headers, uncompressed data | Paeth | Spatial prediction reduces entropy |
+| Audio | `infer` + `symphonia` metadata/packets | LPC (aligned only) | Removes temporal redundancy without splitting sample frames |
+| Image | `infer` + `image` metadata/decoder path | Paeth/LocoI (aligned only) | Spatial prediction without splitting scanlines |
 
 ### 3.3 Output Layer: The .oxz Format
 
@@ -612,6 +614,8 @@ num_cpus = "1.16"
 memmap2 = "0.9"
 bytes = "1.5"
 memchr = "2.7"
+image = "0.25"
+symphonia = { version = "0.5", features = ["all"] }
 
 # Compression
 lz4_flex = "0.11"
@@ -660,7 +664,7 @@ byteorder = "1.5"
 
 Oxide V4 transforms a simple batch compressor into an industrial-grade archival system. By combining:
 
-1. **Content-aware preprocessing** (BCJ, BWT, LPC)
+1. **Content-aware preprocessing** (BCJ, BWT, LPC with boundary gating)
 2. **Zero-copy I/O** (mmap, Bytes)
 3. **Smart resource management** (Boomerang buffers, work-stealing)
 4. **Self-describing format** (.oxz with embedded metadata)
@@ -668,4 +672,4 @@ Oxide V4 transforms a simple batch compressor into an industrial-grade archival 
 Oxide achieves compression ratios comparable to 7-Zip and ZPAQ while maintaining the performance and memory efficiency expected of modern Rust systems.
 
 **Version**: 4.0 (Smart Transformation Pipeline)
-**Last Updated**: 2026-02-05
+**Last Updated**: 2026-02-06
