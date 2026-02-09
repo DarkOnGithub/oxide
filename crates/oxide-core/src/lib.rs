@@ -1,13 +1,16 @@
 pub mod buffer;
+pub mod compression;
 pub mod core;
 pub mod error;
 pub mod format;
 pub mod io;
 pub mod pipeline;
+pub mod preprocessing;
 pub mod telemetry;
 pub mod types;
 
 pub use buffer::{BufferPool, PoolMetricsSnapshot, PooledBuffer};
+pub use compression::{apply_compression, reverse_compression};
 pub use core::{
     PoolRuntimeSnapshot, WorkStealingQueue, WorkStealingWorker, WorkerPool, WorkerPoolHandle,
     WorkerRuntimeSnapshot,
@@ -23,6 +26,7 @@ pub use pipeline::{
     ArchiveOptions, ArchiveOutcome, ArchivePipeline, ArchiveProgressSnapshot, ArchiveRunStats,
     ArchiveSourceKind, NoopProgress, ProgressSink, StatValue,
 };
+pub use preprocessing::{apply_preprocessing, reverse_preprocessing};
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use types::{
     AudioStrategy, Batch, BatchData, BinaryStrategy, CompressedBlock, CompressionAlgo, FileFormat,

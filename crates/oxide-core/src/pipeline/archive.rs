@@ -1,20 +1,20 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use bytes::Bytes;
 
 use crate::buffer::BufferPool;
 use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerPoolHandle};
 use crate::format::{
-    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
+    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, FOOTER_SIZE, FormatDetector,
+    GLOBAL_HEADER_SIZE,
 };
 use crate::io::InputScanner;
 use crate::types::{
-    Batch, CompressedBlock, CompressionAlgo, FileFormat, PreProcessingStrategy, Result,
+    AudioStrategy, Batch, BinaryStrategy, CompressedBlock, CompressionAlgo, FileFormat,
+    ImageStrategy, PreProcessingStrategy, Result, TextStrategy,
 };
 
 use super::directory::{self, DirectoryBatchSubmitter, STREAM_READ_BUFFER_SIZE};
@@ -24,6 +24,7 @@ use super::types::{
 };
 
 const SUBMISSION_DRAIN_BUDGET: usize = 128;
+const DIRECTORY_FORMAT_PROBE_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug)]
 struct PreparedInput {
@@ -149,8 +150,7 @@ impl ArchivePipeline {
         W: Write,
         S: ProgressSink + ?Sized,
     {
-        let prepared = self.prepare_directory(dir_path.as_ref())?;
-        self.archive_prepared_with(prepared, writer, &options, sink)
+        self.archive_directory_streaming_with(dir_path.as_ref(), writer, &options, sink)
     }
 
     /// Archives a file or directory and emits progress snapshots while processing.
@@ -254,19 +254,7 @@ impl ArchivePipeline {
             self.compression_algo,
         );
         let handle = worker_pool.spawn(|_worker_id, batch, pool, compression| {
-            let mut scratch = pool.acquire();
-            scratch.extend_from_slice(batch.data());
-
-            let mut data = Vec::new();
-            std::mem::swap(scratch.as_mut_vec(), &mut data);
-
-            Ok(CompressedBlock::new(
-                batch.id,
-                data,
-                PreProcessingStrategy::None,
-                compression,
-                batch.len() as u64,
-            ))
+            Self::process_batch_with_stubs(batch, pool, compression)
         });
 
         let started_at = Instant::now();
@@ -294,7 +282,9 @@ impl ArchivePipeline {
         bundle_header.extend_from_slice(&directory::DIRECTORY_BUNDLE_MAGIC);
         bundle_header.extend_from_slice(&directory::DIRECTORY_BUNDLE_VERSION.to_le_bytes());
         bundle_header.extend_from_slice(&entry_count.to_le_bytes());
-        submitter.push_bytes(&bundle_header, |batch| handle.submit(batch))?;
+        submitter.push_bytes_with_hint(&bundle_header, FileFormat::Common, |batch| {
+            handle.submit(batch)
+        })?;
         Self::drain_some_ready_results(
             &handle,
             &mut blocks,
@@ -303,24 +293,23 @@ impl ArchivePipeline {
             &mut received_count,
             SUBMISSION_DRAIN_BUDGET,
         );
-        Self::emit_archive_progress_if_due(
+        Self::emit_directory_progress_if_due(
             &handle,
-            ArchiveSourceKind::Directory,
             started_at,
             input_bytes_total,
             completed_bytes,
-            estimated_blocks_total,
             emit_every,
             &mut last_emit_at,
             false,
             sink,
-        );
+        )?;
 
         for rel_path in &discovery.directories {
             let mut encoded = Vec::with_capacity(1 + 4 + rel_path.len());
             encoded.push(0);
             directory::encode_path(&mut encoded, rel_path)?;
-            submitter.push_bytes(&encoded, |batch| handle.submit(batch))?;
+            submitter
+                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| handle.submit(batch))?;
             Self::drain_some_ready_results(
                 &handle,
                 &mut blocks,
@@ -329,18 +318,16 @@ impl ArchivePipeline {
                 &mut received_count,
                 SUBMISSION_DRAIN_BUDGET,
             );
-            Self::emit_archive_progress_if_due(
+            Self::emit_directory_progress_if_due(
                 &handle,
-                ArchiveSourceKind::Directory,
                 started_at,
                 input_bytes_total,
                 completed_bytes,
-                estimated_blocks_total,
                 emit_every,
                 &mut last_emit_at,
                 false,
                 sink,
-            );
+            )?;
         }
 
         let mut read_buffer = vec![0u8; STREAM_READ_BUFFER_SIZE];
@@ -349,16 +336,24 @@ impl ArchivePipeline {
             encoded.push(1);
             directory::encode_path(&mut encoded, &file.rel_path)?;
             encoded.extend_from_slice(&file.size.to_le_bytes());
-            submitter.push_bytes(&encoded, |batch| handle.submit(batch))?;
+            submitter
+                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| handle.submit(batch))?;
 
             let mut file_reader = fs::File::open(&file.full_path)?;
+            let mut file_format: Option<FileFormat> = None;
             loop {
                 let read = file_reader.read(&mut read_buffer)?;
                 if read == 0 {
                     break;
                 }
 
-                submitter.push_bytes(&read_buffer[..read], |batch| handle.submit(batch))?;
+                let detected = file_format.get_or_insert_with(|| {
+                    let probe_len = read.min(DIRECTORY_FORMAT_PROBE_LIMIT);
+                    FormatDetector::detect(&read_buffer[..probe_len])
+                });
+                submitter.push_bytes_with_hint(&read_buffer[..read], *detected, |batch| {
+                    handle.submit(batch)
+                })?;
                 Self::drain_some_ready_results(
                     &handle,
                     &mut blocks,
@@ -367,18 +362,16 @@ impl ArchivePipeline {
                     &mut received_count,
                     SUBMISSION_DRAIN_BUDGET,
                 );
-                Self::emit_archive_progress_if_due(
+                Self::emit_directory_progress_if_due(
                     &handle,
-                    ArchiveSourceKind::Directory,
                     started_at,
                     input_bytes_total,
                     completed_bytes,
-                    estimated_blocks_total,
                     emit_every,
                     &mut last_emit_at,
                     false,
                     sink,
-                );
+                )?;
             }
         }
 
@@ -395,11 +388,6 @@ impl ArchivePipeline {
         let expected = handle.submitted_count();
         let expected_u32 = u32::try_from(expected)
             .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
-        if expected_u32 != estimated_blocks_total {
-            return Err(crate::OxideError::InvalidFormat(
-                "directory block count mismatch",
-            ));
-        }
 
         handle.shutdown();
 
@@ -413,18 +401,16 @@ impl ArchivePipeline {
                     &mut received_count,
                 );
             }
-            Self::emit_archive_progress_if_due(
+            Self::emit_directory_progress_if_due(
                 &handle,
-                ArchiveSourceKind::Directory,
                 started_at,
                 input_bytes_total,
                 completed_bytes,
-                estimated_blocks_total,
                 emit_every,
                 &mut last_emit_at,
                 options.emit_final_progress && received_count == expected,
                 sink,
-            );
+            )?;
         }
 
         let final_runtime = handle.runtime_snapshot();
@@ -493,6 +479,33 @@ impl ArchivePipeline {
             });
             *last_emit_at = Instant::now();
         }
+    }
+
+    fn emit_directory_progress_if_due<S: ProgressSink + ?Sized>(
+        handle: &WorkerPoolHandle,
+        started_at: Instant,
+        input_bytes_total: u64,
+        input_bytes_completed: u64,
+        emit_every: Duration,
+        last_emit_at: &mut Instant,
+        force: bool,
+        sink: &mut S,
+    ) -> Result<()> {
+        let blocks_total = u32::try_from(handle.submitted_count())
+            .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
+        Self::emit_archive_progress_if_due(
+            handle,
+            ArchiveSourceKind::Directory,
+            started_at,
+            input_bytes_total,
+            input_bytes_completed,
+            blocks_total,
+            emit_every,
+            last_emit_at,
+            force,
+            sink,
+        );
+        Ok(())
     }
 
     fn drain_some_ready_results(
@@ -598,20 +611,7 @@ impl ArchivePipeline {
         );
 
         let handle = worker_pool.spawn(|_worker_id, batch, pool, compression| {
-            let mut scratch = pool.acquire();
-            scratch.extend_from_slice(batch.data());
-
-            // Move the pooled Vec out without allocating.
-            let mut data = Vec::new();
-            std::mem::swap(scratch.as_mut_vec(), &mut data);
-
-            Ok(CompressedBlock::new(
-                batch.id,
-                data,
-                PreProcessingStrategy::None,
-                compression,
-                batch.len() as u64,
-            ))
+            Self::process_batch_with_stubs(batch, pool, compression)
         });
 
         for batch in batches {
@@ -702,6 +702,41 @@ impl ArchivePipeline {
         Ok(ArchiveOutcome { writer, stats })
     }
 
+    fn process_batch_with_stubs(
+        batch: Batch,
+        pool: &BufferPool,
+        compression: CompressionAlgo,
+    ) -> Result<CompressedBlock> {
+        let pre_proc = Self::select_preprocessing_strategy(batch.file_type_hint);
+        let preprocessed = crate::preprocessing::apply_preprocessing(batch.data(), &pre_proc)?;
+        let compressed = crate::compression::apply_compression(&preprocessed, compression)?;
+
+        let mut scratch = pool.acquire();
+        scratch.extend_from_slice(&compressed);
+
+        // Move the pooled Vec out without allocating.
+        let mut data = Vec::new();
+        std::mem::swap(scratch.as_mut_vec(), &mut data);
+
+        Ok(CompressedBlock::new(
+            batch.id,
+            data,
+            pre_proc,
+            compression,
+            batch.len() as u64,
+        ))
+    }
+
+    fn select_preprocessing_strategy(file_type_hint: FileFormat) -> PreProcessingStrategy {
+        match file_type_hint {
+            FileFormat::Text => PreProcessingStrategy::Text(TextStrategy::Bwt),
+            FileFormat::Image => PreProcessingStrategy::Image(ImageStrategy::Paeth),
+            FileFormat::Audio => PreProcessingStrategy::Audio(AudioStrategy::Lpc),
+            FileFormat::Binary => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
+            FileFormat::Common => PreProcessingStrategy::None,
+        }
+    }
+
     fn prepare_file(&self, path: &Path) -> Result<PreparedInput> {
         let batches = self.scanner.scan_file(path)?;
         let input_bytes_total = batches.iter().map(|batch| batch.len() as u64).sum();
@@ -710,61 +745,5 @@ impl ArchivePipeline {
             batches,
             input_bytes_total,
         })
-    }
-
-    fn prepare_directory(&self, root: &Path) -> Result<PreparedInput> {
-        if !root.is_dir() {
-            return Err(crate::OxideError::InvalidFormat(
-                "archive_directory expects a directory path",
-            ));
-        }
-
-        let entries = directory::collect_directory_entries(root)?;
-        let bundle = directory::encode_directory_bundle(entries)?;
-        let input_bytes_total = bundle.len() as u64;
-        let batches = self.bytes_to_batches(root.to_path_buf(), bundle, FileFormat::Binary);
-
-        Ok(PreparedInput {
-            source_kind: ArchiveSourceKind::Directory,
-            batches,
-            input_bytes_total,
-        })
-    }
-
-    fn bytes_to_batches(
-        &self,
-        source_path: PathBuf,
-        bytes: Vec<u8>,
-        file_type_hint: FileFormat,
-    ) -> Vec<Batch> {
-        let data = Bytes::from(bytes);
-        let mut batches = Vec::new();
-        let mut start = 0usize;
-        let mut id = 0usize;
-        let block_size = self.scanner.target_block_size();
-
-        while start < data.len() {
-            let end = start.saturating_add(block_size).min(data.len());
-            let chunk = data.slice(start..end);
-            batches.push(Batch::with_hint(
-                id,
-                source_path.clone(),
-                chunk,
-                file_type_hint,
-            ));
-            start = end;
-            id += 1;
-        }
-
-        if batches.is_empty() {
-            batches.push(Batch::with_hint(
-                0,
-                source_path,
-                Bytes::new(),
-                file_type_hint,
-            ));
-        }
-
-        batches
     }
 }

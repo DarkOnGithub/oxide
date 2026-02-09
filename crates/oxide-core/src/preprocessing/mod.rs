@@ -1,4 +1,6 @@
-use crate::{AudioStrategy, BinaryStrategy, ImageStrategy, PreProcessingStrategy, Result, TextStrategy};
+use crate::{
+    AudioStrategy, BinaryStrategy, ImageStrategy, PreProcessingStrategy, Result, TextStrategy,
+};
 
 pub mod audio_lpc;
 pub mod binary_bcj;

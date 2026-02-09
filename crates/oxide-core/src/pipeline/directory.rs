@@ -3,7 +3,6 @@ use std::path::{Component, Path, PathBuf};
 
 use bytes::Bytes;
 use jwalk::WalkDir;
-use rayon::prelude::*;
 
 use crate::types::{Batch, FileFormat, Result};
 
@@ -12,7 +11,6 @@ use super::types::ArchiveSourceKind;
 pub(super) const DIRECTORY_BUNDLE_MAGIC: [u8; 4] = *b"OXDB";
 pub(super) const DIRECTORY_BUNDLE_VERSION: u16 = 1;
 pub(super) const SOURCE_KIND_DIRECTORY_FLAG: u32 = 1 << 0;
-const PARALLEL_DIRECTORY_READ_THRESHOLD: usize = 1024;
 pub(super) const STREAM_READ_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -41,6 +39,7 @@ pub(super) struct DirectoryBatchSubmitter {
     block_size: usize,
     next_block_id: usize,
     pending: Vec<u8>,
+    pending_format: Option<FileFormat>,
 }
 
 impl DirectoryBatchSubmitter {
@@ -50,14 +49,27 @@ impl DirectoryBatchSubmitter {
             block_size: block_size.max(1),
             next_block_id: 0,
             pending: Vec::with_capacity(block_size.max(1)),
+            pending_format: None,
         }
     }
 
-    pub(super) fn push_bytes<F>(&mut self, mut bytes: &[u8], mut submit: F) -> Result<()>
+    pub(super) fn push_bytes_with_hint<F>(
+        &mut self,
+        mut bytes: &[u8],
+        file_type_hint: FileFormat,
+        mut submit: F,
+    ) -> Result<()>
     where
         F: FnMut(Batch) -> Result<()>,
     {
         while !bytes.is_empty() {
+            if self.pending_format != Some(file_type_hint) {
+                if !self.pending.is_empty() {
+                    self.flush_pending(&mut submit)?;
+                }
+                self.pending_format = Some(file_type_hint);
+            }
+
             let room = self.block_size.saturating_sub(self.pending.len()).max(1);
             let take = room.min(bytes.len());
             self.pending.extend_from_slice(&bytes[..take]);
@@ -85,15 +97,17 @@ impl DirectoryBatchSubmitter {
     where
         F: FnMut(Batch) -> Result<()>,
     {
+        let file_type_hint = self.pending_format.unwrap_or(FileFormat::Common);
         let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(self.block_size));
         let batch = Batch::with_hint(
             self.next_block_id,
             self.source_path.clone(),
             Bytes::from(chunk),
-            FileFormat::Binary,
+            file_type_hint,
         );
         submit(batch)?;
         self.next_block_id += 1;
+        self.pending_format = None;
         Ok(())
     }
 }
@@ -238,101 +252,11 @@ pub(super) fn block_count_for_bytes(total_bytes: u64, block_size: usize) -> Resu
     u32::try_from(blocks).map_err(|_| crate::OxideError::InvalidFormat("too many blocks"))
 }
 
-pub(super) fn collect_directory_entries(root: &Path) -> Result<Vec<DirectoryBundleEntry>> {
-    let mut directories = Vec::<PathBuf>::new();
-    let mut files = Vec::<PathBuf>::new();
-
-    for entry in WalkDir::new(root) {
-        let entry = entry.map_err(anyhow::Error::from)?;
-        let path = entry.path();
-        if path == root {
-            continue;
-        }
-
-        let rel_path = path
-            .strip_prefix(root)
-            .map_err(|_| crate::OxideError::InvalidFormat("invalid relative path"))?
-            .to_path_buf();
-
-        if entry.file_type().is_dir() {
-            directories.push(rel_path);
-        } else if entry.file_type().is_file() {
-            files.push(rel_path);
-        } else {
-            return Err(crate::OxideError::InvalidFormat(
-                "directory archive supports regular files/directories only",
-            ));
-        }
-    }
-    directories.sort();
-    files.sort();
-
-    let mut entries = Vec::with_capacity(directories.len() + files.len());
-    for directory in directories {
-        let rel_path = relative_path_to_utf8(&directory)?;
-        entries.push(DirectoryBundleEntry::Directory { rel_path });
-    }
-
-    if files.len() >= PARALLEL_DIRECTORY_READ_THRESHOLD {
-        let parallel_entries: std::result::Result<Vec<DirectoryBundleEntry>, crate::OxideError> =
-            files
-                .par_iter()
-                .map(|file_rel| {
-                    let rel_path = relative_path_to_utf8(file_rel)?;
-                    let full_path = root.join(file_rel);
-                    let data = fs::read(full_path)?;
-                    Ok(DirectoryBundleEntry::File { rel_path, data })
-                })
-                .collect();
-        entries.extend(parallel_entries?);
-    } else {
-        for file_rel in files {
-            let rel_path = relative_path_to_utf8(&file_rel)?;
-            let full_path = root.join(&file_rel);
-            let data = fs::read(full_path)?;
-            entries.push(DirectoryBundleEntry::File { rel_path, data });
-        }
-    }
-
-    Ok(entries)
-}
-
 fn relative_path_to_utf8(path: &Path) -> Result<String> {
     let raw = path.to_str().ok_or(crate::OxideError::InvalidFormat(
         "non-utf8 path not supported",
     ))?;
     Ok(raw.replace('\\', "/"))
-}
-
-pub(super) fn encode_directory_bundle(entries: Vec<DirectoryBundleEntry>) -> Result<Vec<u8>> {
-    let entry_count = u32::try_from(entries.len())
-        .map_err(|_| crate::OxideError::InvalidFormat("directory entry count overflow"))?;
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&DIRECTORY_BUNDLE_MAGIC);
-    out.extend_from_slice(&DIRECTORY_BUNDLE_VERSION.to_le_bytes());
-    out.extend_from_slice(&entry_count.to_le_bytes());
-
-    for entry in entries {
-        match entry {
-            DirectoryBundleEntry::Directory { rel_path } => {
-                out.push(0);
-                encode_path(&mut out, &rel_path)?;
-            }
-            DirectoryBundleEntry::File { rel_path, data } => {
-                out.push(1);
-                encode_path(&mut out, &rel_path)?;
-                out.extend_from_slice(
-                    &(u64::try_from(data.len())
-                        .map_err(|_| crate::OxideError::InvalidFormat("file size overflow"))?)
-                    .to_le_bytes(),
-                );
-                out.extend_from_slice(&data);
-            }
-        }
-    }
-
-    Ok(out)
 }
 
 pub(super) fn encode_path(out: &mut Vec<u8>, rel_path: &str) -> Result<()> {
