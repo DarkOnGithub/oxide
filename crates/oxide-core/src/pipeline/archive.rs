@@ -277,7 +277,7 @@ impl ArchivePipeline {
         let mut first_error: Option<crate::OxideError> = None;
         let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
         let mut next_write_id = 0usize;
-        let mut output_bytes_total = (GLOBAL_HEADER_SIZE + FOOTER_SIZE) as u64;
+        let mut output_bytes_written = GLOBAL_HEADER_SIZE as u64;
 
         let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.buffer_pool));
         archive_writer.write_global_header_with_flags(
@@ -296,7 +296,7 @@ impl ArchivePipeline {
                     &mut archive_writer,
                     &mut pending_write,
                     &mut next_write_id,
-                    &mut output_bytes_total,
+                    &mut output_bytes_written,
                     &mut completed_bytes,
                     &mut first_error,
                     &mut received_count,
@@ -307,6 +307,7 @@ impl ArchivePipeline {
                     started_at,
                     input_bytes_total,
                     completed_bytes,
+                    output_bytes_written,
                     block_count,
                     emit_every,
                     &mut last_emit_at,
@@ -322,7 +323,7 @@ impl ArchivePipeline {
                 &mut archive_writer,
                 &mut pending_write,
                 &mut next_write_id,
-                &mut output_bytes_total,
+                &mut output_bytes_written,
                 &mut completed_bytes,
                 &mut first_error,
                 &mut received_count,
@@ -334,6 +335,7 @@ impl ArchivePipeline {
                 started_at,
                 input_bytes_total,
                 completed_bytes,
+                output_bytes_written,
                 block_count,
                 emit_every,
                 &mut last_emit_at,
@@ -397,7 +399,7 @@ impl ArchivePipeline {
             &mut archive_writer,
             &mut pending_write,
             &mut next_write_id,
-            &mut output_bytes_total,
+            &mut output_bytes_written,
             &mut completed_bytes,
             &mut first_error,
             &mut received_count,
@@ -424,7 +426,7 @@ impl ArchivePipeline {
                 &mut archive_writer,
                 &mut pending_write,
                 &mut next_write_id,
-                &mut output_bytes_total,
+                &mut output_bytes_written,
                 &mut completed_bytes,
                 &mut first_error,
                 &mut received_count,
@@ -435,6 +437,7 @@ impl ArchivePipeline {
                 started_at,
                 input_bytes_total,
                 completed_bytes,
+                output_bytes_written,
                 block_count,
                 emit_every,
                 &mut last_emit_at,
@@ -457,14 +460,15 @@ impl ArchivePipeline {
         }
 
         let writer = archive_writer.write_footer()?;
+        output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
         let extensions =
-            Self::build_stats_extensions(input_bytes_total, output_bytes_total, &final_runtime);
+            Self::build_stats_extensions(input_bytes_total, output_bytes_written, &final_runtime);
 
         let stats = ArchiveRunStats {
             source_kind: ArchiveSourceKind::Directory,
             elapsed: started_at.elapsed(),
             input_bytes_total,
-            output_bytes_total,
+            output_bytes_total: output_bytes_written,
             blocks_total: block_count,
             blocks_completed: final_runtime.completed as u32,
             workers: final_runtime.workers,
@@ -480,6 +484,7 @@ impl ArchivePipeline {
         started_at: Instant,
         input_bytes_total: u64,
         input_bytes_completed: u64,
+        output_bytes_completed: u64,
         blocks_total: u32,
         emit_every: Duration,
         last_emit_at: &mut Instant,
@@ -493,6 +498,7 @@ impl ArchivePipeline {
                 elapsed: started_at.elapsed(),
                 input_bytes_total,
                 input_bytes_completed: input_bytes_completed.min(input_bytes_total),
+                output_bytes_completed,
                 blocks_total,
                 blocks_completed: runtime.completed as u32,
                 blocks_pending: runtime.pending as u32,
@@ -513,7 +519,7 @@ impl ArchivePipeline {
         archive_writer: &mut ArchiveWriter<W>,
         pending_write: &mut BTreeMap<usize, CompressedBlock>,
         next_write_id: &mut usize,
-        output_bytes_total: &mut u64,
+        output_bytes_written: &mut u64,
         completed_bytes: &mut u64,
         first_error: &mut Option<crate::OxideError>,
         received_count: &mut usize,
@@ -527,7 +533,7 @@ impl ArchivePipeline {
                     archive_writer,
                     pending_write,
                     next_write_id,
-                    output_bytes_total,
+                    output_bytes_written,
                     completed_bytes,
                     first_error,
                 );
@@ -545,7 +551,7 @@ impl ArchivePipeline {
         archive_writer: &mut ArchiveWriter<W>,
         pending_write: &mut BTreeMap<usize, CompressedBlock>,
         next_write_id: &mut usize,
-        output_bytes_total: &mut u64,
+        output_bytes_written: &mut u64,
         completed_bytes: &mut u64,
         first_error: &mut Option<crate::OxideError>,
         received_count: &mut usize,
@@ -556,7 +562,7 @@ impl ArchivePipeline {
                 archive_writer,
                 pending_write,
                 next_write_id,
-                output_bytes_total,
+                output_bytes_written,
                 completed_bytes,
                 first_error,
             );
@@ -569,7 +575,7 @@ impl ArchivePipeline {
         archive_writer: &mut ArchiveWriter<W>,
         pending_write: &mut BTreeMap<usize, CompressedBlock>,
         next_write_id: &mut usize,
-        output_bytes_total: &mut u64,
+        output_bytes_written: &mut u64,
         completed_bytes: &mut u64,
         first_error: &mut Option<crate::OxideError>,
     ) {
@@ -589,7 +595,7 @@ impl ArchivePipeline {
                 }
 
                 while let Some(ready) = pending_write.remove(next_write_id) {
-                    *output_bytes_total = (*output_bytes_total)
+                    *output_bytes_written = (*output_bytes_written)
                         .saturating_add(BLOCK_HEADER_SIZE as u64)
                         .saturating_add(ready.data.len() as u64);
                     if let Err(error) = archive_writer.write_owned_block(ready) {
@@ -672,7 +678,7 @@ impl ArchivePipeline {
             block_count,
             directory::source_kind_flags(source_kind),
         )?;
-        let mut output_bytes_total = (GLOBAL_HEADER_SIZE + FOOTER_SIZE) as u64;
+        let mut output_bytes_written = GLOBAL_HEADER_SIZE as u64;
         let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
         let mut next_write_id = 0usize;
 
@@ -700,7 +706,7 @@ impl ArchivePipeline {
                 &mut archive_writer,
                 &mut pending_write,
                 &mut next_write_id,
-                &mut output_bytes_total,
+                &mut output_bytes_written,
                 &mut completed_bytes,
                 &mut first_error,
                 &mut received_count,
@@ -720,6 +726,7 @@ impl ArchivePipeline {
                         started_at,
                         input_bytes_total,
                         completed_bytes,
+                        output_bytes_written,
                         block_count,
                         emit_every,
                         &mut last_emit_at,
@@ -736,7 +743,7 @@ impl ArchivePipeline {
                 &mut archive_writer,
                 &mut pending_write,
                 &mut next_write_id,
-                &mut output_bytes_total,
+                &mut output_bytes_written,
                 &mut completed_bytes,
                 &mut first_error,
                 &mut received_count,
@@ -747,6 +754,7 @@ impl ArchivePipeline {
                 started_at,
                 input_bytes_total,
                 completed_bytes,
+                output_bytes_written,
                 block_count,
                 emit_every,
                 &mut last_emit_at,
@@ -769,14 +777,15 @@ impl ArchivePipeline {
         }
 
         let writer = archive_writer.write_footer()?;
+        output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
         let extensions =
-            Self::build_stats_extensions(input_bytes_total, output_bytes_total, &final_runtime);
+            Self::build_stats_extensions(input_bytes_total, output_bytes_written, &final_runtime);
 
         let stats = ArchiveRunStats {
             source_kind,
             elapsed: started_at.elapsed(),
             input_bytes_total,
-            output_bytes_total,
+            output_bytes_total: output_bytes_written,
             blocks_total: block_count,
             blocks_completed: final_runtime.completed as u32,
             workers: final_runtime.workers,

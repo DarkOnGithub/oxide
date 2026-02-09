@@ -15,6 +15,7 @@ pub struct ArchiveProgressSnapshot {
     pub elapsed: Duration,
     pub input_bytes_total: u64,
     pub input_bytes_completed: u64,
+    pub output_bytes_completed: u64,
     pub blocks_total: u32,
     pub blocks_completed: u32,
     pub blocks_pending: u32,

@@ -157,9 +157,11 @@ fn archive_command(
     let output_file = File::create(&output_path)?;
     let progress_interval = Duration::from_millis(stats_interval_ms.max(50));
 
-    let mut last_bytes = 0u64;
+    let mut last_input_bytes = 0u64;
+    let mut last_output_bytes = 0u64;
     let mut last_elapsed = Duration::ZERO;
-    let mut peak_instant_bps = 0.0f64;
+    let mut peak_read_bps = 0.0f64;
+    let mut peak_write_bps = 0.0f64;
     let discovery_started = Instant::now();
     let mut discovery_reported = false;
     eprintln!("discovering input and planning blocks...");
@@ -180,22 +182,31 @@ fn archive_command(
             let elapsed = snapshot.elapsed;
             let total = snapshot.input_bytes_total;
             let done = snapshot.input_bytes_completed.min(total);
+            let written = snapshot.output_bytes_completed;
             let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
 
-            let avg_bps = done as f64 / elapsed_secs;
-            let delta_bytes = done.saturating_sub(last_bytes);
+            let read_avg_bps = done as f64 / elapsed_secs;
+            let write_avg_bps = written as f64 / elapsed_secs;
+            let delta_read_bytes = done.saturating_sub(last_input_bytes);
+            let delta_write_bytes = written.saturating_sub(last_output_bytes);
             let delta_elapsed = elapsed.saturating_sub(last_elapsed);
             let delta_secs = delta_elapsed.as_secs_f64();
-            let instant_bps = if delta_secs > 0.0 {
-                delta_bytes as f64 / delta_secs
+            let read_instant_bps = if delta_secs > 0.0 {
+                delta_read_bytes as f64 / delta_secs
             } else {
-                avg_bps
+                read_avg_bps
             };
-            peak_instant_bps = peak_instant_bps.max(instant_bps);
+            let write_instant_bps = if delta_secs > 0.0 {
+                delta_write_bytes as f64 / delta_secs
+            } else {
+                write_avg_bps
+            };
+            peak_read_bps = peak_read_bps.max(read_instant_bps);
+            peak_write_bps = peak_write_bps.max(write_instant_bps);
 
             let remaining = total.saturating_sub(done);
-            let eta = if avg_bps > 0.0 {
-                Duration::from_secs_f64(remaining as f64 / avg_bps)
+            let eta = if read_avg_bps > 0.0 {
+                Duration::from_secs_f64(remaining as f64 / read_avg_bps)
             } else {
                 Duration::from_secs(0)
             };
@@ -213,13 +224,15 @@ fn archive_command(
                 .count();
 
             let line = format!(
-                "\r\x1b[2K[{progress:6.2}%] blocks {}/{} | data {} / {} | avg {}/s | inst {}/s | ETA {} | pending {} | workers {}/{}",
+                "\r\x1b[2K[{progress:6.2}%] blocks {}/{} | data {} / {} | rd avg {}/s inst {}/s | wr avg {}/s inst {}/s | ETA {} | pending {} | workers {}/{}",
                 snapshot.blocks_completed,
                 snapshot.blocks_total,
                 format_bytes(done),
                 format_bytes(total),
-                format_rate(avg_bps),
-                format_rate(instant_bps),
+                format_rate(read_avg_bps),
+                format_rate(read_instant_bps),
+                format_rate(write_avg_bps),
+                format_rate(write_instant_bps),
                 format_duration(eta),
                 snapshot.blocks_pending,
                 active_workers,
@@ -228,7 +241,8 @@ fn archive_command(
             eprint!("{line}");
             let _ = io::stderr().flush();
 
-            last_bytes = done;
+            last_input_bytes = done;
+            last_output_bytes = written;
             last_elapsed = elapsed;
         },
     )?;
@@ -245,7 +259,8 @@ fn archive_command(
         &input,
         &output_path,
         compression,
-        peak_instant_bps,
+        peak_read_bps,
+        peak_write_bps,
         &stats,
         &buffer_pool,
     );
@@ -422,12 +437,14 @@ fn print_summary(
     input: &Path,
     output: &Path,
     compression: CompressionAlgo,
-    peak_instant_bps: f64,
+    peak_read_bps: f64,
+    peak_write_bps: f64,
     stats: &oxide_core::ArchiveRunStats,
     buffer_pool: &BufferPool,
 ) {
     let elapsed_secs = stats.elapsed.as_secs_f64().max(1e-6);
-    let avg_bps = stats.input_bytes_total as f64 / elapsed_secs;
+    let read_avg_bps = stats.input_bytes_total as f64 / elapsed_secs;
+    let write_avg_bps = stats.output_bytes_total as f64 / elapsed_secs;
     let out_ratio = if stats.input_bytes_total > 0 {
         stats.output_bytes_total as f64 / stats.input_bytes_total as f64
     } else {
@@ -451,8 +468,12 @@ fn print_summary(
     println!("  input bytes: {}", format_bytes(stats.input_bytes_total));
     println!("  output bytes: {}", format_bytes(stats.output_bytes_total));
     println!("  expansion ratio: {out_ratio:.3}x");
-    println!("  throughput avg: {}/s", format_rate(avg_bps));
-    println!("  throughput peak: {}/s", format_rate(peak_instant_bps));
+    println!("  throughput avg: {}/s", format_rate(read_avg_bps));
+    println!("  throughput peak: {}/s", format_rate(peak_read_bps));
+    println!("  disk read avg: {}/s", format_rate(read_avg_bps));
+    println!("  disk read peak: {}/s", format_rate(peak_read_bps));
+    println!("  disk write avg: {}/s", format_rate(write_avg_bps));
+    println!("  disk write peak: {}/s", format_rate(peak_write_bps));
     println!(
         "  blocks: {} total (avg block {})",
         stats.blocks_total,
