@@ -8,7 +8,7 @@ pub mod oxz;
 
 pub use detector::FormatDetector;
 pub use oxz::{
-    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, BlockHeader, BlockIterator,
-    DEFAULT_REORDER_PENDING_LIMIT, FOOTER_SIZE, Footer, GLOBAL_HEADER_SIZE, GlobalHeader,
-    OXZ_MAGIC, OXZ_VERSION, ReorderBuffer,
+    ArchiveReader, ArchiveWriter, BlockHeader, BlockIterator, Footer, GlobalHeader, ReorderBuffer,
+    BLOCK_HEADER_SIZE, DEFAULT_REORDER_PENDING_LIMIT, FOOTER_SIZE, GLOBAL_HEADER_SIZE, OXZ_MAGIC,
+    OXZ_VERSION,
 };

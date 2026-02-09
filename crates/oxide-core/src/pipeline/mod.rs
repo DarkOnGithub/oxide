@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -49,6 +50,38 @@ pub struct ArchiveProgressSnapshot {
     pub runtime: PoolRuntimeSnapshot,
 }
 
+/// Extensible metric value attached to archive run stats.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatValue {
+    U64(u64),
+    F64(f64),
+    Duration(Duration),
+    Text(String),
+}
+
+/// Runtime options for archive operations.
+#[derive(Debug, Clone)]
+pub struct ArchiveOptions {
+    pub progress_interval: Duration,
+    pub emit_final_progress: bool,
+}
+
+impl Default for ArchiveOptions {
+    fn default() -> Self {
+        Self {
+            progress_interval: Duration::from_millis(250),
+            emit_final_progress: true,
+        }
+    }
+}
+
+/// Full output from archive operations that track run metadata.
+#[derive(Debug)]
+pub struct ArchiveOutcome<W> {
+    pub writer: W,
+    pub stats: ArchiveRunStats,
+}
+
 #[derive(Debug, Clone)]
 pub struct ArchiveRunStats {
     pub source_kind: ArchiveSourceKind,
@@ -58,6 +91,66 @@ pub struct ArchiveRunStats {
     pub blocks_total: u32,
     pub blocks_completed: u32,
     pub workers: Vec<WorkerRuntimeSnapshot>,
+    pub extensions: BTreeMap<String, StatValue>,
+}
+
+impl ArchiveRunStats {
+    pub fn extension(&self, key: &str) -> Option<&StatValue> {
+        self.extensions.get(key)
+    }
+
+    pub fn extension_u64(&self, key: &str) -> Option<u64> {
+        match self.extension(key) {
+            Some(StatValue::U64(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn extension_f64(&self, key: &str) -> Option<f64> {
+        match self.extension(key) {
+            Some(StatValue::F64(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn extension_duration(&self, key: &str) -> Option<Duration> {
+        match self.extension(key) {
+            Some(StatValue::Duration(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn extension_text(&self, key: &str) -> Option<&str> {
+        match self.extension(key) {
+            Some(StatValue::Text(value)) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+/// Progress hook for archive operations.
+pub trait ProgressSink {
+    fn on_progress(&mut self, snapshot: ArchiveProgressSnapshot);
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopProgress;
+
+impl ProgressSink for NoopProgress {
+    fn on_progress(&mut self, _snapshot: ArchiveProgressSnapshot) {}
+}
+
+struct FnProgressSink<F> {
+    callback: F,
+}
+
+impl<F> ProgressSink for FnProgressSink<F>
+where
+    F: FnMut(ArchiveProgressSnapshot),
+{
+    fn on_progress(&mut self, snapshot: ArchiveProgressSnapshot) {
+        (self.callback)(snapshot);
+    }
 }
 
 #[derive(Debug)]
@@ -177,9 +270,26 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write,
     {
+        let mut sink = NoopProgress;
+        self.archive_file_with(path, writer, ArchiveOptions::default(), &mut sink)
+            .map(|outcome| outcome.writer)
+    }
+
+    /// Archives a file and returns detailed run stats.
+    pub fn archive_file_with<P, W, S>(
+        &self,
+        path: P,
+        writer: W,
+        options: ArchiveOptions,
+        sink: &mut S,
+    ) -> Result<ArchiveOutcome<W>>
+    where
+        P: AsRef<Path>,
+        W: Write,
+        S: ProgressSink + ?Sized,
+    {
         let prepared = self.prepare_file(path.as_ref())?;
-        self.archive_prepared(prepared, writer)
-            .map(|(writer, _)| writer)
+        self.archive_prepared_with(prepared, writer, &options, sink)
     }
 
     /// Archives either a single file or a directory tree.
@@ -188,9 +298,36 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write,
     {
-        let prepared = self.prepare_path(path.as_ref())?;
-        self.archive_prepared(prepared, writer)
-            .map(|(writer, _)| writer)
+        let mut sink = NoopProgress;
+        self.archive_path_with(path, writer, ArchiveOptions::default(), &mut sink)
+            .map(|outcome| outcome.writer)
+    }
+
+    /// Archives a file or directory and returns detailed run stats.
+    pub fn archive_path_with<P, W, S>(
+        &self,
+        path: P,
+        writer: W,
+        options: ArchiveOptions,
+        sink: &mut S,
+    ) -> Result<ArchiveOutcome<W>>
+    where
+        P: AsRef<Path>,
+        W: Write,
+        S: ProgressSink + ?Sized,
+    {
+        let path = path.as_ref();
+        let metadata = fs::metadata(path)?;
+        if metadata.is_file() {
+            let prepared = self.prepare_file(path)?;
+            self.archive_prepared_with(prepared, writer, &options, sink)
+        } else if metadata.is_dir() {
+            self.archive_directory_streaming_with(path, writer, &options, sink)
+        } else {
+            Err(crate::OxideError::InvalidFormat(
+                "path must be a file or directory",
+            ))
+        }
     }
 
     /// Archives a directory tree as a single OXZ payload.
@@ -199,9 +336,26 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write,
     {
+        let mut sink = NoopProgress;
+        self.archive_directory_with(dir_path, writer, ArchiveOptions::default(), &mut sink)
+            .map(|outcome| outcome.writer)
+    }
+
+    /// Archives a directory tree and returns detailed run stats.
+    pub fn archive_directory_with<P, W, S>(
+        &self,
+        dir_path: P,
+        writer: W,
+        options: ArchiveOptions,
+        sink: &mut S,
+    ) -> Result<ArchiveOutcome<W>>
+    where
+        P: AsRef<Path>,
+        W: Write,
+        S: ProgressSink + ?Sized,
+    {
         let prepared = self.prepare_directory(dir_path.as_ref())?;
-        self.archive_prepared(prepared, writer)
-            .map(|(writer, _)| writer)
+        self.archive_prepared_with(prepared, writer, &options, sink)
     }
 
     /// Archives a file or directory and emits progress snapshots while processing.
@@ -217,23 +371,15 @@ impl ArchivePipeline {
         W: Write,
         F: FnMut(ArchiveProgressSnapshot),
     {
-        let path = path.as_ref();
-        let metadata = fs::metadata(path)?;
-        if metadata.is_file() {
-            let prepared = self.prepare_file(path)?;
-            self.archive_prepared_with_progress(prepared, writer, progress_interval, on_progress)
-        } else if metadata.is_dir() {
-            self.archive_directory_streaming_with_progress(
-                path,
-                writer,
-                progress_interval,
-                on_progress,
-            )
-        } else {
-            Err(crate::OxideError::InvalidFormat(
-                "path must be a file or directory",
-            ))
-        }
+        let options = ArchiveOptions {
+            progress_interval,
+            emit_final_progress: true,
+        };
+        let mut sink = FnProgressSink {
+            callback: on_progress,
+        };
+        self.archive_path_with(path, writer, options, &mut sink)
+            .map(|outcome| (outcome.writer, outcome.stats))
     }
 
     /// Extracts all block payload bytes from an OXZ archive in block order.
@@ -338,16 +484,13 @@ impl ArchivePipeline {
         }
     }
 
-    fn archive_directory_streaming_with_progress<W: Write, F>(
+    fn archive_directory_streaming_with<W: Write, S: ProgressSink + ?Sized>(
         &self,
         root: &Path,
         writer: W,
-        progress_interval: Duration,
-        mut on_progress: F,
-    ) -> Result<(W, ArchiveRunStats)>
-    where
-        F: FnMut(ArchiveProgressSnapshot),
-    {
+        options: &ArchiveOptions,
+        sink: &mut S,
+    ) -> Result<ArchiveOutcome<W>> {
         let discovery = self.discover_directory_tree(root)?;
         let input_bytes_total = discovery.input_bytes_total;
         let estimated_blocks_total =
@@ -376,7 +519,7 @@ impl ArchivePipeline {
 
         let started_at = Instant::now();
         let mut last_emit_at = Instant::now();
-        let emit_every = progress_interval.max(Duration::from_millis(100));
+        let emit_every = options.progress_interval.max(Duration::from_millis(100));
         let mut completed_bytes = 0u64;
         let mut received_count = 0usize;
         let mut blocks = Vec::with_capacity(estimated_blocks_total as usize);
@@ -418,7 +561,7 @@ impl ArchivePipeline {
             emit_every,
             &mut last_emit_at,
             false,
-            &mut on_progress,
+            sink,
         );
 
         for rel_path in &discovery.directories {
@@ -444,7 +587,7 @@ impl ArchivePipeline {
                 emit_every,
                 &mut last_emit_at,
                 false,
-                &mut on_progress,
+                sink,
             );
         }
 
@@ -482,7 +625,7 @@ impl ArchivePipeline {
                     emit_every,
                     &mut last_emit_at,
                     false,
-                    &mut on_progress,
+                    sink,
                 );
             }
         }
@@ -527,8 +670,8 @@ impl ArchivePipeline {
                 estimated_blocks_total,
                 emit_every,
                 &mut last_emit_at,
-                received_count == expected,
-                &mut on_progress,
+                options.emit_final_progress && received_count == expected,
+                sink,
             );
         }
 
@@ -555,6 +698,8 @@ impl ArchivePipeline {
             archive_writer.write_owned_block(block)?;
         }
         let writer = archive_writer.write_footer()?;
+        let extensions =
+            Self::build_stats_extensions(input_bytes_total, output_bytes_total, &final_runtime);
 
         let stats = ArchiveRunStats {
             source_kind: ArchiveSourceKind::Directory,
@@ -564,9 +709,10 @@ impl ArchivePipeline {
             blocks_total: expected_u32,
             blocks_completed: final_runtime.completed as u32,
             workers: final_runtime.workers,
+            extensions,
         };
 
-        Ok((writer, stats))
+        Ok(ArchiveOutcome { writer, stats })
     }
 
     fn discover_directory_tree(&self, root: &Path) -> Result<DirectoryDiscovery> {
@@ -663,7 +809,7 @@ impl ArchivePipeline {
         u32::try_from(blocks).map_err(|_| crate::OxideError::InvalidFormat("too many blocks"))
     }
 
-    fn emit_archive_progress_if_due<F>(
+    fn emit_archive_progress_if_due<S: ProgressSink + ?Sized>(
         handle: &WorkerPoolHandle,
         source_kind: ArchiveSourceKind,
         started_at: Instant,
@@ -673,13 +819,11 @@ impl ArchivePipeline {
         emit_every: Duration,
         last_emit_at: &mut Instant,
         force: bool,
-        on_progress: &mut F,
-    ) where
-        F: FnMut(ArchiveProgressSnapshot),
-    {
+        sink: &mut S,
+    ) {
         if force || last_emit_at.elapsed() >= emit_every {
             let runtime = handle.runtime_snapshot();
-            on_progress(ArchiveProgressSnapshot {
+            sink.on_progress(ArchiveProgressSnapshot {
                 source_kind,
                 elapsed: started_at.elapsed(),
                 input_bytes_total,
@@ -739,29 +883,48 @@ impl ArchivePipeline {
         *received_count += 1;
     }
 
-    fn archive_prepared<W: Write>(
-        &self,
-        prepared: PreparedInput,
-        writer: W,
-    ) -> Result<(W, ArchiveRunStats)> {
-        self.archive_prepared_with_progress(
-            prepared,
-            writer,
-            Duration::from_secs(3600),
-            |_snapshot| {},
-        )
+    fn build_stats_extensions(
+        input_bytes_total: u64,
+        output_bytes_total: u64,
+        runtime: &PoolRuntimeSnapshot,
+    ) -> BTreeMap<String, StatValue> {
+        let mut extensions = BTreeMap::new();
+        extensions.insert(
+            "runtime.submitted".to_string(),
+            StatValue::U64(runtime.submitted as u64),
+        );
+        extensions.insert(
+            "runtime.completed".to_string(),
+            StatValue::U64(runtime.completed as u64),
+        );
+        extensions.insert(
+            "runtime.pending".to_string(),
+            StatValue::U64(runtime.pending as u64),
+        );
+        extensions.insert(
+            "runtime.elapsed_us".to_string(),
+            StatValue::U64(runtime.elapsed.as_micros().min(u64::MAX as u128) as u64),
+        );
+        extensions.insert(
+            "runtime.worker_count".to_string(),
+            StatValue::U64(runtime.workers.len() as u64),
+        );
+        if input_bytes_total > 0 {
+            extensions.insert(
+                "archive.output_input_ratio".to_string(),
+                StatValue::F64(output_bytes_total as f64 / input_bytes_total as f64),
+            );
+        }
+        extensions
     }
 
-    fn archive_prepared_with_progress<W: Write, F>(
+    fn archive_prepared_with<W: Write, S: ProgressSink + ?Sized>(
         &self,
         prepared: PreparedInput,
         writer: W,
-        progress_interval: Duration,
-        mut on_progress: F,
-    ) -> Result<(W, ArchiveRunStats)>
-    where
-        F: FnMut(ArchiveProgressSnapshot),
-    {
+        options: &ArchiveOptions,
+        sink: &mut S,
+    ) -> Result<ArchiveOutcome<W>> {
         let PreparedInput {
             source_kind,
             batches,
@@ -801,7 +964,7 @@ impl ArchivePipeline {
 
         let started_at = Instant::now();
         let mut last_emit_at = Instant::now();
-        let emit_every = progress_interval.max(Duration::from_millis(100));
+        let emit_every = options.progress_interval.max(Duration::from_millis(100));
         let mut blocks = Vec::with_capacity(expected);
         let mut first_error: Option<crate::OxideError> = None;
         let mut completed_bytes = 0u64;
@@ -823,9 +986,11 @@ impl ArchivePipeline {
                 received_count += 1;
             }
 
-            if last_emit_at.elapsed() >= emit_every || received_count == expected {
+            if last_emit_at.elapsed() >= emit_every
+                || (options.emit_final_progress && received_count == expected)
+            {
                 let runtime = handle.runtime_snapshot();
-                on_progress(ArchiveProgressSnapshot {
+                sink.on_progress(ArchiveProgressSnapshot {
                     source_kind,
                     elapsed: started_at.elapsed(),
                     input_bytes_total,
@@ -860,6 +1025,8 @@ impl ArchivePipeline {
             archive_writer.write_owned_block(block)?;
         }
         let writer = archive_writer.write_footer()?;
+        let extensions =
+            Self::build_stats_extensions(input_bytes_total, output_bytes_total, &final_runtime);
 
         let stats = ArchiveRunStats {
             source_kind,
@@ -869,22 +1036,10 @@ impl ArchivePipeline {
             blocks_total: block_count,
             blocks_completed: final_runtime.completed as u32,
             workers: final_runtime.workers,
+            extensions,
         };
 
-        Ok((writer, stats))
-    }
-
-    fn prepare_path(&self, path: &Path) -> Result<PreparedInput> {
-        let metadata = fs::metadata(path)?;
-        if metadata.is_file() {
-            self.prepare_file(path)
-        } else if metadata.is_dir() {
-            self.prepare_directory(path)
-        } else {
-            Err(crate::OxideError::InvalidFormat(
-                "path must be a file or directory",
-            ))
-        }
+        Ok(ArchiveOutcome { writer, stats })
     }
 
     fn prepare_file(&self, path: &Path) -> Result<PreparedInput> {
