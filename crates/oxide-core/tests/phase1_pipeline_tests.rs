@@ -1,7 +1,11 @@
 use std::io::{Cursor, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
-use oxide_core::{ArchivePipeline, ArchiveReader, BufferPool, CompressionAlgo};
+use oxide_core::{
+    ArchiveOptions, ArchivePipeline, ArchiveProgressSnapshot, ArchiveReader, BufferPool,
+    CompressionAlgo, ProgressSink, StatValue,
+};
 use tempfile::{NamedTempFile, TempDir};
 
 fn write_fixture(data: &[u8]) -> Result<NamedTempFile, Box<dyn std::error::Error>> {
@@ -33,6 +37,17 @@ fn write_directory_file(
     }
     std::fs::write(path, data)?;
     Ok(())
+}
+
+#[derive(Default)]
+struct CollectProgress {
+    snapshots: Vec<ArchiveProgressSnapshot>,
+}
+
+impl ProgressSink for CollectProgress {
+    fn on_progress(&mut self, snapshot: ArchiveProgressSnapshot) {
+        self.snapshots.push(snapshot);
+    }
 }
 
 #[test]
@@ -204,5 +219,66 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
         std::fs::read(out_dir.join("nested/data.bin"))?,
         vec![9, 8, 7]
     );
+    Ok(())
+}
+
+#[test]
+fn archive_path_with_reports_progress_and_extensible_stats(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(256 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 64));
+    let pipeline = ArchivePipeline::new(16 * 1024, 4, buffer_pool, CompressionAlgo::Deflate);
+    let mut sink = CollectProgress::default();
+    let options = ArchiveOptions {
+        progress_interval: Duration::from_millis(1),
+        emit_final_progress: true,
+    };
+
+    let outcome = pipeline.archive_path_with(file.path(), Vec::new(), options, &mut sink)?;
+    assert!(!sink.snapshots.is_empty());
+
+    let final_snapshot = sink.snapshots.last().expect("missing final snapshot");
+    assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
+
+    let stats = &outcome.stats;
+    assert_eq!(stats.blocks_total, final_snapshot.blocks_total);
+    assert_eq!(stats.blocks_completed, final_snapshot.blocks_completed);
+    assert_eq!(
+        stats.extension_u64("runtime.completed"),
+        Some(stats.blocks_completed as u64)
+    );
+    assert_eq!(
+        stats.extension_u64("runtime.worker_count"),
+        Some(stats.workers.len() as u64)
+    );
+    assert!(matches!(
+        stats.extension("archive.output_input_ratio"),
+        Some(StatValue::F64(_))
+    ));
+
+    let restored = pipeline.extract_archive(Cursor::new(outcome.writer))?;
+    assert_eq!(restored, data);
+    Ok(())
+}
+
+#[test]
+fn archive_options_can_disable_final_progress_emit() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(64 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 32));
+    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let mut sink = CollectProgress::default();
+    let options = ArchiveOptions {
+        progress_interval: Duration::from_secs(3600),
+        emit_final_progress: false,
+    };
+
+    let outcome = pipeline.archive_path_with(file.path(), Vec::new(), options, &mut sink)?;
+    assert!(sink.snapshots.is_empty());
+    assert!(outcome.stats.blocks_total > 0);
+
     Ok(())
 }
