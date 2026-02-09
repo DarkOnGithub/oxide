@@ -213,7 +213,7 @@ fn archive_command(
                 .count();
 
             let line = format!(
-                "\r[{progress:6.2}%] blocks {}/{} | data {} / {} | avg {}/s | inst {}/s | ETA {} | pending {} | workers {}/{}",
+                "\r\x1b[2K[{progress:6.2}%] blocks {}/{} | data {} / {} | avg {}/s | inst {}/s | ETA {} | pending {} | workers {}/{}",
                 snapshot.blocks_completed,
                 snapshot.blocks_total,
                 format_bytes(done),
@@ -403,7 +403,7 @@ fn emit_extract_progress(
     };
 
     let line = format!(
-        "\r[{progress:6.2}%] blocks {blocks_done}/{blocks_total} | archive {} / {} | payload {} | avg {}/s | inst {}/s | ETA {}",
+        "\r\x1b[2K[{progress:6.2}%] blocks {blocks_done}/{blocks_total} | archive {} / {} | payload {} | avg {}/s | inst {}/s | ETA {}",
         format_bytes(archive_done),
         format_bytes(archive_total),
         format_bytes(payload_done),

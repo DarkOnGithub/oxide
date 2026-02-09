@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 use crate::buffer::BufferPool;
 use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerPoolHandle};
 use crate::format::{
-    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, FOOTER_SIZE, FormatDetector,
-    GLOBAL_HEADER_SIZE,
+    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
 };
 use crate::io::InputScanner;
 use crate::types::{
@@ -25,6 +24,9 @@ use super::types::{
 
 const SUBMISSION_DRAIN_BUDGET: usize = 128;
 const DIRECTORY_FORMAT_PROBE_LIMIT: usize = 64 * 1024;
+const MAX_INFLIGHT_BLOCKS_PER_WORKER: usize = 8;
+const MIN_INFLIGHT_BLOCKS: usize = 64;
+const MAX_INFLIGHT_BLOCKS: usize = 4096;
 
 #[derive(Debug)]
 struct PreparedInput {
@@ -243,10 +245,19 @@ impl ArchivePipeline {
         options: &ArchiveOptions,
         sink: &mut S,
     ) -> Result<ArchiveOutcome<W>> {
-        let discovery = directory::discover_directory_tree(root)?;
+        let directory::DirectoryArchivePlan {
+            discovery,
+            file_formats,
+            block_count,
+        } = directory::plan_directory_archive(
+            root,
+            self.scanner.target_block_size(),
+            DIRECTORY_FORMAT_PROBE_LIMIT,
+        )?;
         let input_bytes_total = discovery.input_bytes_total;
-        let estimated_blocks_total =
-            directory::block_count_for_bytes(input_bytes_total, self.scanner.target_block_size())?;
+        let total_blocks = usize::try_from(block_count)
+            .map_err(|_| crate::OxideError::InvalidFormat("block count exceeds usize range"))?;
+        let max_inflight_blocks = Self::max_inflight_blocks(total_blocks, self.num_workers);
 
         let worker_pool = WorkerPool::new(
             self.num_workers,
@@ -262,11 +273,75 @@ impl ArchivePipeline {
         let emit_every = options.progress_interval.max(Duration::from_millis(100));
         let mut completed_bytes = 0u64;
         let mut received_count = 0usize;
-        let mut blocks = Vec::with_capacity(estimated_blocks_total as usize);
+        let mut submitted_count = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
+        let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
+        let mut next_write_id = 0usize;
+        let mut output_bytes_total = (GLOBAL_HEADER_SIZE + FOOTER_SIZE) as u64;
+
+        let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.buffer_pool));
+        archive_writer.write_global_header_with_flags(
+            block_count,
+            directory::source_kind_flags(ArchiveSourceKind::Directory),
+        )?;
 
         let mut submitter =
             DirectoryBatchSubmitter::new(discovery.root.clone(), self.scanner.target_block_size());
+
+        let mut submit_batch = |batch: Batch| -> Result<()> {
+            while submitted_count.saturating_sub(received_count) >= max_inflight_blocks {
+                Self::recv_result_to_writer(
+                    &handle,
+                    Duration::from_millis(100),
+                    &mut archive_writer,
+                    &mut pending_write,
+                    &mut next_write_id,
+                    &mut output_bytes_total,
+                    &mut completed_bytes,
+                    &mut first_error,
+                    &mut received_count,
+                );
+                Self::emit_archive_progress_if_due(
+                    &handle,
+                    ArchiveSourceKind::Directory,
+                    started_at,
+                    input_bytes_total,
+                    completed_bytes,
+                    block_count,
+                    emit_every,
+                    &mut last_emit_at,
+                    false,
+                    sink,
+                );
+            }
+
+            handle.submit(batch)?;
+            submitted_count += 1;
+            Self::drain_results_to_writer(
+                &handle,
+                &mut archive_writer,
+                &mut pending_write,
+                &mut next_write_id,
+                &mut output_bytes_total,
+                &mut completed_bytes,
+                &mut first_error,
+                &mut received_count,
+                SUBMISSION_DRAIN_BUDGET,
+            );
+            Self::emit_archive_progress_if_due(
+                &handle,
+                ArchiveSourceKind::Directory,
+                started_at,
+                input_bytes_total,
+                completed_bytes,
+                block_count,
+                emit_every,
+                &mut last_emit_at,
+                false,
+                sink,
+            );
+            Ok(())
+        };
 
         let entry_count = discovery
             .directories
@@ -283,134 +358,89 @@ impl ArchivePipeline {
         bundle_header.extend_from_slice(&directory::DIRECTORY_BUNDLE_VERSION.to_le_bytes());
         bundle_header.extend_from_slice(&entry_count.to_le_bytes());
         submitter.push_bytes_with_hint(&bundle_header, FileFormat::Common, |batch| {
-            handle.submit(batch)
+            submit_batch(batch)
         })?;
-        Self::drain_some_ready_results(
-            &handle,
-            &mut blocks,
-            &mut first_error,
-            &mut completed_bytes,
-            &mut received_count,
-            SUBMISSION_DRAIN_BUDGET,
-        );
-        Self::emit_directory_progress_if_due(
-            &handle,
-            started_at,
-            input_bytes_total,
-            completed_bytes,
-            emit_every,
-            &mut last_emit_at,
-            false,
-            sink,
-        )?;
 
         for rel_path in &discovery.directories {
             let mut encoded = Vec::with_capacity(1 + 4 + rel_path.len());
             encoded.push(0);
             directory::encode_path(&mut encoded, rel_path)?;
             submitter
-                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| handle.submit(batch))?;
-            Self::drain_some_ready_results(
-                &handle,
-                &mut blocks,
-                &mut first_error,
-                &mut completed_bytes,
-                &mut received_count,
-                SUBMISSION_DRAIN_BUDGET,
-            );
-            Self::emit_directory_progress_if_due(
-                &handle,
-                started_at,
-                input_bytes_total,
-                completed_bytes,
-                emit_every,
-                &mut last_emit_at,
-                false,
-                sink,
-            )?;
+                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| submit_batch(batch))?;
         }
 
         let mut read_buffer = vec![0u8; STREAM_READ_BUFFER_SIZE];
-        for file in &discovery.files {
+        for (file, file_format) in discovery.files.iter().zip(file_formats.iter().copied()) {
             let mut encoded = Vec::with_capacity(1 + 4 + file.rel_path.len() + 8);
             encoded.push(1);
             directory::encode_path(&mut encoded, &file.rel_path)?;
             encoded.extend_from_slice(&file.size.to_le_bytes());
             submitter
-                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| handle.submit(batch))?;
+                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| submit_batch(batch))?;
 
             let mut file_reader = fs::File::open(&file.full_path)?;
-            let mut file_format: Option<FileFormat> = None;
             loop {
                 let read = file_reader.read(&mut read_buffer)?;
                 if read == 0 {
                     break;
                 }
 
-                let detected = file_format.get_or_insert_with(|| {
-                    let probe_len = read.min(DIRECTORY_FORMAT_PROBE_LIMIT);
-                    FormatDetector::detect(&read_buffer[..probe_len])
-                });
-                submitter.push_bytes_with_hint(&read_buffer[..read], *detected, |batch| {
-                    handle.submit(batch)
+                submitter.push_bytes_with_hint(&read_buffer[..read], file_format, |batch| {
+                    submit_batch(batch)
                 })?;
-                Self::drain_some_ready_results(
-                    &handle,
-                    &mut blocks,
-                    &mut first_error,
-                    &mut completed_bytes,
-                    &mut received_count,
-                    SUBMISSION_DRAIN_BUDGET,
-                );
-                Self::emit_directory_progress_if_due(
-                    &handle,
-                    started_at,
-                    input_bytes_total,
-                    completed_bytes,
-                    emit_every,
-                    &mut last_emit_at,
-                    false,
-                    sink,
-                )?;
             }
         }
 
-        submitter.finish(|batch| handle.submit(batch))?;
-        Self::drain_some_ready_results(
+        submitter.finish(|batch| submit_batch(batch))?;
+        Self::drain_results_to_writer(
             &handle,
-            &mut blocks,
-            &mut first_error,
+            &mut archive_writer,
+            &mut pending_write,
+            &mut next_write_id,
+            &mut output_bytes_total,
             &mut completed_bytes,
+            &mut first_error,
             &mut received_count,
             usize::MAX,
         );
 
+        if submitted_count != total_blocks {
+            first_error.get_or_insert(crate::OxideError::InvalidFormat(
+                "directory block count mismatch",
+            ));
+        }
         let expected = handle.submitted_count();
-        let expected_u32 = u32::try_from(expected)
-            .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
-
+        if expected != submitted_count {
+            first_error.get_or_insert(crate::OxideError::InvalidFormat(
+                "submitted block count drift detected",
+            ));
+        }
         handle.shutdown();
 
-        while received_count < expected {
-            if let Some(result) = handle.recv_timeout(Duration::from_millis(100)) {
-                Self::record_worker_result(
-                    result,
-                    &mut blocks,
-                    &mut first_error,
-                    &mut completed_bytes,
-                    &mut received_count,
-                );
-            }
-            Self::emit_directory_progress_if_due(
+        while received_count < submitted_count {
+            Self::recv_result_to_writer(
                 &handle,
+                Duration::from_millis(100),
+                &mut archive_writer,
+                &mut pending_write,
+                &mut next_write_id,
+                &mut output_bytes_total,
+                &mut completed_bytes,
+                &mut first_error,
+                &mut received_count,
+            );
+            Self::emit_archive_progress_if_due(
+                &handle,
+                ArchiveSourceKind::Directory,
                 started_at,
                 input_bytes_total,
                 completed_bytes,
+                block_count,
                 emit_every,
                 &mut last_emit_at,
-                options.emit_final_progress && received_count == expected,
+                options.emit_final_progress && received_count == submitted_count,
                 sink,
-            )?;
+            );
         }
 
         let final_runtime = handle.runtime_snapshot();
@@ -420,21 +450,12 @@ impl ArchivePipeline {
         if let Some(error) = first_error {
             return Err(error);
         }
-
-        blocks.sort_by_key(|block| block.id);
-
-        let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.buffer_pool));
-        archive_writer.write_global_header_with_flags(
-            expected_u32,
-            directory::source_kind_flags(ArchiveSourceKind::Directory),
-        )?;
-        let mut output_bytes_total = (GLOBAL_HEADER_SIZE + FOOTER_SIZE) as u64;
-        for block in blocks {
-            output_bytes_total = output_bytes_total
-                .saturating_add(BLOCK_HEADER_SIZE as u64)
-                .saturating_add(block.data.len() as u64);
-            archive_writer.write_owned_block(block)?;
+        if next_write_id != submitted_count || !pending_write.is_empty() {
+            return Err(crate::OxideError::InvalidFormat(
+                "directory writer has pending blocks after completion",
+            ));
         }
+
         let writer = archive_writer.write_footer()?;
         let extensions =
             Self::build_stats_extensions(input_bytes_total, output_bytes_total, &final_runtime);
@@ -444,7 +465,7 @@ impl ArchivePipeline {
             elapsed: started_at.elapsed(),
             input_bytes_total,
             output_bytes_total,
-            blocks_total: expected_u32,
+            blocks_total: block_count,
             blocks_completed: final_runtime.completed as u32,
             workers: final_runtime.workers,
             extensions,
@@ -481,51 +502,36 @@ impl ArchivePipeline {
         }
     }
 
-    fn emit_directory_progress_if_due<S: ProgressSink + ?Sized>(
-        handle: &WorkerPoolHandle,
-        started_at: Instant,
-        input_bytes_total: u64,
-        input_bytes_completed: u64,
-        emit_every: Duration,
-        last_emit_at: &mut Instant,
-        force: bool,
-        sink: &mut S,
-    ) -> Result<()> {
-        let blocks_total = u32::try_from(handle.submitted_count())
-            .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
-        Self::emit_archive_progress_if_due(
-            handle,
-            ArchiveSourceKind::Directory,
-            started_at,
-            input_bytes_total,
-            input_bytes_completed,
-            blocks_total,
-            emit_every,
-            last_emit_at,
-            force,
-            sink,
-        );
-        Ok(())
+    fn max_inflight_blocks(total_blocks: usize, num_workers: usize) -> usize {
+        let scaled = num_workers.saturating_mul(MAX_INFLIGHT_BLOCKS_PER_WORKER);
+        let bounded = scaled.clamp(MIN_INFLIGHT_BLOCKS, MAX_INFLIGHT_BLOCKS);
+        bounded.min(total_blocks.max(1))
     }
 
-    fn drain_some_ready_results(
+    fn drain_results_to_writer<W: Write>(
         handle: &WorkerPoolHandle,
-        blocks: &mut Vec<CompressedBlock>,
-        first_error: &mut Option<crate::OxideError>,
+        archive_writer: &mut ArchiveWriter<W>,
+        pending_write: &mut BTreeMap<usize, CompressedBlock>,
+        next_write_id: &mut usize,
+        output_bytes_total: &mut u64,
         completed_bytes: &mut u64,
+        first_error: &mut Option<crate::OxideError>,
         received_count: &mut usize,
         max_results: usize,
     ) {
         let mut drained = 0usize;
         while drained < max_results {
             if let Some(result) = handle.recv_timeout(Duration::from_millis(0)) {
-                Self::record_worker_result(
+                Self::record_result_to_writer(
                     result,
-                    blocks,
-                    first_error,
+                    archive_writer,
+                    pending_write,
+                    next_write_id,
+                    output_bytes_total,
                     completed_bytes,
-                    received_count,
+                    first_error,
                 );
+                *received_count += 1;
                 drained += 1;
             } else {
                 break;
@@ -533,25 +539,70 @@ impl ArchivePipeline {
         }
     }
 
-    fn record_worker_result(
-        result: Result<CompressedBlock>,
-        blocks: &mut Vec<CompressedBlock>,
-        first_error: &mut Option<crate::OxideError>,
+    fn recv_result_to_writer<W: Write>(
+        handle: &WorkerPoolHandle,
+        timeout: Duration,
+        archive_writer: &mut ArchiveWriter<W>,
+        pending_write: &mut BTreeMap<usize, CompressedBlock>,
+        next_write_id: &mut usize,
+        output_bytes_total: &mut u64,
         completed_bytes: &mut u64,
+        first_error: &mut Option<crate::OxideError>,
         received_count: &mut usize,
+    ) {
+        if let Some(result) = handle.recv_timeout(timeout) {
+            Self::record_result_to_writer(
+                result,
+                archive_writer,
+                pending_write,
+                next_write_id,
+                output_bytes_total,
+                completed_bytes,
+                first_error,
+            );
+            *received_count += 1;
+        }
+    }
+
+    fn record_result_to_writer<W: Write>(
+        result: Result<CompressedBlock>,
+        archive_writer: &mut ArchiveWriter<W>,
+        pending_write: &mut BTreeMap<usize, CompressedBlock>,
+        next_write_id: &mut usize,
+        output_bytes_total: &mut u64,
+        completed_bytes: &mut u64,
+        first_error: &mut Option<crate::OxideError>,
     ) {
         match result {
             Ok(block) => {
                 *completed_bytes = (*completed_bytes).saturating_add(block.original_len);
-                blocks.push(block);
-            }
-            Err(error) => {
-                if first_error.is_none() {
-                    *first_error = Some(error);
+                if first_error.is_some() {
+                    return;
+                }
+
+                let block_id = block.id;
+                if pending_write.insert(block_id, block).is_some() {
+                    first_error.get_or_insert(crate::OxideError::InvalidFormat(
+                        "duplicate block id received from worker",
+                    ));
+                    return;
+                }
+
+                while let Some(ready) = pending_write.remove(next_write_id) {
+                    *output_bytes_total = (*output_bytes_total)
+                        .saturating_add(BLOCK_HEADER_SIZE as u64)
+                        .saturating_add(ready.data.len() as u64);
+                    if let Err(error) = archive_writer.write_owned_block(ready) {
+                        first_error.get_or_insert(error);
+                        break;
+                    }
+                    *next_write_id += 1;
                 }
             }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
         }
-        *received_count += 1;
     }
 
     fn build_stats_extensions(
@@ -601,8 +652,10 @@ impl ArchivePipeline {
             batches,
             input_bytes_total,
         } = prepared;
-        let block_count = u32::try_from(batches.len())
+        let total_blocks = batches.len();
+        let block_count = u32::try_from(total_blocks)
             .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
+        let max_inflight_blocks = Self::max_inflight_blocks(total_blocks, self.num_workers);
 
         let worker_pool = WorkerPool::new(
             self.num_workers,
@@ -614,52 +667,92 @@ impl ArchivePipeline {
             Self::process_batch_with_stubs(batch, pool, compression)
         });
 
-        for batch in batches {
-            handle.submit(batch)?;
-        }
-        let expected = handle.submitted_count();
-        handle.shutdown();
+        let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.buffer_pool));
+        archive_writer.write_global_header_with_flags(
+            block_count,
+            directory::source_kind_flags(source_kind),
+        )?;
+        let mut output_bytes_total = (GLOBAL_HEADER_SIZE + FOOTER_SIZE) as u64;
+        let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
+        let mut next_write_id = 0usize;
 
         let started_at = Instant::now();
         let mut last_emit_at = Instant::now();
         let emit_every = options.progress_interval.max(Duration::from_millis(100));
-        let mut blocks = Vec::with_capacity(expected);
         let mut first_error: Option<crate::OxideError> = None;
+        let mut submitted_count = 0usize;
         let mut completed_bytes = 0u64;
         let mut received_count = 0usize;
+        let mut shutdown_called = false;
+        let mut batches = batches.into_iter();
 
-        while received_count < expected {
-            if let Some(result) = handle.recv_timeout(Duration::from_millis(100)) {
-                match result {
-                    Ok(block) => {
-                        completed_bytes = completed_bytes.saturating_add(block.original_len);
-                        blocks.push(block);
-                    }
-                    Err(error) => {
-                        if first_error.is_none() {
-                            first_error = Some(error);
-                        }
-                    }
+        loop {
+            while submitted_count.saturating_sub(received_count) < max_inflight_blocks {
+                let Some(batch) = batches.next() else {
+                    break;
+                };
+                handle.submit(batch)?;
+                submitted_count += 1;
+            }
+
+            Self::drain_results_to_writer(
+                &handle,
+                &mut archive_writer,
+                &mut pending_write,
+                &mut next_write_id,
+                &mut output_bytes_total,
+                &mut completed_bytes,
+                &mut first_error,
+                &mut received_count,
+                SUBMISSION_DRAIN_BUDGET,
+            );
+
+            if submitted_count == total_blocks && !shutdown_called {
+                handle.shutdown();
+                shutdown_called = true;
+            }
+
+            if shutdown_called && received_count == submitted_count {
+                if options.emit_final_progress {
+                    Self::emit_archive_progress_if_due(
+                        &handle,
+                        source_kind,
+                        started_at,
+                        input_bytes_total,
+                        completed_bytes,
+                        block_count,
+                        emit_every,
+                        &mut last_emit_at,
+                        true,
+                        sink,
+                    );
                 }
-                received_count += 1;
+                break;
             }
 
-            if last_emit_at.elapsed() >= emit_every
-                || (options.emit_final_progress && received_count == expected)
-            {
-                let runtime = handle.runtime_snapshot();
-                sink.on_progress(ArchiveProgressSnapshot {
-                    source_kind,
-                    elapsed: started_at.elapsed(),
-                    input_bytes_total,
-                    input_bytes_completed: completed_bytes.min(input_bytes_total),
-                    blocks_total: block_count,
-                    blocks_completed: runtime.completed as u32,
-                    blocks_pending: runtime.pending as u32,
-                    runtime,
-                });
-                last_emit_at = Instant::now();
-            }
+            Self::recv_result_to_writer(
+                &handle,
+                Duration::from_millis(100),
+                &mut archive_writer,
+                &mut pending_write,
+                &mut next_write_id,
+                &mut output_bytes_total,
+                &mut completed_bytes,
+                &mut first_error,
+                &mut received_count,
+            );
+            Self::emit_archive_progress_if_due(
+                &handle,
+                source_kind,
+                started_at,
+                input_bytes_total,
+                completed_bytes,
+                block_count,
+                emit_every,
+                &mut last_emit_at,
+                false,
+                sink,
+            );
         }
 
         let final_runtime = handle.runtime_snapshot();
@@ -669,21 +762,12 @@ impl ArchivePipeline {
         if let Some(error) = first_error {
             return Err(error);
         }
-
-        blocks.sort_by_key(|block| block.id);
-
-        let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.buffer_pool));
-        archive_writer.write_global_header_with_flags(
-            block_count,
-            directory::source_kind_flags(source_kind),
-        )?;
-        let mut output_bytes_total = (GLOBAL_HEADER_SIZE + FOOTER_SIZE) as u64;
-        for block in blocks {
-            output_bytes_total = output_bytes_total
-                .saturating_add(BLOCK_HEADER_SIZE as u64)
-                .saturating_add(block.data.len() as u64);
-            archive_writer.write_owned_block(block)?;
+        if next_write_id != submitted_count || !pending_write.is_empty() {
+            return Err(crate::OxideError::InvalidFormat(
+                "writer has pending blocks after completion",
+            ));
         }
+
         let writer = archive_writer.write_footer()?;
         let extensions =
             Self::build_stats_extensions(input_bytes_total, output_bytes_total, &final_runtime);
