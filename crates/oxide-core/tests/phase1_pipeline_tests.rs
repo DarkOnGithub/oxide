@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchiveOptions, ArchivePipeline, ArchiveProgressSnapshot, ArchiveReader, BufferPool,
-    CompressionAlgo, ProgressSink, StatValue,
+    CompressionAlgo, PreProcessingStrategy, ProgressSink, StatValue, TextStrategy,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -84,6 +84,29 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
         assert_eq!(header.block_id, expected as u64);
         assert_eq!(payload.len(), header.compressed_size as usize);
     }
+
+    Ok(())
+}
+
+#[test]
+fn pipeline_records_preprocessing_strategy_in_block_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(64 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let archive = pipeline.archive_file(file.path(), Vec::new())?;
+
+    let mut reader = ArchiveReader::new(Cursor::new(archive))?;
+    let (header, payload) = reader.read_block(0)?;
+
+    assert_eq!(
+        header.strategy()?,
+        PreProcessingStrategy::Text(TextStrategy::Bwt)
+    );
+    assert_eq!(header.compression()?, CompressionAlgo::Lz4);
+    assert_eq!(payload.len(), header.compressed_size as usize);
 
     Ok(())
 }
@@ -184,6 +207,54 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
+fn directory_archive_uses_per_file_preprocessing_strategies()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(
+        &source,
+        "notes.txt",
+        b"this directory contains text content\nline two\n",
+    )?;
+    write_directory_file(
+        &source,
+        "artifact.bin",
+        &[0x55, 0x48, 0x89, 0xE5, 0x90, 0x90, 0x90, 0xC3],
+    )?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = ArchivePipeline::new(32, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline.archive_path(source.path(), Vec::new())?;
+    let mut reader = ArchiveReader::new(Cursor::new(archive))?;
+
+    let mut saw_common = false;
+    let mut saw_text = false;
+    let mut saw_binary = false;
+
+    for block in reader.iter_blocks() {
+        let (header, _payload) = block?;
+        match header.strategy()? {
+            PreProcessingStrategy::None => saw_common = true,
+            PreProcessingStrategy::Text(TextStrategy::Bwt) => saw_text = true,
+            PreProcessingStrategy::Binary(_) => saw_binary = true,
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_common,
+        "directory metadata blocks should stay as common"
+    );
+    assert!(saw_text, "expected at least one text-preprocessed block");
+    assert!(
+        saw_binary,
+        "expected at least one binary-preprocessed block"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
@@ -223,8 +294,8 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn archive_path_with_reports_progress_and_extensible_stats(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn archive_path_with_reports_progress_and_extensible_stats()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(256 * 1024);
     let file = write_fixture(&data)?;
 
@@ -279,6 +350,42 @@ fn archive_options_can_disable_final_progress_emit() -> Result<(), Box<dyn std::
     let outcome = pipeline.archive_path_with(file.path(), Vec::new(), options, &mut sink)?;
     assert!(sink.snapshots.is_empty());
     assert!(outcome.stats.blocks_total > 0);
+
+    Ok(())
+}
+
+#[test]
+fn directory_progress_reports_stable_block_total() -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "a.txt", b"alpha\nbeta\ngamma\n")?;
+    write_directory_file(&source, "b.bin", &[0x55, 0x48, 0x89, 0xE5, 0xC3])?;
+    write_directory_file(&source, "nested/c.txt", b"nested text file\n")?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = ArchivePipeline::new(64, 2, buffer_pool, CompressionAlgo::Lz4);
+    let mut sink = CollectProgress::default();
+    let options = ArchiveOptions {
+        progress_interval: Duration::from_millis(1),
+        emit_final_progress: true,
+    };
+
+    let outcome = pipeline.archive_path_with(source.path(), Vec::new(), options, &mut sink)?;
+    assert!(!sink.snapshots.is_empty());
+
+    let expected_total = sink.snapshots[0].blocks_total;
+    assert!(expected_total > 0);
+    assert!(
+        sink.snapshots
+            .iter()
+            .all(|snapshot| snapshot.blocks_total == expected_total)
+    );
+
+    let final_snapshot = sink.snapshots.last().expect("missing final snapshot");
+    assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
+    assert_eq!(outcome.stats.blocks_total, expected_total);
+
+    let reader = ArchiveReader::new(Cursor::new(outcome.writer))?;
+    assert_eq!(reader.block_count(), expected_total);
 
     Ok(())
 }
