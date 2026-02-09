@@ -1,5 +1,5 @@
 #[cfg(feature = "telemetry")]
-mod telemetry_tests {
+mod telemetry_enabled_tests {
     use std::io::Write;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -141,5 +141,37 @@ mod telemetry_tests {
             .expect("worker task histogram missing");
         assert_eq!(task_hist.count, 2);
         assert!(task_hist.max >= task_hist.min);
+    }
+}
+
+#[cfg(not(feature = "telemetry"))]
+mod telemetry_disabled_tests {
+    use std::time::Duration;
+
+    use oxide_core::telemetry;
+    use oxide_core::telemetry::tags;
+    use oxide_core::{DefaultWorkerTelemetry, WorkerTelemetry};
+
+    #[test]
+    fn telemetry_api_is_noop_without_feature() {
+        telemetry::reset();
+
+        telemetry::increment_counter(tags::METRIC_WORKER_TASK_COUNT, 7, &[]);
+        telemetry::record_histogram(tags::METRIC_WORKER_TASK_LATENCY_US, 11, &[]);
+        telemetry::set_gauge(tags::METRIC_WORKER_QUEUE_DEPTH, 3, &[]);
+        telemetry::add_gauge(tags::METRIC_WORKER_QUEUE_DEPTH, 2, &[]);
+        telemetry::sub_gauge_saturating(tags::METRIC_WORKER_QUEUE_DEPTH, 10, &[]);
+        let _ = telemetry::sample_process_memory();
+
+        let worker_telemetry = DefaultWorkerTelemetry;
+        worker_telemetry.on_queue_depth(0, 7);
+        worker_telemetry.on_task_started(0, "compress");
+        worker_telemetry.on_task_finished(0, "compress", Duration::from_micros(120));
+        worker_telemetry.on_task_failed(0, "compress", Duration::from_micros(75));
+
+        let snapshot = telemetry::snapshot();
+        assert!(snapshot.counters.is_empty());
+        assert!(snapshot.gauges.is_empty());
+        assert!(snapshot.histograms.is_empty());
     }
 }
