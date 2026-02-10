@@ -60,6 +60,22 @@ enum Commands {
         /// Progress refresh interval in milliseconds.
         #[arg(long, default_value_t = 250)]
         stats_interval_ms: u64,
+
+        /// Maximum in-flight payload bytes queued through workers.
+        #[arg(long, default_value = "512M", value_parser = parse_size)]
+        inflight_bytes: usize,
+
+        /// Read buffer size for streaming directory input.
+        #[arg(long, default_value = "16M", value_parser = parse_size)]
+        stream_read_buffer: usize,
+
+        /// Keep file-type boundaries as hard block boundaries in directory mode.
+        #[arg(long, default_value_t = false)]
+        preserve_format_boundaries: bool,
+
+        /// Timeout in milliseconds while waiting for worker results.
+        #[arg(long, default_value_t = 5)]
+        result_wait_ms: u64,
     },
     /// Extract an .oxz archive to a file or directory.
     Extract {
@@ -121,6 +137,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             pool_capacity,
             pool_buffers,
             stats_interval_ms,
+            inflight_bytes,
+            stream_read_buffer,
+            preserve_format_boundaries,
+            result_wait_ms,
         } => archive_command(
             input,
             output,
@@ -131,6 +151,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             pool_capacity,
             pool_buffers,
             stats_interval_ms,
+            inflight_bytes,
+            stream_read_buffer,
+            preserve_format_boundaries,
+            result_wait_ms,
         )?,
         Commands::Extract {
             input,
@@ -153,6 +177,10 @@ fn archive_command(
     pool_capacity: usize,
     pool_buffers: usize,
     stats_interval_ms: u64,
+    inflight_bytes: usize,
+    stream_read_buffer: usize,
+    preserve_format_boundaries: bool,
+    result_wait_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_path = output.unwrap_or_else(|| default_output_path(&input));
     if let Some(parent) = output_path.parent() {
@@ -162,6 +190,10 @@ fn archive_command(
     let buffer_pool = Arc::new(BufferPool::new(pool_capacity.max(1), pool_buffers.max(1)));
     let mut performance = PipelinePerformanceOptions::default();
     performance.autotune_enabled = autotune;
+    performance.max_inflight_bytes = inflight_bytes.max(1);
+    performance.directory_stream_read_buffer_size = stream_read_buffer.max(1);
+    performance.preserve_directory_format_boundaries = preserve_format_boundaries;
+    performance.result_wait_timeout = Duration::from_millis(result_wait_ms.max(1));
     let pipeline = ArchivePipeline::with_performance(
         block_size.max(1),
         workers.max(1),
@@ -475,6 +507,52 @@ fn print_summary(
             format_duration(worker.busy),
             format_duration(worker.idle),
             worker.utilization * 100.0,
+        );
+    }
+
+    if let Some(effective_cores) = stats.extension_f64("runtime.effective_cores") {
+        println!("  effective compression cores: {effective_cores:.2}");
+    }
+    if let Some(compress_busy_us) = stats.extension_u64("runtime.compress_busy_us") {
+        println!(
+            "  total compression busy time: {}",
+            format_duration(Duration::from_micros(compress_busy_us))
+        );
+    }
+    if let Some(max_inflight_blocks) = stats.extension_u64("pipeline.max_inflight_blocks") {
+        println!("  max in-flight blocks: {max_inflight_blocks}");
+    }
+    if let Some(max_inflight_bytes) = stats.extension_u64("pipeline.max_inflight_bytes") {
+        println!(
+            "  max in-flight bytes: {}",
+            format_bytes(max_inflight_bytes)
+        );
+    }
+    if let Some(pending_write_peak) = stats.extension_u64("pipeline.pending_write_peak") {
+        println!("  reorder pending peak: {pending_write_peak}");
+    }
+
+    let discovery_us = stats.extension_u64("stage.discovery_us").unwrap_or(0);
+    let format_probe_us = stats.extension_u64("stage.format_probe_us").unwrap_or(0);
+    let producer_read_us = stats.extension_u64("stage.producer_read_us").unwrap_or(0);
+    let submit_wait_us = stats.extension_u64("stage.submit_wait_us").unwrap_or(0);
+    let result_wait_us = stats.extension_u64("stage.result_wait_us").unwrap_or(0);
+    let writer_us = stats.extension_u64("stage.writer_us").unwrap_or(0);
+    if discovery_us > 0
+        || format_probe_us > 0
+        || producer_read_us > 0
+        || submit_wait_us > 0
+        || result_wait_us > 0
+        || writer_us > 0
+    {
+        println!(
+            "  stage timings: discovery {:.2}ms | probe {:.2}ms | read {:.2}ms | submit wait {:.2}ms | result wait {:.2}ms | writer {:.2}ms",
+            discovery_us as f64 / 1000.0,
+            format_probe_us as f64 / 1000.0,
+            producer_read_us as f64 / 1000.0,
+            submit_wait_us as f64 / 1000.0,
+            result_wait_us as f64 / 1000.0,
+            writer_us as f64 / 1000.0,
         );
     }
 

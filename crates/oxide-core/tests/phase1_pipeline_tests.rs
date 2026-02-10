@@ -303,6 +303,22 @@ fn archive_path_with_reports_progress_and_extensible_stats()
         Some(stats.workers.len() as u64)
     );
     assert!(matches!(
+        stats.extension("runtime.effective_cores"),
+        Some(StatValue::F64(_))
+    ));
+    assert!(matches!(
+        stats.extension("pipeline.max_inflight_blocks"),
+        Some(StatValue::U64(_))
+    ));
+    assert!(matches!(
+        stats.extension("pipeline.max_inflight_bytes"),
+        Some(StatValue::U64(_))
+    ));
+    assert!(matches!(
+        stats.extension("stage.writer_us"),
+        Some(StatValue::U64(_))
+    ));
+    assert!(matches!(
         stats.extension("archive.output_input_ratio"),
         Some(StatValue::F64(_))
     ));
