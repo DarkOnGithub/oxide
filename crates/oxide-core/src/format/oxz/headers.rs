@@ -1,6 +1,9 @@
 use std::io::{Read, Write};
 
-use crate::{CompressedBlock, CompressionAlgo, OxideError, PreProcessingStrategy, Result};
+use crate::{
+    CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset, OxideError,
+    PreProcessingStrategy, Result,
+};
 
 use super::{
     BLOCK_HEADER_SIZE, FOOTER_SIZE, GLOBAL_HEADER_SIZE, OXZ_END_MAGIC, OXZ_MAGIC, OXZ_VERSION,
@@ -100,12 +103,30 @@ impl BlockHeader {
         compression: CompressionAlgo,
         crc32: u32,
     ) -> Self {
+        Self::new_with_compression_meta(
+            block_id,
+            original_size,
+            compressed_size,
+            strategy,
+            CompressionMeta::new(compression, CompressionPreset::Default, false),
+            crc32,
+        )
+    }
+
+    pub fn new_with_compression_meta(
+        block_id: u64,
+        original_size: u32,
+        compressed_size: u32,
+        strategy: PreProcessingStrategy,
+        compression_meta: CompressionMeta,
+        crc32: u32,
+    ) -> Self {
         Self {
             block_id,
             original_size,
             compressed_size,
             strategy_flags: strategy.to_flags(),
-            compression_flags: compression.to_flags(),
+            compression_flags: compression_meta.to_flags(),
             reserved: 0,
             crc32,
         }
@@ -119,12 +140,12 @@ impl BlockHeader {
         let compressed_size = u32::try_from(block.data.len())
             .map_err(|_| OxideError::InvalidFormat("compressed size exceeds u32 range"))?;
 
-        Ok(Self::new(
+        Ok(Self::new_with_compression_meta(
             block_id,
             original_size,
             compressed_size,
             block.pre_proc.clone(),
-            block.compression,
+            block.compression_meta(),
             block.crc32,
         ))
     }
@@ -145,7 +166,11 @@ impl BlockHeader {
     }
 
     pub fn compression(&self) -> Result<CompressionAlgo> {
-        CompressionAlgo::from_flags(self.compression_flags)
+        Ok(self.compression_meta()?.algo)
+    }
+
+    pub fn compression_meta(&self) -> Result<CompressionMeta> {
+        CompressionMeta::from_flags(self.compression_flags)
     }
 
     pub fn to_bytes(&self) -> [u8; BLOCK_HEADER_SIZE] {
@@ -183,7 +208,7 @@ impl BlockHeader {
             ));
         }
         PreProcessingStrategy::from_flags(self.strategy_flags)?;
-        CompressionAlgo::from_flags(self.compression_flags)?;
+        self.compression_meta()?;
         Ok(())
     }
 }
