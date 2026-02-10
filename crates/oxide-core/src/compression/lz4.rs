@@ -56,8 +56,8 @@ fn compress_block(input: &[u8], output: &mut Vec<u8>) {
     let match_limit = input.len() - LAST_LITERALS;
 
     'main: while search_pos <= mflimit {
-        let mut step = 1usize;
         let mut current = search_pos;
+        let mut search_match_nb = 1usize << SKIP_STRENGTH;
 
         loop {
             if current > mflimit {
@@ -129,8 +129,8 @@ fn compress_block(input: &[u8], output: &mut Vec<u8>) {
                 }
             }
 
-            current += step;
-            step += step >> SKIP_STRENGTH;
+            current += search_match_nb >> SKIP_STRENGTH;
+            search_match_nb += 1;
         }
     }
 
