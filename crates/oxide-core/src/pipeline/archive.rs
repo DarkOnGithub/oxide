@@ -4,8 +4,10 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
+use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
 use rayon::prelude::*;
 
 use crate::buffer::BufferPool;
@@ -19,7 +21,7 @@ use crate::types::{
     PreProcessingStrategy, Result,
 };
 
-use super::directory::{self, DirectoryBatchSubmitter, STREAM_READ_BUFFER_SIZE};
+use super::directory::{self, DirectoryBatchSubmitter};
 use super::types::{
     ArchiveOptions, ArchiveOutcome, ArchiveProgressSnapshot, ArchiveRunStats, ArchiveSourceKind,
     FnProgressSink, NoopProgress, PipelinePerformanceOptions, ProgressSink, StatValue,
@@ -27,7 +29,6 @@ use super::types::{
 
 const SUBMISSION_DRAIN_BUDGET: usize = 128;
 const DIRECTORY_FORMAT_PROBE_LIMIT: usize = 64 * 1024;
-const MAX_INFLIGHT_BLOCKS_PER_WORKER: usize = 8;
 const MIN_INFLIGHT_BLOCKS: usize = 64;
 const MAX_INFLIGHT_BLOCKS: usize = 4096;
 const AUTOTUNE_CANDIDATE_BLOCK_SIZES: [usize; 5] = [
@@ -58,6 +59,21 @@ struct BlockSizeScore {
     block_size: usize,
     throughput_bps: f64,
     compressed_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StageTimings {
+    discovery: Duration,
+    format_probe: Duration,
+    producer_read: Duration,
+    submit_wait: Duration,
+    result_wait: Duration,
+    writer: Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DirectoryProducerOutcome {
+    producer_read: Duration,
 }
 
 /// End-to-end Phase 1 pipeline that wires scanner, workers, and OXZ I/O.
@@ -383,19 +399,33 @@ impl ArchivePipeline {
         options: &ArchiveOptions,
         sink: &mut S,
     ) -> Result<ArchiveOutcome<W>> {
+        let mut stage_timings = StageTimings::default();
+
+        let discovery_started = Instant::now();
         let discovery = directory::discover_directory_tree(root)?;
+        stage_timings.discovery += discovery_started.elapsed();
+
         let block_size = self.choose_block_size_for_directory(&discovery)?;
+        let format_probe_started = Instant::now();
         let file_formats =
             directory::detect_file_formats(&discovery, DIRECTORY_FORMAT_PROBE_LIMIT)?;
+        stage_timings.format_probe += format_probe_started.elapsed();
         let block_count = directory::estimate_directory_block_count(
             &discovery,
             &file_formats,
             block_size.selected_block_size,
+            self.performance.preserve_directory_format_boundaries,
         )?;
         let input_bytes_total = discovery.input_bytes_total;
         let total_blocks = usize::try_from(block_count)
             .map_err(|_| crate::OxideError::InvalidFormat("block count exceeds usize range"))?;
-        let max_inflight_blocks = Self::max_inflight_blocks(total_blocks, self.num_workers);
+        let max_inflight_blocks = Self::max_inflight_blocks(
+            total_blocks,
+            self.num_workers,
+            block_size.selected_block_size,
+            &self.performance,
+        );
+        let max_inflight_bytes = max_inflight_blocks.saturating_mul(block_size.selected_block_size);
 
         let worker_pool = WorkerPool::new(
             self.num_workers,
@@ -425,6 +455,11 @@ impl ArchivePipeline {
         let mut next_write_id = 0usize;
         let mut output_bytes_written = GLOBAL_HEADER_SIZE as u64;
         let mut raw_passthrough_blocks = 0u64;
+        let mut pending_write_peak = 0usize;
+        let result_wait_timeout = self
+            .performance
+            .result_wait_timeout
+            .max(Duration::from_millis(1));
 
         let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.buffer_pool));
         archive_writer.write_global_header_with_flags(
@@ -432,41 +467,112 @@ impl ArchivePipeline {
             directory::source_kind_flags(ArchiveSourceKind::Directory),
         )?;
 
-        let mut submitter =
-            DirectoryBatchSubmitter::new(discovery.root.clone(), block_size.selected_block_size);
+        let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
+        let producer_root = discovery.root.clone();
+        let producer_directories = discovery.directories.clone();
+        let producer_files = discovery.files.clone();
+        let producer_file_formats = file_formats.clone();
+        let producer_block_size = block_size.selected_block_size;
+        let preserve_boundaries = self.performance.preserve_directory_format_boundaries;
+        let stream_read_buffer_size = self.performance.directory_stream_read_buffer_size.max(1);
 
-        let mut submit_batch = |batch: Batch| -> Result<()> {
-            while submitted_count.saturating_sub(received_count) >= max_inflight_blocks {
-                Self::recv_result_to_writer(
-                    &handle,
-                    Duration::from_millis(100),
-                    &mut archive_writer,
-                    &mut pending_write,
-                    &mut next_write_id,
-                    &mut output_bytes_written,
-                    &mut completed_bytes,
-                    &mut first_error,
-                    &mut raw_passthrough_blocks,
-                    &mut received_count,
-                );
-                Self::emit_archive_progress_if_due(
-                    &handle,
-                    ArchiveSourceKind::Directory,
-                    started_at,
-                    input_bytes_total,
-                    completed_bytes,
-                    output_bytes_written,
-                    block_count,
-                    emit_every,
-                    &mut last_emit_at,
-                    false,
-                    sink,
-                );
+        let producer_handle = thread::spawn(move || -> Result<DirectoryProducerOutcome> {
+            let mut submitter = DirectoryBatchSubmitter::new(
+                producer_root,
+                producer_block_size,
+                preserve_boundaries,
+            );
+            let mut producer_read = Duration::ZERO;
+
+            let submit_batch = |batch: Batch| -> Result<()> {
+                batch_tx.send(batch).map_err(|_| {
+                    crate::OxideError::CompressionError(
+                        "directory producer channel closed before completion".to_string(),
+                    )
+                })
+            };
+
+            let entry_count = producer_directories
+                .len()
+                .checked_add(producer_files.len())
+                .ok_or(crate::OxideError::InvalidFormat(
+                    "directory entry count overflow",
+                ))?;
+            let entry_count = u32::try_from(entry_count)
+                .map_err(|_| crate::OxideError::InvalidFormat("directory entry count overflow"))?;
+
+            let mut bundle_header = Vec::with_capacity(10);
+            bundle_header.extend_from_slice(&directory::DIRECTORY_BUNDLE_MAGIC);
+            bundle_header.extend_from_slice(&directory::DIRECTORY_BUNDLE_VERSION.to_le_bytes());
+            bundle_header.extend_from_slice(&entry_count.to_le_bytes());
+            submitter.push_bytes_with_hint(&bundle_header, FileFormat::Common, |batch| {
+                submit_batch(batch)
+            })?;
+
+            for rel_path in &producer_directories {
+                let mut encoded = Vec::with_capacity(1 + 4 + rel_path.len());
+                encoded.push(0);
+                directory::encode_path(&mut encoded, rel_path)?;
+                submitter.push_bytes_with_hint(&encoded, FileFormat::Common, |batch| {
+                    submit_batch(batch)
+                })?;
             }
 
-            handle.submit(batch)?;
-            submitted_count += 1;
-            Self::drain_results_to_writer(
+            let mut read_buffer = vec![0u8; stream_read_buffer_size];
+            for (file, file_format) in producer_files
+                .iter()
+                .zip(producer_file_formats.iter().copied())
+            {
+                let mut encoded = Vec::with_capacity(1 + 4 + file.rel_path.len() + 8);
+                encoded.push(1);
+                directory::encode_path(&mut encoded, &file.rel_path)?;
+                encoded.extend_from_slice(&file.size.to_le_bytes());
+                submitter.push_bytes_with_hint(&encoded, FileFormat::Common, |batch| {
+                    submit_batch(batch)
+                })?;
+
+                let mut file_reader = fs::File::open(&file.full_path)?;
+                loop {
+                    let read_started = Instant::now();
+                    let read = file_reader.read(&mut read_buffer)?;
+                    producer_read += read_started.elapsed();
+                    if read == 0 {
+                        break;
+                    }
+
+                    submitter.push_bytes_with_hint(&read_buffer[..read], file_format, |batch| {
+                        submit_batch(batch)
+                    })?;
+                }
+            }
+
+            submitter.finish(|batch| submit_batch(batch))?;
+            Ok(DirectoryProducerOutcome { producer_read })
+        });
+
+        let mut producer_done = false;
+        let mut shutdown_called = false;
+        loop {
+            let mut progressed = false;
+
+            while !producer_done
+                && submitted_count.saturating_sub(received_count) < max_inflight_blocks
+            {
+                match batch_rx.try_recv() {
+                    Ok(batch) => {
+                        handle.submit(batch)?;
+                        submitted_count += 1;
+                        progressed = true;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        producer_done = true;
+                        break;
+                    }
+                }
+            }
+
+            let drained = Self::drain_results_to_writer(
                 &handle,
                 &mut archive_writer,
                 &mut pending_write,
@@ -476,8 +582,84 @@ impl ArchivePipeline {
                 &mut first_error,
                 &mut raw_passthrough_blocks,
                 &mut received_count,
+                &mut pending_write_peak,
+                &mut stage_timings.writer,
                 SUBMISSION_DRAIN_BUDGET,
             );
+            if drained > 0 {
+                progressed = true;
+            }
+
+            if !producer_done
+                && submitted_count.saturating_sub(received_count) < max_inflight_blocks
+            {
+                let wait_started = Instant::now();
+                match batch_rx.recv_timeout(result_wait_timeout) {
+                    Ok(batch) => {
+                        stage_timings.submit_wait += wait_started.elapsed();
+                        handle.submit(batch)?;
+                        submitted_count += 1;
+                        progressed = true;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        stage_timings.submit_wait += wait_started.elapsed();
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        stage_timings.submit_wait += wait_started.elapsed();
+                        producer_done = true;
+                    }
+                }
+            }
+
+            if !shutdown_called && producer_done {
+                handle.shutdown();
+                shutdown_called = true;
+            }
+
+            if shutdown_called && received_count == submitted_count {
+                if options.emit_final_progress {
+                    Self::emit_archive_progress_if_due(
+                        &handle,
+                        ArchiveSourceKind::Directory,
+                        started_at,
+                        input_bytes_total,
+                        completed_bytes,
+                        output_bytes_written,
+                        block_count,
+                        emit_every,
+                        &mut last_emit_at,
+                        true,
+                        sink,
+                    );
+                }
+                break;
+            }
+
+            if !progressed {
+                let inflight_full =
+                    submitted_count.saturating_sub(received_count) >= max_inflight_blocks;
+                let wait_started = Instant::now();
+                Self::recv_result_to_writer(
+                    &handle,
+                    result_wait_timeout,
+                    &mut archive_writer,
+                    &mut pending_write,
+                    &mut next_write_id,
+                    &mut output_bytes_written,
+                    &mut completed_bytes,
+                    &mut first_error,
+                    &mut raw_passthrough_blocks,
+                    &mut received_count,
+                    &mut pending_write_peak,
+                    &mut stage_timings.writer,
+                );
+                let waited = wait_started.elapsed();
+                stage_timings.result_wait += waited;
+                if inflight_full {
+                    stage_timings.submit_wait += waited;
+                }
+            }
+
             Self::emit_archive_progress_if_due(
                 &handle,
                 ArchiveSourceKind::Directory,
@@ -491,70 +673,31 @@ impl ArchivePipeline {
                 false,
                 sink,
             );
-            Ok(())
-        };
-
-        let entry_count = discovery
-            .directories
-            .len()
-            .checked_add(discovery.files.len())
-            .ok_or(crate::OxideError::InvalidFormat(
-                "directory entry count overflow",
-            ))?;
-        let entry_count = u32::try_from(entry_count)
-            .map_err(|_| crate::OxideError::InvalidFormat("directory entry count overflow"))?;
-
-        let mut bundle_header = Vec::with_capacity(10);
-        bundle_header.extend_from_slice(&directory::DIRECTORY_BUNDLE_MAGIC);
-        bundle_header.extend_from_slice(&directory::DIRECTORY_BUNDLE_VERSION.to_le_bytes());
-        bundle_header.extend_from_slice(&entry_count.to_le_bytes());
-        submitter.push_bytes_with_hint(&bundle_header, FileFormat::Common, |batch| {
-            submit_batch(batch)
-        })?;
-
-        for rel_path in &discovery.directories {
-            let mut encoded = Vec::with_capacity(1 + 4 + rel_path.len());
-            encoded.push(0);
-            directory::encode_path(&mut encoded, rel_path)?;
-            submitter
-                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| submit_batch(batch))?;
         }
 
-        let mut read_buffer = vec![0u8; STREAM_READ_BUFFER_SIZE];
-        for (file, file_format) in discovery.files.iter().zip(file_formats.iter().copied()) {
-            let mut encoded = Vec::with_capacity(1 + 4 + file.rel_path.len() + 8);
-            encoded.push(1);
-            directory::encode_path(&mut encoded, &file.rel_path)?;
-            encoded.extend_from_slice(&file.size.to_le_bytes());
-            submitter
-                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| submit_batch(batch))?;
-
-            let mut file_reader = fs::File::open(&file.full_path)?;
-            loop {
-                let read = file_reader.read(&mut read_buffer)?;
-                if read == 0 {
-                    break;
-                }
-
-                submitter.push_bytes_with_hint(&read_buffer[..read], file_format, |batch| {
-                    submit_batch(batch)
-                })?;
+        let producer_outcome = match producer_handle.join() {
+            Ok(outcome) => outcome,
+            Err(payload) => {
+                let details = if let Some(message) = payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "unknown panic payload".to_string()
+                };
+                return Err(crate::OxideError::CompressionError(format!(
+                    "directory producer thread panicked: {details}"
+                )));
+            }
+        };
+        match producer_outcome {
+            Ok(outcome) => {
+                stage_timings.producer_read += outcome.producer_read;
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
             }
         }
-
-        submitter.finish(|batch| submit_batch(batch))?;
-        Self::drain_results_to_writer(
-            &handle,
-            &mut archive_writer,
-            &mut pending_write,
-            &mut next_write_id,
-            &mut output_bytes_written,
-            &mut completed_bytes,
-            &mut first_error,
-            &mut raw_passthrough_blocks,
-            &mut received_count,
-            usize::MAX,
-        );
 
         if submitted_count != total_blocks {
             first_error.get_or_insert(crate::OxideError::InvalidFormat(
@@ -567,12 +710,15 @@ impl ArchivePipeline {
                 "submitted block count drift detected",
             ));
         }
-        handle.shutdown();
+        if !shutdown_called {
+            handle.shutdown();
+        }
 
         while received_count < submitted_count {
+            let wait_started = Instant::now();
             Self::recv_result_to_writer(
                 &handle,
-                Duration::from_millis(100),
+                result_wait_timeout,
                 &mut archive_writer,
                 &mut pending_write,
                 &mut next_write_id,
@@ -581,7 +727,10 @@ impl ArchivePipeline {
                 &mut first_error,
                 &mut raw_passthrough_blocks,
                 &mut received_count,
+                &mut pending_write_peak,
+                &mut stage_timings.writer,
             );
+            stage_timings.result_wait += wait_started.elapsed();
             Self::emit_archive_progress_if_due(
                 &handle,
                 ArchiveSourceKind::Directory,
@@ -619,6 +768,10 @@ impl ArchivePipeline {
             block_size,
             raw_passthrough_blocks,
             self.performance.compression_preset,
+            max_inflight_blocks,
+            max_inflight_bytes,
+            pending_write_peak,
+            stage_timings,
         );
 
         let stats = ArchiveRunStats {
@@ -665,9 +818,23 @@ impl ArchivePipeline {
         }
     }
 
-    fn max_inflight_blocks(total_blocks: usize, num_workers: usize) -> usize {
-        let scaled = num_workers.saturating_mul(MAX_INFLIGHT_BLOCKS_PER_WORKER);
-        let bounded = scaled.clamp(MIN_INFLIGHT_BLOCKS, MAX_INFLIGHT_BLOCKS);
+    fn max_inflight_blocks(
+        total_blocks: usize,
+        num_workers: usize,
+        block_size: usize,
+        performance: &PipelinePerformanceOptions,
+    ) -> usize {
+        let scaled_by_workers =
+            num_workers.saturating_mul(performance.max_inflight_blocks_per_worker);
+        let bounded_workers = scaled_by_workers.clamp(MIN_INFLIGHT_BLOCKS, MAX_INFLIGHT_BLOCKS);
+
+        let block_bytes = block_size.max(1);
+        let inflight_bytes = performance.max_inflight_bytes.max(block_bytes);
+        let bounded_by_bytes = inflight_bytes.div_ceil(block_bytes).max(1);
+
+        let bounded = bounded_workers
+            .min(bounded_by_bytes)
+            .clamp(1, MAX_INFLIGHT_BLOCKS);
         bounded.min(total_blocks.max(1))
     }
 
@@ -681,8 +848,10 @@ impl ArchivePipeline {
         first_error: &mut Option<crate::OxideError>,
         raw_passthrough_blocks: &mut u64,
         received_count: &mut usize,
+        pending_write_peak: &mut usize,
+        writer_time: &mut Duration,
         max_results: usize,
-    ) {
+    ) -> usize {
         let mut drained = 0usize;
         while drained < max_results {
             if let Some(result) = handle.recv_timeout(Duration::from_millis(0)) {
@@ -695,6 +864,8 @@ impl ArchivePipeline {
                     completed_bytes,
                     first_error,
                     raw_passthrough_blocks,
+                    pending_write_peak,
+                    writer_time,
                 );
                 *received_count += 1;
                 drained += 1;
@@ -702,6 +873,7 @@ impl ArchivePipeline {
                 break;
             }
         }
+        drained
     }
 
     fn recv_result_to_writer<W: Write>(
@@ -715,7 +887,9 @@ impl ArchivePipeline {
         first_error: &mut Option<crate::OxideError>,
         raw_passthrough_blocks: &mut u64,
         received_count: &mut usize,
-    ) {
+        pending_write_peak: &mut usize,
+        writer_time: &mut Duration,
+    ) -> bool {
         if let Some(result) = handle.recv_timeout(timeout) {
             Self::record_result_to_writer(
                 result,
@@ -726,8 +900,13 @@ impl ArchivePipeline {
                 completed_bytes,
                 first_error,
                 raw_passthrough_blocks,
+                pending_write_peak,
+                writer_time,
             );
             *received_count += 1;
+            true
+        } else {
+            false
         }
     }
 
@@ -740,6 +919,8 @@ impl ArchivePipeline {
         completed_bytes: &mut u64,
         first_error: &mut Option<crate::OxideError>,
         raw_passthrough_blocks: &mut u64,
+        pending_write_peak: &mut usize,
+        writer_time: &mut Duration,
     ) {
         match result {
             Ok(block) => {
@@ -758,15 +939,19 @@ impl ArchivePipeline {
                     ));
                     return;
                 }
+                *pending_write_peak = (*pending_write_peak).max(pending_write.len());
 
                 while let Some(ready) = pending_write.remove(next_write_id) {
                     *output_bytes_written = (*output_bytes_written)
                         .saturating_add(BLOCK_HEADER_SIZE as u64)
                         .saturating_add(ready.data.len() as u64);
+                    let write_started = Instant::now();
                     if let Err(error) = archive_writer.write_owned_block(ready) {
                         first_error.get_or_insert(error);
+                        *writer_time += write_started.elapsed();
                         break;
                     }
+                    *writer_time += write_started.elapsed();
                     *next_write_id += 1;
                 }
             }
@@ -783,8 +968,21 @@ impl ArchivePipeline {
         block_size: BlockSizeDecision,
         raw_passthrough_blocks: u64,
         compression_preset: CompressionPreset,
+        max_inflight_blocks: usize,
+        max_inflight_bytes: usize,
+        pending_write_peak: usize,
+        stage_timings: StageTimings,
     ) -> BTreeMap<String, StatValue> {
         let mut extensions = BTreeMap::new();
+        let compress_busy_us = runtime
+            .workers
+            .iter()
+            .map(|worker| worker.busy.as_micros())
+            .sum::<u128>()
+            .min(u64::MAX as u128) as u64;
+        let elapsed_us = runtime.elapsed.as_micros().max(1).min(u64::MAX as u128) as u64;
+        let effective_cores = compress_busy_us as f64 / elapsed_us as f64;
+
         extensions.insert(
             "runtime.submitted".to_string(),
             StatValue::U64(runtime.submitted as u64),
@@ -797,13 +995,18 @@ impl ArchivePipeline {
             "runtime.pending".to_string(),
             StatValue::U64(runtime.pending as u64),
         );
-        extensions.insert(
-            "runtime.elapsed_us".to_string(),
-            StatValue::U64(runtime.elapsed.as_micros().min(u64::MAX as u128) as u64),
-        );
+        extensions.insert("runtime.elapsed_us".to_string(), StatValue::U64(elapsed_us));
         extensions.insert(
             "runtime.worker_count".to_string(),
             StatValue::U64(runtime.workers.len() as u64),
+        );
+        extensions.insert(
+            "runtime.compress_busy_us".to_string(),
+            StatValue::U64(compress_busy_us),
+        );
+        extensions.insert(
+            "runtime.effective_cores".to_string(),
+            StatValue::F64(effective_cores),
         );
         extensions.insert(
             "tuning.block_size".to_string(),
@@ -828,6 +1031,47 @@ impl ArchivePipeline {
         extensions.insert(
             "compression.preset".to_string(),
             StatValue::Text(format!("{compression_preset:?}")),
+        );
+        extensions.insert(
+            "pipeline.max_inflight_blocks".to_string(),
+            StatValue::U64(max_inflight_blocks as u64),
+        );
+        extensions.insert(
+            "pipeline.max_inflight_bytes".to_string(),
+            StatValue::U64(max_inflight_bytes as u64),
+        );
+        extensions.insert(
+            "pipeline.pending_write_peak".to_string(),
+            StatValue::U64(pending_write_peak as u64),
+        );
+        extensions.insert(
+            "stage.discovery_us".to_string(),
+            StatValue::U64(stage_timings.discovery.as_micros().min(u64::MAX as u128) as u64),
+        );
+        extensions.insert(
+            "stage.format_probe_us".to_string(),
+            StatValue::U64(stage_timings.format_probe.as_micros().min(u64::MAX as u128) as u64),
+        );
+        extensions.insert(
+            "stage.producer_read_us".to_string(),
+            StatValue::U64(
+                stage_timings
+                    .producer_read
+                    .as_micros()
+                    .min(u64::MAX as u128) as u64,
+            ),
+        );
+        extensions.insert(
+            "stage.submit_wait_us".to_string(),
+            StatValue::U64(stage_timings.submit_wait.as_micros().min(u64::MAX as u128) as u64),
+        );
+        extensions.insert(
+            "stage.result_wait_us".to_string(),
+            StatValue::U64(stage_timings.result_wait.as_micros().min(u64::MAX as u128) as u64),
+        );
+        extensions.insert(
+            "stage.writer_us".to_string(),
+            StatValue::U64(stage_timings.writer.as_micros().min(u64::MAX as u128) as u64),
         );
         if input_bytes_total > 0 {
             extensions.insert(
@@ -854,7 +1098,13 @@ impl ArchivePipeline {
         let total_blocks = batches.len();
         let block_count = u32::try_from(total_blocks)
             .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
-        let max_inflight_blocks = Self::max_inflight_blocks(total_blocks, self.num_workers);
+        let max_inflight_blocks = Self::max_inflight_blocks(
+            total_blocks,
+            self.num_workers,
+            block_size.selected_block_size,
+            &self.performance,
+        );
+        let max_inflight_bytes = max_inflight_blocks.saturating_mul(block_size.selected_block_size);
 
         let worker_pool = WorkerPool::new(
             self.num_workers,
@@ -891,7 +1141,13 @@ impl ArchivePipeline {
         let mut completed_bytes = 0u64;
         let mut received_count = 0usize;
         let mut raw_passthrough_blocks = 0u64;
+        let mut pending_write_peak = 0usize;
         let mut shutdown_called = false;
+        let mut stage_timings = StageTimings::default();
+        let result_wait_timeout = self
+            .performance
+            .result_wait_timeout
+            .max(Duration::from_millis(1));
         let mut batches = batches.into_iter();
 
         loop {
@@ -903,7 +1159,7 @@ impl ArchivePipeline {
                 submitted_count += 1;
             }
 
-            Self::drain_results_to_writer(
+            let drained = Self::drain_results_to_writer(
                 &handle,
                 &mut archive_writer,
                 &mut pending_write,
@@ -913,6 +1169,8 @@ impl ArchivePipeline {
                 &mut first_error,
                 &mut raw_passthrough_blocks,
                 &mut received_count,
+                &mut pending_write_peak,
+                &mut stage_timings.writer,
                 SUBMISSION_DRAIN_BUDGET,
             );
 
@@ -940,18 +1198,24 @@ impl ArchivePipeline {
                 break;
             }
 
-            Self::recv_result_to_writer(
-                &handle,
-                Duration::from_millis(100),
-                &mut archive_writer,
-                &mut pending_write,
-                &mut next_write_id,
-                &mut output_bytes_written,
-                &mut completed_bytes,
-                &mut first_error,
-                &mut raw_passthrough_blocks,
-                &mut received_count,
-            );
+            if drained == 0 {
+                let wait_started = Instant::now();
+                Self::recv_result_to_writer(
+                    &handle,
+                    result_wait_timeout,
+                    &mut archive_writer,
+                    &mut pending_write,
+                    &mut next_write_id,
+                    &mut output_bytes_written,
+                    &mut completed_bytes,
+                    &mut first_error,
+                    &mut raw_passthrough_blocks,
+                    &mut received_count,
+                    &mut pending_write_peak,
+                    &mut stage_timings.writer,
+                );
+                stage_timings.result_wait += wait_started.elapsed();
+            }
             Self::emit_archive_progress_if_due(
                 &handle,
                 source_kind,
@@ -989,6 +1253,10 @@ impl ArchivePipeline {
             block_size,
             raw_passthrough_blocks,
             self.performance.compression_preset,
+            max_inflight_blocks,
+            max_inflight_bytes,
+            pending_write_peak,
+            stage_timings,
         );
 
         let stats = ArchiveRunStats {
@@ -1189,5 +1457,32 @@ impl ArchivePipeline {
             batches,
             input_bytes_total,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inflight_window_is_limited_by_byte_budget() {
+        let mut performance = PipelinePerformanceOptions::default();
+        performance.max_inflight_blocks_per_worker = 32;
+        performance.max_inflight_bytes = 16 * 1024 * 1024;
+
+        let inflight = ArchivePipeline::max_inflight_blocks(10_000, 16, 1024 * 1024, &performance);
+
+        assert_eq!(inflight, 16);
+    }
+
+    #[test]
+    fn inflight_window_never_exceeds_total_blocks() {
+        let mut performance = PipelinePerformanceOptions::default();
+        performance.max_inflight_blocks_per_worker = 64;
+        performance.max_inflight_bytes = 2 * 1024 * 1024 * 1024;
+
+        let inflight = ArchivePipeline::max_inflight_blocks(7, 16, 256 * 1024, &performance);
+
+        assert_eq!(inflight, 7);
     }
 }
