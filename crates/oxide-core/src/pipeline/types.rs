@@ -61,6 +61,16 @@ pub struct PipelinePerformanceOptions {
     pub raw_fallback_enabled: bool,
     /// Compression preset metadata stored in each block.
     pub compression_preset: CompressionPreset,
+    /// Maximum in-flight block payload bytes pending worker completion.
+    pub max_inflight_bytes: usize,
+    /// Maximum in-flight blocks scaled by worker count.
+    pub max_inflight_blocks_per_worker: usize,
+    /// Streaming read buffer size used by directory producer path.
+    pub directory_stream_read_buffer_size: usize,
+    /// Preserves file format boundaries when building directory batches.
+    pub preserve_directory_format_boundaries: bool,
+    /// Timeout used when waiting for worker results.
+    pub result_wait_timeout: Duration,
 }
 
 impl Default for PipelinePerformanceOptions {
@@ -71,6 +81,11 @@ impl Default for PipelinePerformanceOptions {
             autotune_sample_bytes: 128 * 1024 * 1024,
             raw_fallback_enabled: true,
             compression_preset: CompressionPreset::Fast,
+            max_inflight_bytes: 512 * 1024 * 1024,
+            max_inflight_blocks_per_worker: 32,
+            directory_stream_read_buffer_size: 16 * 1024 * 1024,
+            preserve_directory_format_boundaries: false,
+            result_wait_timeout: Duration::from_millis(5),
         }
     }
 }
