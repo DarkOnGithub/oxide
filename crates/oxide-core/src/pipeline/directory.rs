@@ -13,7 +13,6 @@ use super::types::ArchiveSourceKind;
 pub(super) const DIRECTORY_BUNDLE_MAGIC: [u8; 4] = *b"OXDB";
 pub(super) const DIRECTORY_BUNDLE_VERSION: u16 = 1;
 pub(super) const SOURCE_KIND_DIRECTORY_FLAG: u32 = 1 << 0;
-pub(super) const STREAM_READ_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(super) enum DirectoryBundleEntry {
@@ -37,25 +36,25 @@ pub(super) struct DirectoryDiscovery {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct DirectoryArchivePlan {
-    pub(super) discovery: DirectoryDiscovery,
-    pub(super) file_formats: Vec<FileFormat>,
-    pub(super) block_count: u32,
-}
-
 pub(super) struct DirectoryBatchSubmitter {
     source_path: PathBuf,
     block_size: usize,
+    preserve_format_boundaries: bool,
     next_block_id: usize,
     pending: Vec<u8>,
     pending_format: Option<FileFormat>,
 }
 
 impl DirectoryBatchSubmitter {
-    pub(super) fn new(source_path: PathBuf, block_size: usize) -> Self {
+    pub(super) fn new(
+        source_path: PathBuf,
+        block_size: usize,
+        preserve_format_boundaries: bool,
+    ) -> Self {
         Self {
             source_path,
             block_size: block_size.max(1),
+            preserve_format_boundaries,
             next_block_id: 0,
             pending: Vec::with_capacity(block_size.max(1)),
             pending_format: None,
@@ -72,11 +71,21 @@ impl DirectoryBatchSubmitter {
         F: FnMut(Batch) -> Result<()>,
     {
         while !bytes.is_empty() {
-            if self.pending_format != Some(file_type_hint) {
-                if !self.pending.is_empty() {
-                    self.flush_pending(&mut submit)?;
+            match self.pending_format {
+                Some(current) if current != file_type_hint => {
+                    if self.preserve_format_boundaries {
+                        if !self.pending.is_empty() {
+                            self.flush_pending(&mut submit)?;
+                        }
+                        self.pending_format = Some(file_type_hint);
+                    } else {
+                        self.pending_format = Some(FileFormat::Common);
+                    }
                 }
-                self.pending_format = Some(file_type_hint);
+                Some(_) => {}
+                None => {
+                    self.pending_format = Some(file_type_hint);
+                }
             }
 
             let room = self.block_size.saturating_sub(self.pending.len()).max(1);
@@ -238,22 +247,6 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
     })
 }
 
-pub(super) fn plan_directory_archive(
-    root: &Path,
-    block_size: usize,
-    format_probe_limit: usize,
-) -> Result<DirectoryArchivePlan> {
-    let discovery = discover_directory_tree(root)?;
-    let file_formats = detect_file_formats(&discovery, format_probe_limit)?;
-    let block_count = estimate_directory_block_count(&discovery, &file_formats, block_size)?;
-
-    Ok(DirectoryArchivePlan {
-        discovery,
-        file_formats,
-        block_count,
-    })
-}
-
 fn accumulate_bundle_size(current: u64, path_len: usize) -> Result<u64> {
     current
         .checked_add(1)
@@ -264,7 +257,7 @@ fn accumulate_bundle_size(current: u64, path_len: usize) -> Result<u64> {
         ))
 }
 
-fn detect_file_formats(
+pub(super) fn detect_file_formats(
     discovery: &DirectoryDiscovery,
     format_probe_limit: usize,
 ) -> Result<Vec<FileFormat>> {
@@ -281,10 +274,11 @@ fn detect_file_formats(
     Ok(formats)
 }
 
-fn estimate_directory_block_count(
+pub(super) fn estimate_directory_block_count(
     discovery: &DirectoryDiscovery,
     file_formats: &[FileFormat],
     block_size: usize,
+    preserve_format_boundaries: bool,
 ) -> Result<u32> {
     if discovery.files.len() != file_formats.len() {
         return Err(crate::OxideError::InvalidFormat(
@@ -292,7 +286,7 @@ fn estimate_directory_block_count(
         ));
     }
 
-    let mut planner = BlockCountPlanner::new(block_size);
+    let mut planner = BlockCountPlanner::new(block_size, preserve_format_boundaries);
 
     // OXDB magic + version + entry_count.
     planner.push_len(10, FileFormat::Common);
@@ -333,15 +327,17 @@ fn estimate_directory_block_count(
 #[derive(Debug, Clone)]
 struct BlockCountPlanner {
     block_size: usize,
+    preserve_format_boundaries: bool,
     blocks: usize,
     pending_len: usize,
     pending_format: Option<FileFormat>,
 }
 
 impl BlockCountPlanner {
-    fn new(block_size: usize) -> Self {
+    fn new(block_size: usize, preserve_format_boundaries: bool) -> Self {
         Self {
             block_size: block_size.max(1),
+            preserve_format_boundaries,
             blocks: 0,
             pending_len: 0,
             pending_format: None,
@@ -350,9 +346,19 @@ impl BlockCountPlanner {
 
     fn push_len(&mut self, mut len: usize, file_type_hint: FileFormat) {
         while len > 0 {
-            if self.pending_format != Some(file_type_hint) {
-                self.flush_pending();
-                self.pending_format = Some(file_type_hint);
+            match self.pending_format {
+                Some(current) if current != file_type_hint => {
+                    if self.preserve_format_boundaries {
+                        self.flush_pending();
+                        self.pending_format = Some(file_type_hint);
+                    } else {
+                        self.pending_format = Some(FileFormat::Common);
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    self.pending_format = Some(file_type_hint);
+                }
             }
 
             let room = self.block_size.saturating_sub(self.pending_len).max(1);
@@ -538,4 +544,86 @@ fn join_safe(root: &Path, rel_path: &str) -> Result<PathBuf> {
     }
 
     Ok(root.join(rel))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submitter_flushes_on_format_change_when_preserve_boundaries_enabled() {
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8, true);
+        let mut batches = Vec::new();
+
+        submitter
+            .push_bytes_with_hint(b"aaaaaa", FileFormat::Text, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("text push should succeed");
+        submitter
+            .push_bytes_with_hint(b"bbbbbb", FileFormat::Binary, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("binary push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].file_type_hint, FileFormat::Text);
+        assert_eq!(batches[0].len(), 6);
+        assert_eq!(batches[1].file_type_hint, FileFormat::Binary);
+        assert_eq!(batches[1].len(), 6);
+    }
+
+    #[test]
+    fn submitter_merges_formats_when_preserve_boundaries_disabled() {
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8, false);
+        let mut batches = Vec::new();
+
+        submitter
+            .push_bytes_with_hint(b"aaaaaa", FileFormat::Text, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("text push should succeed");
+        submitter
+            .push_bytes_with_hint(b"bbbbbb", FileFormat::Binary, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("binary push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].file_type_hint, FileFormat::Common);
+        assert_eq!(batches[0].len(), 8);
+        assert_eq!(batches[1].file_type_hint, FileFormat::Binary);
+        assert_eq!(batches[1].len(), 4);
+    }
+
+    #[test]
+    fn block_count_planner_respects_boundary_toggle() {
+        let mut preserving = BlockCountPlanner::new(8, true);
+        preserving.push_len(4, FileFormat::Text);
+        preserving.push_len(4, FileFormat::Binary);
+        preserving.push_len(4, FileFormat::Text);
+        assert_eq!(preserving.finish(), 3);
+
+        let mut merging = BlockCountPlanner::new(8, false);
+        merging.push_len(4, FileFormat::Text);
+        merging.push_len(4, FileFormat::Binary);
+        merging.push_len(4, FileFormat::Text);
+        assert_eq!(merging.finish(), 2);
+    }
 }
