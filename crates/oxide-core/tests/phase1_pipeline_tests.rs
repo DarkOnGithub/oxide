@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchiveOptions, ArchivePipeline, ArchiveProgressSnapshot, ArchiveReader, BufferPool,
-    CompressionAlgo, PreProcessingStrategy, ProgressSink, StatValue, TextStrategy,
+    CompressionAlgo, PreProcessingStrategy, ProgressSink, StatValue,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -101,10 +101,7 @@ fn pipeline_records_preprocessing_strategy_in_block_headers()
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, payload) = reader.read_block(0)?;
 
-    assert_eq!(
-        header.strategy()?,
-        PreProcessingStrategy::Text(TextStrategy::Bwt)
-    );
+    assert_eq!(header.strategy()?, PreProcessingStrategy::None);
     assert_eq!(header.compression()?, CompressionAlgo::Lz4);
     assert_eq!(payload.len(), header.compressed_size as usize);
 
@@ -207,7 +204,7 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn directory_archive_uses_per_file_preprocessing_strategies()
+fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode()
 -> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(
@@ -227,29 +224,10 @@ fn directory_archive_uses_per_file_preprocessing_strategies()
     let archive = pipeline.archive_path(source.path(), Vec::new())?;
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
 
-    let mut saw_common = false;
-    let mut saw_text = false;
-    let mut saw_binary = false;
-
     for block in reader.iter_blocks() {
         let (header, _payload) = block?;
-        match header.strategy()? {
-            PreProcessingStrategy::None => saw_common = true,
-            PreProcessingStrategy::Text(TextStrategy::Bwt) => saw_text = true,
-            PreProcessingStrategy::Binary(_) => saw_binary = true,
-            _ => {}
-        }
+        assert_eq!(header.strategy()?, PreProcessingStrategy::None);
     }
-
-    assert!(
-        saw_common,
-        "directory metadata blocks should stay as common"
-    );
-    assert!(saw_text, "expected at least one text-preprocessed block");
-    assert!(
-        saw_binary,
-        "expected at least one binary-preprocessed block"
-    );
 
     Ok(())
 }
@@ -324,6 +302,22 @@ fn archive_path_with_reports_progress_and_extensible_stats()
         stats.extension_u64("runtime.worker_count"),
         Some(stats.workers.len() as u64)
     );
+    assert!(matches!(
+        stats.extension("runtime.effective_cores"),
+        Some(StatValue::F64(_))
+    ));
+    assert!(matches!(
+        stats.extension("pipeline.max_inflight_blocks"),
+        Some(StatValue::U64(_))
+    ));
+    assert!(matches!(
+        stats.extension("pipeline.max_inflight_bytes"),
+        Some(StatValue::U64(_))
+    ));
+    assert!(matches!(
+        stats.extension("stage.writer_us"),
+        Some(StatValue::U64(_))
+    ));
     assert!(matches!(
         stats.extension("archive.output_input_ratio"),
         Some(StatValue::F64(_))
