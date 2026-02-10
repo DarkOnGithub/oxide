@@ -60,26 +60,23 @@ fn preprocessing_round_trip_is_identity_for_all_strategies() {
 }
 
 #[test]
-fn compression_router_apply_returns_original_for_all_algorithms() {
+fn compression_router_apply_is_codec_specific() {
     let input = fixture();
-    for algo in [
-        CompressionAlgo::Lz4,
-        CompressionAlgo::Lzma,
-        CompressionAlgo::Deflate,
-    ] {
-        let output = apply_compression(&input, algo).expect("apply should succeed");
-        assert_eq!(output, input, "algorithm should be pass-through: {algo:?}");
-    }
+    let lz4 = apply_compression(&input, CompressionAlgo::Lz4).expect("lz4 apply should succeed");
+    assert_ne!(lz4, input, "lz4 should transform bytes");
+
+    let lzma = apply_compression(&input, CompressionAlgo::Lzma).expect("lzma apply should succeed");
+    assert_eq!(lzma, input, "lzma stub should remain pass-through");
+
+    let deflate =
+        apply_compression(&input, CompressionAlgo::Deflate).expect("deflate apply should succeed");
+    assert_eq!(deflate, input, "deflate stub should remain pass-through");
 }
 
 #[test]
-fn compression_router_reverse_returns_original_for_all_algorithms() {
+fn compression_router_reverse_returns_original_for_stub_algorithms() {
     let input = fixture();
-    for algo in [
-        CompressionAlgo::Lz4,
-        CompressionAlgo::Lzma,
-        CompressionAlgo::Deflate,
-    ] {
+    for algo in [CompressionAlgo::Lzma, CompressionAlgo::Deflate] {
         let output = reverse_compression(&input, algo).expect("reverse should succeed");
         assert_eq!(output, input, "algorithm should be pass-through: {algo:?}");
     }

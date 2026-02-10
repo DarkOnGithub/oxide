@@ -1,13 +1,13 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use oxide_core::{
-    ArchivePipeline, ArchiveProgressSnapshot, ArchiveReader, ArchiveSourceKind, BLOCK_HEADER_SIZE,
-    BufferPool, CompressionAlgo, FOOTER_SIZE, GLOBAL_HEADER_SIZE, OxideError,
+    ArchivePipeline, ArchiveProgressSnapshot, ArchiveSourceKind, BufferPool, CompressionAlgo,
+    PipelinePerformanceOptions,
 };
 
 #[derive(Parser)]
@@ -45,6 +45,10 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = CompressionArg::Lz4)]
         compression: CompressionArg,
 
+        /// Enable block-size autotuning for large inputs.
+        #[arg(long, default_value_t = false)]
+        autotune: bool,
+
         /// Buffer pool default capacity (supports suffixes K/M/G).
         #[arg(long, default_value = "1M", value_parser = parse_size)]
         pool_capacity: usize,
@@ -72,6 +76,10 @@ enum Commands {
         /// Progress refresh interval in milliseconds.
         #[arg(long, default_value_t = 250)]
         stats_interval_ms: u64,
+
+        /// Number of decode worker threads (defaults to CPU count).
+        #[arg(long, default_value_t = num_cpus::get())]
+        workers: usize,
     },
 }
 
@@ -109,6 +117,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             block_size,
             workers,
             compression,
+            autotune,
             pool_capacity,
             pool_buffers,
             stats_interval_ms,
@@ -118,6 +127,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             block_size,
             workers,
             compression.into(),
+            autotune,
             pool_capacity,
             pool_buffers,
             stats_interval_ms,
@@ -126,7 +136,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             input,
             output,
             stats_interval_ms,
-        } => extract_command(input, output, stats_interval_ms)?,
+            workers,
+        } => extract_command(input, output, stats_interval_ms, workers)?,
     }
 
     Ok(())
@@ -138,6 +149,7 @@ fn archive_command(
     block_size: usize,
     workers: usize,
     compression: CompressionAlgo,
+    autotune: bool,
     pool_capacity: usize,
     pool_buffers: usize,
     stats_interval_ms: u64,
@@ -148,11 +160,14 @@ fn archive_command(
     }
 
     let buffer_pool = Arc::new(BufferPool::new(pool_capacity.max(1), pool_buffers.max(1)));
-    let pipeline = ArchivePipeline::new(
+    let mut performance = PipelinePerformanceOptions::default();
+    performance.autotune_enabled = autotune;
+    let pipeline = ArchivePipeline::with_performance(
         block_size.max(1),
         workers.max(1),
         Arc::clone(&buffer_pool),
         compression,
+        performance,
     );
     let output_file = File::create(&output_path)?;
     let progress_interval = Duration::from_millis(stats_interval_ms.max(50));
@@ -271,67 +286,34 @@ fn archive_command(
 fn extract_command(
     input: PathBuf,
     output: Option<PathBuf>,
-    stats_interval_ms: u64,
+    _stats_interval_ms: u64,
+    workers: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_path = output.unwrap_or_else(|| default_extract_output_path(&input));
     let archive_bytes = fs::metadata(&input)?.len();
-    let mut reader = ArchiveReader::new(File::open(&input)?)?;
-    let total_blocks = reader.block_count() as u64;
-    let flags = reader.global_header().flags;
+    let decode_workers = workers.max(1);
+    let buffer_pool = Arc::new(BufferPool::new(
+        1024 * 1024,
+        decode_workers.saturating_mul(8),
+    ));
+    let pipeline = ArchivePipeline::with_performance(
+        1024 * 1024,
+        decode_workers,
+        buffer_pool,
+        CompressionAlgo::Lz4,
+        PipelinePerformanceOptions::default(),
+    );
 
     let started_at = Instant::now();
-    let mut last_emit_at = Instant::now();
-    let emit_every = Duration::from_millis(stats_interval_ms.max(50));
-    let mut last_archive_bytes = GLOBAL_HEADER_SIZE as u64;
-    let mut last_elapsed = Duration::ZERO;
-    let mut peak_instant_bps = 0.0f64;
-    let mut archive_processed = GLOBAL_HEADER_SIZE as u64;
-    let mut payload_processed = 0u64;
-    let mut blocks_done = 0u64;
-    let mut payload = Vec::new();
-
-    for entry in reader.iter_blocks() {
-        let (header, block_data) = entry?;
-        archive_processed = archive_processed
-            .saturating_add(BLOCK_HEADER_SIZE as u64)
-            .saturating_add(header.compressed_size as u64);
-        payload_processed = payload_processed.saturating_add(block_data.len() as u64);
-        payload.extend_from_slice(&block_data);
-        blocks_done = blocks_done.saturating_add(1);
-
-        if last_emit_at.elapsed() >= emit_every || blocks_done == total_blocks {
-            let elapsed = started_at.elapsed();
-            emit_extract_progress(
-                elapsed,
-                archive_processed.min(archive_bytes),
-                archive_bytes,
-                payload_processed,
-                blocks_done,
-                total_blocks,
-                &mut last_archive_bytes,
-                &mut last_elapsed,
-                &mut peak_instant_bps,
-            );
-            last_emit_at = Instant::now();
-        }
-    }
-
-    archive_processed = archive_processed.saturating_add(FOOTER_SIZE as u64);
-    emit_extract_progress(
-        started_at.elapsed(),
-        archive_processed.min(archive_bytes),
-        archive_bytes,
-        payload_processed,
-        blocks_done,
-        total_blocks,
-        &mut last_archive_bytes,
-        &mut last_elapsed,
-        &mut peak_instant_bps,
-    );
-    eprintln!();
-
-    let (source_kind, restored_bytes) = restore_payload(&output_path, payload, flags)?;
+    let source_kind =
+        pipeline.extract_path_with_workers(File::open(&input)?, &output_path, decode_workers)?;
     let elapsed = started_at.elapsed();
+    let restored_bytes = measure_restored_bytes(&output_path, source_kind)?;
+    let peak_instant_bps = if elapsed.as_secs_f64() > 0.0 {
+        archive_bytes as f64 / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
 
     print_extract_summary(
         &input,
@@ -343,6 +325,38 @@ fn extract_command(
         peak_instant_bps,
     );
     Ok(())
+}
+
+fn measure_restored_bytes(
+    output_path: &Path,
+    source_kind: ArchiveSourceKind,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    match source_kind {
+        ArchiveSourceKind::File => Ok(fs::metadata(output_path)?.len()),
+        ArchiveSourceKind::Directory => measure_directory_bytes(output_path),
+    }
+}
+
+fn measure_directory_bytes(root: &Path) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut total = 0u64;
+    if !root.exists() {
+        return Ok(0);
+    }
+
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                total = total.saturating_add(entry.metadata()?.len());
+            }
+        }
+    }
+
+    Ok(total)
 }
 
 fn print_extract_summary(
@@ -380,57 +394,6 @@ fn print_extract_summary(
         format_rate(peak_instant_bps)
     );
     println!("  restore throughput: {}/s", format_rate(restore_bps));
-}
-
-fn emit_extract_progress(
-    elapsed: Duration,
-    archive_done: u64,
-    archive_total: u64,
-    payload_done: u64,
-    blocks_done: u64,
-    blocks_total: u64,
-    last_archive_done: &mut u64,
-    last_elapsed: &mut Duration,
-    peak_instant_bps: &mut f64,
-) {
-    let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
-    let avg_bps = archive_done as f64 / elapsed_secs;
-    let delta_bytes = archive_done.saturating_sub(*last_archive_done);
-    let delta_elapsed = elapsed.saturating_sub(*last_elapsed);
-    let delta_secs = delta_elapsed.as_secs_f64();
-    let instant_bps = if delta_secs > 0.0 {
-        delta_bytes as f64 / delta_secs
-    } else {
-        avg_bps
-    };
-    *peak_instant_bps = (*peak_instant_bps).max(instant_bps);
-
-    let remaining = archive_total.saturating_sub(archive_done);
-    let eta = if avg_bps > 0.0 {
-        Duration::from_secs_f64(remaining as f64 / avg_bps)
-    } else {
-        Duration::ZERO
-    };
-    let progress = if archive_total > 0 {
-        (archive_done as f64 / archive_total as f64) * 100.0
-    } else {
-        100.0
-    };
-
-    let line = format!(
-        "\r\x1b[2K[{progress:6.2}%] blocks {blocks_done}/{blocks_total} | archive {} / {} | payload {} | avg {}/s | inst {}/s | ETA {}",
-        format_bytes(archive_done),
-        format_bytes(archive_total),
-        format_bytes(payload_done),
-        format_rate(avg_bps),
-        format_rate(instant_bps),
-        format_duration(eta),
-    );
-    eprint!("{line}");
-    let _ = io::stderr().flush();
-
-    *last_archive_done = archive_done;
-    *last_elapsed = elapsed;
 }
 
 fn print_summary(
@@ -546,214 +509,6 @@ fn default_extract_output_path(input: &Path) -> PathBuf {
     let mut fallback = input.as_os_str().to_os_string();
     fallback.push(".out");
     PathBuf::from(fallback)
-}
-
-fn restore_payload(
-    output_path: &Path,
-    payload: Vec<u8>,
-    flags: u32,
-) -> Result<(ArchiveSourceKind, u64), Box<dyn std::error::Error>> {
-    if let Some(entries) = decode_directory_entries(&payload, flags)? {
-        let restored_bytes = write_directory_entries(output_path, entries)?;
-        return Ok((ArchiveSourceKind::Directory, restored_bytes));
-    }
-
-    if let Some(parent) = output_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(output_path, &payload)?;
-    Ok((ArchiveSourceKind::File, payload.len() as u64))
-}
-
-#[derive(Debug)]
-enum DirectoryBundleEntry {
-    Directory { rel_path: String },
-    File { rel_path: String, data: Vec<u8> },
-}
-
-const DIRECTORY_BUNDLE_MAGIC: [u8; 4] = *b"OXDB";
-const DIRECTORY_BUNDLE_VERSION: u16 = 1;
-const SOURCE_KIND_DIRECTORY_FLAG: u32 = 1 << 0;
-
-fn decode_directory_entries(
-    payload: &[u8],
-    flags: u32,
-) -> Result<Option<Vec<DirectoryBundleEntry>>, OxideError> {
-    if flags & SOURCE_KIND_DIRECTORY_FLAG != 0 {
-        return decode_directory_bundle(payload).map(Some);
-    }
-
-    match decode_directory_bundle(payload) {
-        Ok(entries) => Ok(Some(entries)),
-        Err(_) => Ok(None),
-    }
-}
-
-fn write_directory_entries(
-    root: &Path,
-    entries: Vec<DirectoryBundleEntry>,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    fs::create_dir_all(root)?;
-    let mut restored_bytes = 0u64;
-
-    for entry in entries {
-        match entry {
-            DirectoryBundleEntry::Directory { rel_path } => {
-                let out_path = join_safe(root, &rel_path)?;
-                fs::create_dir_all(out_path)?;
-            }
-            DirectoryBundleEntry::File { rel_path, data } => {
-                let out_path = join_safe(root, &rel_path)?;
-                if let Some(parent) = out_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                restored_bytes = restored_bytes.saturating_add(data.len() as u64);
-                fs::write(out_path, data)?;
-            }
-        }
-    }
-
-    Ok(restored_bytes)
-}
-
-fn decode_directory_bundle(payload: &[u8]) -> Result<Vec<DirectoryBundleEntry>, OxideError> {
-    if payload.len() < 10 {
-        return Err(OxideError::InvalidFormat("directory bundle is too short"));
-    }
-
-    if payload[..4] != DIRECTORY_BUNDLE_MAGIC {
-        return Err(OxideError::InvalidFormat(
-            "archive payload is not a directory bundle",
-        ));
-    }
-
-    let version = u16::from_le_bytes([payload[4], payload[5]]);
-    if version != DIRECTORY_BUNDLE_VERSION {
-        return Err(OxideError::InvalidFormat(
-            "unsupported directory bundle version",
-        ));
-    }
-
-    let entry_count = u32::from_le_bytes([payload[6], payload[7], payload[8], payload[9]]);
-    let mut cursor = 10usize;
-    let mut entries = Vec::with_capacity(entry_count as usize);
-
-    for _ in 0..entry_count {
-        if cursor >= payload.len() {
-            return Err(OxideError::InvalidFormat(
-                "truncated directory bundle entry kind",
-            ));
-        }
-        let kind = payload[cursor];
-        cursor += 1;
-
-        let rel_path = decode_path(payload, &mut cursor)?;
-        match kind {
-            0 => entries.push(DirectoryBundleEntry::Directory { rel_path }),
-            1 => {
-                if cursor + 8 > payload.len() {
-                    return Err(OxideError::InvalidFormat(
-                        "truncated directory bundle file size",
-                    ));
-                }
-                let size = u64::from_le_bytes([
-                    payload[cursor],
-                    payload[cursor + 1],
-                    payload[cursor + 2],
-                    payload[cursor + 3],
-                    payload[cursor + 4],
-                    payload[cursor + 5],
-                    payload[cursor + 6],
-                    payload[cursor + 7],
-                ]);
-                cursor += 8;
-
-                let size_usize = usize::try_from(size)
-                    .map_err(|_| OxideError::InvalidFormat("file size overflow"))?;
-                let end = cursor
-                    .checked_add(size_usize)
-                    .ok_or(OxideError::InvalidFormat(
-                        "directory bundle offset overflow",
-                    ))?;
-                if end > payload.len() {
-                    return Err(OxideError::InvalidFormat(
-                        "truncated directory bundle file data",
-                    ));
-                }
-
-                let data = payload[cursor..end].to_vec();
-                cursor = end;
-                entries.push(DirectoryBundleEntry::File { rel_path, data });
-            }
-            _ => {
-                return Err(OxideError::InvalidFormat(
-                    "invalid directory bundle entry kind",
-                ));
-            }
-        }
-    }
-    if cursor != payload.len() {
-        return Err(OxideError::InvalidFormat(
-            "directory bundle has trailing data",
-        ));
-    }
-
-    Ok(entries)
-}
-
-fn decode_path(payload: &[u8], cursor: &mut usize) -> Result<String, OxideError> {
-    if *cursor + 4 > payload.len() {
-        return Err(OxideError::InvalidFormat(
-            "truncated directory bundle path length",
-        ));
-    }
-    let len = u32::from_le_bytes([
-        payload[*cursor],
-        payload[*cursor + 1],
-        payload[*cursor + 2],
-        payload[*cursor + 3],
-    ]) as usize;
-    *cursor += 4;
-
-    let end = cursor
-        .checked_add(len)
-        .ok_or(OxideError::InvalidFormat("directory path offset overflow"))?;
-    if end > payload.len() {
-        return Err(OxideError::InvalidFormat(
-            "truncated directory bundle path data",
-        ));
-    }
-
-    let rel_path = std::str::from_utf8(&payload[*cursor..end])
-        .map_err(|_| OxideError::InvalidFormat("directory path is not utf8"))?
-        .to_string();
-    *cursor = end;
-    Ok(rel_path)
-}
-
-fn join_safe(root: &Path, rel_path: &str) -> Result<PathBuf, OxideError> {
-    let rel = Path::new(rel_path);
-    if rel.is_absolute() {
-        return Err(OxideError::InvalidFormat(
-            "absolute paths are not allowed in directory bundle",
-        ));
-    }
-
-    for component in rel.components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(OxideError::InvalidFormat(
-                    "unsafe path component in directory bundle",
-                ));
-            }
-        }
-    }
-
-    Ok(root.join(rel))
 }
 
 fn parse_size(value: &str) -> Result<usize, String> {

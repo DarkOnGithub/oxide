@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use oxide_core::{
     ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, BlockHeader, BufferPool, CompressionAlgo,
-    Footer, GLOBAL_HEADER_SIZE, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
-    ReorderBuffer, TextStrategy,
+    CompressionMeta, CompressionPreset, Footer, GLOBAL_HEADER_SIZE, GlobalHeader, ImageStrategy,
+    OxideError, PreProcessingStrategy, ReorderBuffer, TextStrategy,
 };
 
 fn block(
@@ -96,6 +96,21 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         PreProcessingStrategy::Text(TextStrategy::Bwt)
     );
     assert_eq!(decoded.compression()?, CompressionAlgo::Lzma);
+    Ok(())
+}
+
+#[test]
+fn compression_meta_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let meta = CompressionMeta::new(CompressionAlgo::Lz4, CompressionPreset::Fast, true);
+    let encoded = meta.to_flags();
+    let decoded = CompressionMeta::from_flags(encoded)?;
+
+    assert_eq!(decoded.algo, CompressionAlgo::Lz4);
+    assert_eq!(decoded.preset, CompressionPreset::Fast);
+    assert!(decoded.raw_passthrough);
+
+    assert!(CompressionMeta::from_flags(0b1110_0001).is_err());
+    assert!(CompressionMeta::from_flags(0b0001_0000).is_err());
     Ok(())
 }
 

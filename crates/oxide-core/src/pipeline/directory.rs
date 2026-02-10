@@ -37,12 +37,6 @@ pub(super) struct DirectoryDiscovery {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct DirectoryArchivePlan {
-    pub(super) discovery: DirectoryDiscovery,
-    pub(super) file_formats: Vec<FileFormat>,
-    pub(super) block_count: u32,
-}
-
 pub(super) struct DirectoryBatchSubmitter {
     source_path: PathBuf,
     block_size: usize,
@@ -238,22 +232,6 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
     })
 }
 
-pub(super) fn plan_directory_archive(
-    root: &Path,
-    block_size: usize,
-    format_probe_limit: usize,
-) -> Result<DirectoryArchivePlan> {
-    let discovery = discover_directory_tree(root)?;
-    let file_formats = detect_file_formats(&discovery, format_probe_limit)?;
-    let block_count = estimate_directory_block_count(&discovery, &file_formats, block_size)?;
-
-    Ok(DirectoryArchivePlan {
-        discovery,
-        file_formats,
-        block_count,
-    })
-}
-
 fn accumulate_bundle_size(current: u64, path_len: usize) -> Result<u64> {
     current
         .checked_add(1)
@@ -264,7 +242,7 @@ fn accumulate_bundle_size(current: u64, path_len: usize) -> Result<u64> {
         ))
 }
 
-fn detect_file_formats(
+pub(super) fn detect_file_formats(
     discovery: &DirectoryDiscovery,
     format_probe_limit: usize,
 ) -> Result<Vec<FileFormat>> {
@@ -281,7 +259,7 @@ fn detect_file_formats(
     Ok(formats)
 }
 
-fn estimate_directory_block_count(
+pub(super) fn estimate_directory_block_count(
     discovery: &DirectoryDiscovery,
     file_formats: &[FileFormat],
     block_size: usize,

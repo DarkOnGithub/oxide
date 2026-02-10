@@ -161,6 +161,87 @@ impl From<BatchData> for Bytes {
     }
 }
 
+/// Compression preset used by a codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompressionPreset {
+    Fast,
+    Default,
+    High,
+}
+
+impl CompressionPreset {
+    /// Encodes the preset into bits 3..=4 of compression flags.
+    pub fn to_flag_bits(self) -> u8 {
+        match self {
+            Self::Fast => 0b00 << 3,
+            Self::Default => 0b01 << 3,
+            Self::High => 0b10 << 3,
+        }
+    }
+
+    /// Decodes bits 3..=4 from compression flags.
+    pub fn from_flag_bits(flags: u8) -> Result<Self> {
+        match (flags >> 3) & 0b11 {
+            0b00 => Ok(Self::Fast),
+            0b01 => Ok(Self::Default),
+            0b10 => Ok(Self::High),
+            _ => Err(OxideError::InvalidFormat(
+                "invalid compression preset flags",
+            )),
+        }
+    }
+}
+
+/// Compression metadata carried per block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompressionMeta {
+    pub algo: CompressionAlgo,
+    pub preset: CompressionPreset,
+    pub raw_passthrough: bool,
+}
+
+impl CompressionMeta {
+    pub fn new(algo: CompressionAlgo, preset: CompressionPreset, raw_passthrough: bool) -> Self {
+        Self {
+            algo,
+            preset,
+            raw_passthrough,
+        }
+    }
+
+    /// Encodes compression metadata into OXZ compression flags.
+    ///
+    /// Layout:
+    /// - Bits 0..=1: algorithm (01 LZ4, 10 LZMA, 11 Deflate)
+    /// - Bit 2: raw passthrough marker
+    /// - Bits 3..=4: preset (00 Fast, 01 Default, 10 High)
+    /// - Bits 5..=7: reserved (must be zero)
+    pub fn to_flags(self) -> u8 {
+        let algo = self.algo.to_flags();
+        let raw = if self.raw_passthrough { 1 << 2 } else { 0 };
+        algo | raw | self.preset.to_flag_bits()
+    }
+
+    /// Decodes compression metadata from OXZ compression flags.
+    pub fn from_flags(flags: u8) -> Result<Self> {
+        if flags & 0b1110_0000 != 0 {
+            return Err(OxideError::InvalidFormat(
+                "invalid compression flags reserved bits",
+            ));
+        }
+
+        let algo = CompressionAlgo::from_flags(flags & 0b11)?;
+        let preset = CompressionPreset::from_flag_bits(flags)?;
+        let raw_passthrough = flags & (1 << 2) != 0;
+
+        Ok(Self {
+            algo,
+            preset,
+            raw_passthrough,
+        })
+    }
+}
+
 /// A compressed data block with metadata.
 ///
 /// Compressed blocks store the compressed data along with information
@@ -172,6 +253,8 @@ pub struct CompressedBlock {
     pub data: Vec<u8>,
     pub pre_proc: PreProcessingStrategy,
     pub compression: CompressionAlgo,
+    pub compression_preset: CompressionPreset,
+    pub raw_passthrough: bool,
     pub original_len: u64,
     /// CRC32 checksum of the compressed data
     pub crc32: u32,
@@ -193,14 +276,42 @@ impl CompressedBlock {
         compression: CompressionAlgo,
         original_len: u64,
     ) -> Self {
+        Self::with_compression_meta(
+            id,
+            data,
+            pre_proc,
+            CompressionMeta::new(compression, CompressionPreset::Default, false),
+            original_len,
+        )
+    }
+
+    /// Creates a new compressed block using explicit compression metadata.
+    pub fn with_compression_meta(
+        id: usize,
+        data: Vec<u8>,
+        pre_proc: PreProcessingStrategy,
+        compression_meta: CompressionMeta,
+        original_len: u64,
+    ) -> Self {
         let crc32 = crc32fast::hash(&data);
         Self {
             id,
             data,
             pre_proc,
-            compression,
+            compression: compression_meta.algo,
+            compression_preset: compression_meta.preset,
+            raw_passthrough: compression_meta.raw_passthrough,
             original_len,
             crc32,
+        }
+    }
+
+    /// Returns the compression metadata for this block.
+    pub fn compression_meta(&self) -> CompressionMeta {
+        CompressionMeta {
+            algo: self.compression,
+            preset: self.compression_preset,
+            raw_passthrough: self.raw_passthrough,
         }
     }
 

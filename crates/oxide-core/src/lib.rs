@@ -24,11 +24,12 @@ pub use format::{
 pub use io::{BoundaryMode, InputScanner, MmapInput};
 pub use pipeline::{
     ArchiveOptions, ArchiveOutcome, ArchivePipeline, ArchiveProgressSnapshot, ArchiveRunStats,
-    ArchiveSourceKind, NoopProgress, ProgressSink, StatValue,
+    ArchiveSourceKind, NoopProgress, PipelinePerformanceOptions, ProgressSink, StatValue,
 };
 pub use preprocessing::{apply_preprocessing, reverse_preprocessing};
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use types::{
-    AudioStrategy, Batch, BatchData, BinaryStrategy, CompressedBlock, CompressionAlgo, FileFormat,
-    ImageStrategy, PreProcessingStrategy, Result, TextStrategy,
+    AudioStrategy, Batch, BatchData, BinaryStrategy, CompressedBlock, CompressionAlgo,
+    CompressionMeta, CompressionPreset, FileFormat, ImageStrategy, PreProcessingStrategy, Result,
+    TextStrategy,
 };
