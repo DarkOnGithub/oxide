@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub const EPHEMERAL_OUTPUT_TOKEN: &str = ":ephemeral";
+pub const NULL_OUTPUT_TOKEN: &str = ":null";
+
 pub fn parse_size(value: &str) -> Result<usize, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -31,6 +34,22 @@ pub fn parse_size(value: &str) -> Result<usize, String> {
 
     base.checked_mul(multiplier)
         .ok_or_else(|| format!("size overflow: {value}"))
+}
+
+pub fn is_ephemeral_output_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        ":ephemeral" | ":temp" | ":tmp" | ":discard" | "ephemeral"
+    )
+}
+
+pub fn is_null_output_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        ":null" | ":devnull" | ":sink" | "null" | "/dev/null" | "nul"
+    )
 }
 
 pub fn format_bytes(bytes: u64) -> String {

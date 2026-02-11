@@ -55,6 +55,10 @@ impl FileBrowser {
         self.selected
     }
 
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub fn show_hidden(&self) -> bool {
         self.show_hidden
     }
@@ -75,6 +79,26 @@ impl FileBrowser {
     pub fn move_prev(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
+        }
+    }
+
+    pub fn set_selected(&mut self, index: usize) {
+        if self.entries.is_empty() {
+            self.selected = 0;
+        } else {
+            self.selected = index.min(self.entries.len().saturating_sub(1));
+        }
+    }
+
+    pub fn scroll(&mut self, delta: i32) {
+        if delta > 0 {
+            for _ in 0..delta {
+                self.move_next();
+            }
+        } else if delta < 0 {
+            for _ in 0..delta.unsigned_abs() {
+                self.move_prev();
+            }
         }
     }
 
