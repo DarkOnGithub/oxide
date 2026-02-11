@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::CompressionPreset;
 use crate::core::{PoolRuntimeSnapshot, WorkerRuntimeSnapshot};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArchiveSourceKind {
     File,
     Directory,

@@ -8,14 +8,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
-use rayon::prelude::*;
 
 use crate::buffer::BufferPool;
-use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerPoolHandle};
+use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerPoolHandle, WorkerRuntimeSnapshot};
 use crate::format::{
-    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
+    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, BlockHeader, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
 };
 use crate::io::InputScanner;
+use crate::report::{ExtractReport, ReportBuildOptions, ReportValue, ThreadReport, WorkerReport};
 use crate::types::{
     Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
     PreProcessingStrategy, Result,
@@ -72,8 +72,43 @@ struct StageTimings {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+struct ExtractStageTimings {
+    archive_read: Duration,
+    decode_submit: Duration,
+    decode_wait: Duration,
+    merge: Duration,
+    directory_decode: Duration,
+    output_write: Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 struct DirectoryProducerOutcome {
     producer_read: Duration,
+}
+
+#[derive(Debug)]
+struct DecodedArchivePayload {
+    flags: u32,
+    payload: Vec<u8>,
+    archive_bytes_total: u64,
+    blocks_total: u32,
+    workers: Vec<WorkerRuntimeSnapshot>,
+    stage_timings: ExtractStageTimings,
+}
+
+#[derive(Debug)]
+struct DecodeTask {
+    index: usize,
+    header: BlockHeader,
+    block_data: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct DecodeWorkerOutcome {
+    worker_id: usize,
+    tasks_completed: usize,
+    busy: Duration,
+    uptime: Duration,
 }
 
 /// End-to-end Phase 1 pipeline that wires scanner, workers, and OXZ I/O.
@@ -146,16 +181,7 @@ impl ArchivePipeline {
         W: Write,
         S: ProgressSink + ?Sized,
     {
-        let path = path.as_ref();
-        let metadata = fs::metadata(path)?;
-        if !metadata.is_file() {
-            return Err(crate::OxideError::InvalidFormat(
-                "archive_file expects a file path",
-            ));
-        }
-        let block_size = self.choose_block_size_for_file(path, metadata.len())?;
-        let prepared = self.prepare_file(path, block_size.selected_block_size)?;
-        self.archive_prepared_with(prepared, writer, &options, sink, block_size)
+        self.archive_file_path_with(path.as_ref(), writer, &options, sink)
     }
 
     /// Archives either a single file or a directory tree.
@@ -185,11 +211,9 @@ impl ArchivePipeline {
         let path = path.as_ref();
         let metadata = fs::metadata(path)?;
         if metadata.is_file() {
-            let block_size = self.choose_block_size_for_file(path, metadata.len())?;
-            let prepared = self.prepare_file(path, block_size.selected_block_size)?;
-            self.archive_prepared_with(prepared, writer, &options, sink, block_size)
+            self.archive_file_path_with(path, writer, &options, sink)
         } else if metadata.is_dir() {
-            self.archive_directory_streaming_with(path, writer, &options, sink)
+            self.archive_directory_path_with(path, writer, &options, sink)
         } else {
             Err(crate::OxideError::InvalidFormat(
                 "path must be a file or directory",
@@ -221,7 +245,7 @@ impl ArchivePipeline {
         W: Write,
         S: ProgressSink + ?Sized,
     {
-        self.archive_directory_streaming_with(dir_path.as_ref(), writer, &options, sink)
+        self.archive_directory_path_with(dir_path.as_ref(), writer, &options, sink)
     }
 
     /// Archives a file or directory and emits progress snapshots while processing.
@@ -248,10 +272,45 @@ impl ArchivePipeline {
             .map(|outcome| (outcome.writer, outcome.stats))
     }
 
+    fn archive_file_path_with<W, S>(
+        &self,
+        path: &Path,
+        writer: W,
+        options: &ArchiveOptions,
+        sink: &mut S,
+    ) -> Result<ArchiveOutcome<W>>
+    where
+        W: Write,
+        S: ProgressSink + ?Sized,
+    {
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_file() {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive_file expects a file path",
+            ));
+        }
+        let block_size = self.choose_block_size_for_file(path, metadata.len())?;
+        let prepared = self.prepare_file(path, block_size.selected_block_size)?;
+        self.archive_prepared_with(prepared, writer, options, sink, block_size)
+    }
+
+    fn archive_directory_path_with<W, S>(
+        &self,
+        dir_path: &Path,
+        writer: W,
+        options: &ArchiveOptions,
+        sink: &mut S,
+    ) -> Result<ArchiveOutcome<W>>
+    where
+        W: Write,
+        S: ProgressSink + ?Sized,
+    {
+        self.archive_directory_streaming_with(dir_path, writer, options, sink)
+    }
+
     /// Extracts all block payload bytes from an OXZ archive in block order.
     pub fn extract_archive<R: Read + std::io::Seek>(&self, reader: R) -> Result<Vec<u8>> {
-        let (_flags, payload) = Self::read_archive_payload(reader, self.num_workers)?;
-        Ok(payload)
+        self.extract_archive_with_workers(reader, self.num_workers)
     }
 
     /// Extracts all block payload bytes from an OXZ archive in block order
@@ -261,8 +320,47 @@ impl ArchivePipeline {
         reader: R,
         workers: usize,
     ) -> Result<Vec<u8>> {
-        let (_flags, payload) = Self::read_archive_payload(reader, workers)?;
-        Ok(payload)
+        let decoded = Self::read_archive_payload_with_metrics(reader, workers)?;
+        Ok(decoded.payload)
+    }
+
+    /// Extracts all block payload bytes from an OXZ archive in block order and
+    /// returns a detailed extract report.
+    pub fn extract_archive_with_report<R: Read + std::io::Seek>(
+        &self,
+        reader: R,
+    ) -> Result<(Vec<u8>, ExtractReport)> {
+        self.extract_archive_with_workers_and_report(
+            reader,
+            self.num_workers,
+            ReportBuildOptions::default(),
+        )
+    }
+
+    /// Extracts all block payload bytes with explicit worker count and report options.
+    pub fn extract_archive_with_workers_and_report<R: Read + std::io::Seek>(
+        &self,
+        reader: R,
+        workers: usize,
+        report_options: ReportBuildOptions,
+    ) -> Result<(Vec<u8>, ExtractReport)> {
+        let started_at = Instant::now();
+        let mut decoded = Self::read_archive_payload_with_metrics(reader, workers)?;
+        let source_kind = directory::source_kind_from_flags(decoded.flags);
+        let extensions = Self::extract_extensions_from_flags(decoded.flags);
+        let decoded_bytes_total = decoded.payload.len() as u64;
+        let payload = std::mem::take(&mut decoded.payload);
+        let report = Self::build_extract_report_from_decoded(
+            started_at,
+            decoded,
+            source_kind,
+            decoded_bytes_total,
+            decoded_bytes_total,
+            extensions,
+            report_options,
+        );
+
+        Ok((payload, report))
     }
 
     /// Extracts a directory tree archive produced by [`archive_directory`].
@@ -285,8 +383,8 @@ impl ArchivePipeline {
         R: Read + std::io::Seek,
         P: AsRef<Path>,
     {
-        let (flags, payload) = Self::read_archive_payload(reader, workers)?;
-        let entries = directory::decode_directory_entries(&payload, flags)?.ok_or(
+        let decoded = Self::read_archive_payload_with_metrics(reader, workers)?;
+        let entries = directory::decode_directory_entries(&decoded.payload, decoded.flags)?.ok_or(
             crate::OxideError::InvalidFormat("archive does not contain a directory bundle"),
         )?;
         directory::write_directory_entries(output_dir.as_ref(), entries)
@@ -315,67 +413,305 @@ impl ArchivePipeline {
         R: Read + std::io::Seek,
         P: AsRef<Path>,
     {
-        let (flags, payload) = Self::read_archive_payload(reader, workers)?;
-        let output_path = output_path.as_ref();
-
-        if let Some(entries) = directory::decode_directory_entries(&payload, flags)? {
-            directory::write_directory_entries(output_path, entries)?;
-            return Ok(ArchiveSourceKind::Directory);
-        }
-
-        if let Some(parent) = output_path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(output_path, payload)?;
-        Ok(ArchiveSourceKind::File)
+        let mut decoded = Self::read_archive_payload_with_metrics(reader, workers)?;
+        let mut extensions = Self::extract_extensions_from_flags(decoded.flags);
+        let (source_kind, _) =
+            Self::restore_decoded_payload(output_path.as_ref(), &mut decoded, &mut extensions)?;
+        Ok(source_kind)
     }
 
-    fn read_archive_payload<R: Read + std::io::Seek>(
+    /// Extracts an archive to `output_path` and returns a detailed extract report.
+    pub fn extract_path_with_report<R, P>(
+        &self,
+        reader: R,
+        output_path: P,
+    ) -> Result<(ArchiveSourceKind, ExtractReport)>
+    where
+        R: Read + std::io::Seek,
+        P: AsRef<Path>,
+    {
+        self.extract_path_with_workers_and_report(
+            reader,
+            output_path,
+            self.num_workers,
+            ReportBuildOptions::default(),
+        )
+    }
+
+    /// Extracts an archive with explicit worker count and report options.
+    pub fn extract_path_with_workers_and_report<R, P>(
+        &self,
+        reader: R,
+        output_path: P,
+        workers: usize,
+        report_options: ReportBuildOptions,
+    ) -> Result<(ArchiveSourceKind, ExtractReport)>
+    where
+        R: Read + std::io::Seek,
+        P: AsRef<Path>,
+    {
+        let started_at = Instant::now();
+        let mut decoded = Self::read_archive_payload_with_metrics(reader, workers)?;
+        let mut extensions = Self::extract_extensions_from_flags(decoded.flags);
+        let decoded_bytes_total = decoded.payload.len() as u64;
+        let (source_kind, output_bytes_total) =
+            Self::restore_decoded_payload(output_path.as_ref(), &mut decoded, &mut extensions)?;
+        let report = Self::build_extract_report_from_decoded(
+            started_at,
+            decoded,
+            source_kind,
+            decoded_bytes_total,
+            output_bytes_total,
+            extensions,
+            report_options,
+        );
+        Ok((source_kind, report))
+    }
+
+    fn extract_extensions_from_flags(flags: u32) -> BTreeMap<String, ReportValue> {
+        let mut extensions = BTreeMap::new();
+        extensions.insert("extract.flags".to_string(), ReportValue::U64(flags as u64));
+        extensions
+    }
+
+    fn restore_decoded_payload(
+        output_path: &Path,
+        decoded: &mut DecodedArchivePayload,
+        extensions: &mut BTreeMap<String, ReportValue>,
+    ) -> Result<(ArchiveSourceKind, u64)> {
+        let directory_decode_started = Instant::now();
+        if let Some(entries) = directory::decode_directory_entries(&decoded.payload, decoded.flags)?
+        {
+            decoded.stage_timings.directory_decode += directory_decode_started.elapsed();
+            let output_bytes_total = entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    directory::DirectoryBundleEntry::File { data, .. } => Some(data.len() as u64),
+                    directory::DirectoryBundleEntry::Directory { .. } => None,
+                })
+                .sum();
+            extensions.insert(
+                "extract.directory_entries".to_string(),
+                ReportValue::U64(entries.len() as u64),
+            );
+
+            let write_started = Instant::now();
+            directory::write_directory_entries(output_path, entries)?;
+            decoded.stage_timings.output_write += write_started.elapsed();
+            Ok((ArchiveSourceKind::Directory, output_bytes_total))
+        } else {
+            decoded.stage_timings.directory_decode += directory_decode_started.elapsed();
+            if let Some(parent) = output_path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+            {
+                fs::create_dir_all(parent)?;
+            }
+            let write_started = Instant::now();
+            fs::write(output_path, &decoded.payload)?;
+            decoded.stage_timings.output_write += write_started.elapsed();
+            Ok((ArchiveSourceKind::File, decoded.payload.len() as u64))
+        }
+    }
+
+    fn build_extract_report_from_decoded(
+        started_at: Instant,
+        decoded: DecodedArchivePayload,
+        source_kind: ArchiveSourceKind,
+        decoded_bytes_total: u64,
+        output_bytes_total: u64,
+        extensions: BTreeMap<String, ReportValue>,
+        report_options: ReportBuildOptions,
+    ) -> ExtractReport {
+        Self::build_extract_report(
+            source_kind,
+            started_at.elapsed(),
+            decoded.archive_bytes_total,
+            decoded_bytes_total,
+            output_bytes_total,
+            decoded.blocks_total,
+            decoded.workers,
+            decoded.stage_timings,
+            extensions,
+            report_options,
+        )
+    }
+
+    fn read_archive_payload_with_metrics<R: Read + std::io::Seek>(
         reader: R,
         workers: usize,
-    ) -> Result<(u32, Vec<u8>)> {
+    ) -> Result<DecodedArchivePayload> {
         let mut archive = ArchiveReader::new(reader)?;
         let flags = archive.global_header().flags;
-        let mut blocks = Vec::with_capacity(archive.block_count() as usize);
+        let block_capacity = archive.block_count() as usize;
         let mut expected_total = 0usize;
+        let worker_count = workers.max(1);
+        let queue_capacity = worker_count.saturating_mul(4).max(1);
+        let (task_tx, task_rx) = bounded::<DecodeTask>(queue_capacity);
+        let (result_tx, result_rx) = bounded::<(usize, Result<Vec<u8>>)>(queue_capacity);
+        let mut worker_handles = Vec::with_capacity(worker_count);
 
+        for worker_id in 0..worker_count {
+            let local_task_rx = task_rx.clone();
+            let local_result_tx = result_tx.clone();
+            let handle = thread::spawn(move || -> DecodeWorkerOutcome {
+                let started = Instant::now();
+                let mut tasks_completed = 0usize;
+                let mut busy = Duration::ZERO;
+
+                while let Ok(task) = local_task_rx.recv() {
+                    let decode_started = Instant::now();
+                    let decoded = Self::decode_block_payload(task.header, task.block_data);
+                    busy += decode_started.elapsed();
+                    tasks_completed += 1;
+                    if local_result_tx.send((task.index, decoded)).is_err() {
+                        break;
+                    }
+                }
+
+                DecodeWorkerOutcome {
+                    worker_id,
+                    tasks_completed,
+                    busy,
+                    uptime: started.elapsed(),
+                }
+            });
+            worker_handles.push(handle);
+        }
+        drop(result_tx);
+
+        let mut stage_timings = ExtractStageTimings::default();
+        let mut archive_bytes_total = GLOBAL_HEADER_SIZE as u64 + FOOTER_SIZE as u64;
+        let mut submitted = 0usize;
         for entry in archive.iter_blocks() {
+            let read_started = Instant::now();
             let (header, block_data) = entry?;
+            stage_timings.archive_read += read_started.elapsed();
             expected_total = expected_total.saturating_add(header.original_size as usize);
-            blocks.push((header, block_data));
+            archive_bytes_total = archive_bytes_total
+                .saturating_add(BLOCK_HEADER_SIZE as u64)
+                .saturating_add(block_data.len() as u64);
+
+            let submit_started = Instant::now();
+            task_tx
+                .send(DecodeTask {
+                    index: submitted,
+                    header,
+                    block_data,
+                })
+                .map_err(|_| {
+                    crate::OxideError::CompressionError(
+                        "decode queue closed before submission completed".to_string(),
+                    )
+                })?;
+            stage_timings.decode_submit += submit_started.elapsed();
+            submitted += 1;
+        }
+        drop(task_tx);
+
+        if submitted != block_capacity {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive block count mismatch during decode",
+            ));
         }
 
-        let worker_count = workers.max(1);
-        let decode = |(header, block_data)| Self::decode_block_payload(header, block_data);
-        let decoded_blocks: Vec<Result<Vec<u8>>> = if worker_count <= 1 || blocks.len() <= 1 {
-            blocks.into_iter().map(decode).collect()
-        } else {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(worker_count)
-                .build()
-                .map_err(|err| {
-                    crate::OxideError::CompressionError(format!(
-                        "failed to build decode thread pool: {err}"
-                    ))
-                })?;
-            pool.install(|| blocks.into_par_iter().map(decode).collect())
-        };
+        let mut decoded_blocks = vec![None; submitted];
+        let mut received = 0usize;
+        let mut first_error: Option<crate::OxideError> = None;
+        while received < submitted {
+            let wait_started = Instant::now();
+            let (index, block) = result_rx.recv().map_err(|_| {
+                crate::OxideError::CompressionError(
+                    "decode result channel closed before completion".to_string(),
+                )
+            })?;
+            stage_timings.decode_wait += wait_started.elapsed();
+            if index >= decoded_blocks.len() {
+                return Err(crate::OxideError::InvalidFormat(
+                    "decode result index out of bounds",
+                ));
+            }
+            match block {
+                Ok(bytes) => {
+                    if decoded_blocks[index].is_some() {
+                        return Err(crate::OxideError::InvalidFormat(
+                            "duplicate decode result index",
+                        ));
+                    }
+                    decoded_blocks[index] = Some(bytes);
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+            received += 1;
+        }
 
+        let workers = Self::join_decode_workers(worker_handles)?;
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        let merge_started = Instant::now();
         let mut output = Vec::with_capacity(expected_total);
         for block in decoded_blocks {
-            output.extend_from_slice(&block?);
+            let block = block.ok_or(crate::OxideError::InvalidFormat(
+                "missing decoded block payload",
+            ))?;
+            output.extend_from_slice(&block);
         }
+        stage_timings.merge += merge_started.elapsed();
 
-        Ok((flags, output))
+        Ok(DecodedArchivePayload {
+            flags,
+            payload: output,
+            archive_bytes_total,
+            blocks_total: submitted as u32,
+            workers,
+            stage_timings,
+        })
     }
 
-    fn decode_block_payload(
-        header: crate::format::BlockHeader,
-        block_data: Vec<u8>,
-    ) -> Result<Vec<u8>> {
+    fn join_decode_workers(
+        handles: Vec<thread::JoinHandle<DecodeWorkerOutcome>>,
+    ) -> Result<Vec<WorkerRuntimeSnapshot>> {
+        let mut workers = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let outcome = handle.join().map_err(|payload| {
+                let details = if let Some(message) = payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "unknown panic payload".to_string()
+                };
+                crate::OxideError::CompressionError(format!(
+                    "decode worker thread panicked: {details}"
+                ))
+            })?;
+            let busy = outcome.busy.min(outcome.uptime);
+            let idle = outcome.uptime.saturating_sub(busy);
+            let utilization = if outcome.uptime == Duration::ZERO {
+                0.0
+            } else {
+                busy.as_secs_f64() / outcome.uptime.as_secs_f64()
+            };
+            workers.push(WorkerRuntimeSnapshot {
+                worker_id: outcome.worker_id,
+                tasks_completed: outcome.tasks_completed,
+                uptime: outcome.uptime,
+                busy,
+                idle,
+                utilization,
+            });
+        }
+        workers.sort_by_key(|worker| worker.worker_id);
+        Ok(workers)
+    }
+
+    fn decode_block_payload(header: BlockHeader, block_data: Vec<u8>) -> Result<Vec<u8>> {
         let compression_meta = header.compression_meta()?;
         let decoded = if compression_meta.raw_passthrough {
             block_data
@@ -390,6 +726,90 @@ impl ArchivePipeline {
             ));
         }
         Ok(restored)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_extract_report(
+        source_kind: ArchiveSourceKind,
+        elapsed: Duration,
+        archive_bytes_total: u64,
+        decoded_bytes_total: u64,
+        output_bytes_total: u64,
+        blocks_total: u32,
+        worker_runtime: Vec<WorkerRuntimeSnapshot>,
+        stage_timings: ExtractStageTimings,
+        mut extensions: BTreeMap<String, ReportValue>,
+        report_options: ReportBuildOptions,
+    ) -> ExtractReport {
+        let decode_busy_us = worker_runtime
+            .iter()
+            .map(|worker| worker.busy.as_micros())
+            .sum::<u128>()
+            .min(u64::MAX as u128) as u64;
+        let elapsed_us = elapsed.as_micros().max(1).min(u64::MAX as u128) as u64;
+        let effective_cores = decode_busy_us as f64 / elapsed_us as f64;
+
+        extensions.insert(
+            "runtime.decode_busy_us".to_string(),
+            ReportValue::U64(decode_busy_us),
+        );
+        extensions.insert(
+            "runtime.effective_cores".to_string(),
+            ReportValue::F64(effective_cores),
+        );
+        extensions.insert(
+            "runtime.worker_count".to_string(),
+            ReportValue::U64(worker_runtime.len() as u64),
+        );
+
+        let workers = worker_runtime
+            .iter()
+            .map(WorkerReport::from_runtime)
+            .collect::<Vec<_>>();
+        let mut main_thread = ThreadReport::new("main");
+        main_thread.stage_us.insert(
+            "archive_read".to_string(),
+            stage_timings.archive_read.as_micros().min(u64::MAX as u128) as u64,
+        );
+        main_thread.stage_us.insert(
+            "decode_submit".to_string(),
+            stage_timings
+                .decode_submit
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+        );
+        main_thread.stage_us.insert(
+            "decode_wait".to_string(),
+            stage_timings.decode_wait.as_micros().min(u64::MAX as u128) as u64,
+        );
+        main_thread.stage_us.insert(
+            "merge".to_string(),
+            stage_timings.merge.as_micros().min(u64::MAX as u128) as u64,
+        );
+        main_thread.stage_us.insert(
+            "directory_decode".to_string(),
+            stage_timings
+                .directory_decode
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+        );
+        main_thread.stage_us.insert(
+            "output_write".to_string(),
+            stage_timings.output_write.as_micros().min(u64::MAX as u128) as u64,
+        );
+
+        ExtractReport::new(
+            source_kind,
+            elapsed,
+            archive_bytes_total,
+            decoded_bytes_total,
+            output_bytes_total,
+            blocks_total,
+            workers,
+            main_thread,
+            extensions,
+            report_options,
+        )
     }
 
     fn archive_directory_streaming_with<W: Write, S: ProgressSink + ?Sized>(
