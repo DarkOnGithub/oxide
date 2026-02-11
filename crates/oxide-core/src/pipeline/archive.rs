@@ -15,7 +15,10 @@ use crate::format::{
     ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, BlockHeader, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
 };
 use crate::io::InputScanner;
-use crate::report::{ExtractReport, ReportBuildOptions, ReportValue, ThreadReport, WorkerReport};
+use crate::telemetry::{
+    ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent, ExtractReport,
+    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
+};
 use crate::types::{
     Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
     PreProcessingStrategy, Result,
@@ -23,8 +26,7 @@ use crate::types::{
 
 use super::directory::{self, DirectoryBatchSubmitter};
 use super::types::{
-    ArchiveOptions, ArchiveOutcome, ArchiveProgressSnapshot, ArchiveRunStats, ArchiveSourceKind,
-    FnProgressSink, NoopProgress, PipelinePerformanceOptions, ProgressSink, StatValue,
+    ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions, StatValue,
 };
 
 const SUBMISSION_DRAIN_BUDGET: usize = 128;
@@ -111,6 +113,12 @@ struct DecodeWorkerOutcome {
     uptime: Duration,
 }
 
+struct NoopTelemetrySink;
+
+impl TelemetrySink for NoopTelemetrySink {
+    fn on_event(&mut self, _event: TelemetryEvent) {}
+}
+
 /// End-to-end Phase 1 pipeline that wires scanner, workers, and OXZ I/O.
 ///
 /// This pipeline performs pass-through processing for block payloads while preserving
@@ -122,92 +130,49 @@ pub struct ArchivePipeline {
     buffer_pool: Arc<BufferPool>,
     performance: PipelinePerformanceOptions,
 }
-
 impl ArchivePipeline {
     /// Creates a new archive pipeline.
-    pub fn new(
-        target_block_size: usize,
-        num_workers: usize,
-        buffer_pool: Arc<BufferPool>,
-        compression_algo: CompressionAlgo,
-    ) -> Self {
-        Self::with_performance(
-            target_block_size,
-            num_workers,
-            buffer_pool,
-            compression_algo,
-            PipelinePerformanceOptions::default(),
-        )
-    }
-
-    /// Creates a new archive pipeline with explicit performance options.
-    pub fn with_performance(
-        target_block_size: usize,
-        num_workers: usize,
-        buffer_pool: Arc<BufferPool>,
-        compression_algo: CompressionAlgo,
-        performance: PipelinePerformanceOptions,
-    ) -> Self {
+    pub fn new(config: ArchivePipelineConfig) -> Self {
         Self {
-            scanner: InputScanner::new(target_block_size),
-            num_workers,
-            compression_algo,
-            buffer_pool,
-            performance,
+            scanner: InputScanner::new(config.target_block_size),
+            num_workers: config.workers.max(1),
+            compression_algo: config.compression_algo,
+            buffer_pool: config.buffer_pool,
+            performance: config.performance,
         }
     }
 
     /// Reads an input file, processes blocks in parallel, and writes an OXZ archive.
-    pub fn archive_file<P, W>(&self, path: P, writer: W) -> Result<W>
-    where
-        P: AsRef<Path>,
-        W: Write,
-    {
-        let mut sink = NoopProgress;
-        self.archive_file_with(path, writer, ArchiveOptions::default(), &mut sink)
-            .map(|outcome| outcome.writer)
-    }
-
-    /// Archives a file and returns detailed run stats.
-    pub fn archive_file_with<P, W, S>(
+    pub fn archive_file<P, W>(
         &self,
         path: P,
         writer: W,
-        options: ArchiveOptions,
-        sink: &mut S,
-    ) -> Result<ArchiveOutcome<W>>
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ArchiveRun<W>>
     where
         P: AsRef<Path>,
         W: Write,
-        S: ProgressSink + ?Sized,
     {
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
         self.archive_file_path_with(path.as_ref(), writer, &options, sink)
     }
 
     /// Archives either a single file or a directory tree.
-    pub fn archive_path<P, W>(&self, path: P, writer: W) -> Result<W>
-    where
-        P: AsRef<Path>,
-        W: Write,
-    {
-        let mut sink = NoopProgress;
-        self.archive_path_with(path, writer, ArchiveOptions::default(), &mut sink)
-            .map(|outcome| outcome.writer)
-    }
-
-    /// Archives a file or directory and returns detailed run stats.
-    pub fn archive_path_with<P, W, S>(
+    pub fn archive_path<P, W>(
         &self,
         path: P,
         writer: W,
-        options: ArchiveOptions,
-        sink: &mut S,
-    ) -> Result<ArchiveOutcome<W>>
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ArchiveRun<W>>
     where
         P: AsRef<Path>,
         W: Write,
-        S: ProgressSink + ?Sized,
     {
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
         let path = path.as_ref();
         let metadata = fs::metadata(path)?;
         if metadata.is_file() {
@@ -222,66 +187,31 @@ impl ArchivePipeline {
     }
 
     /// Archives a directory tree as a single OXZ payload.
-    pub fn archive_directory<P, W>(&self, dir_path: P, writer: W) -> Result<W>
-    where
-        P: AsRef<Path>,
-        W: Write,
-    {
-        let mut sink = NoopProgress;
-        self.archive_directory_with(dir_path, writer, ArchiveOptions::default(), &mut sink)
-            .map(|outcome| outcome.writer)
-    }
-
-    /// Archives a directory tree and returns detailed run stats.
-    pub fn archive_directory_with<P, W, S>(
+    pub fn archive_directory<P, W>(
         &self,
         dir_path: P,
         writer: W,
-        options: ArchiveOptions,
-        sink: &mut S,
-    ) -> Result<ArchiveOutcome<W>>
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ArchiveRun<W>>
     where
         P: AsRef<Path>,
         W: Write,
-        S: ProgressSink + ?Sized,
     {
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
         self.archive_directory_path_with(dir_path.as_ref(), writer, &options, sink)
     }
 
-    /// Archives a file or directory and emits progress snapshots while processing.
-    pub fn archive_path_with_progress<P, W, F>(
-        &self,
-        path: P,
-        writer: W,
-        progress_interval: Duration,
-        on_progress: F,
-    ) -> Result<(W, ArchiveRunStats)>
-    where
-        P: AsRef<Path>,
-        W: Write,
-        F: FnMut(ArchiveProgressSnapshot),
-    {
-        let options = ArchiveOptions {
-            progress_interval,
-            emit_final_progress: true,
-        };
-        let mut sink = FnProgressSink {
-            callback: on_progress,
-        };
-        self.archive_path_with(path, writer, options, &mut sink)
-            .map(|outcome| (outcome.writer, outcome.stats))
-    }
-
-    fn archive_file_path_with<W, S>(
+    fn archive_file_path_with<W>(
         &self,
         path: &Path,
         writer: W,
-        options: &ArchiveOptions,
-        sink: &mut S,
-    ) -> Result<ArchiveOutcome<W>>
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<ArchiveRun<W>>
     where
         W: Write,
-        S: ProgressSink + ?Sized,
     {
         let metadata = fs::metadata(path)?;
         if !metadata.is_file() {
@@ -294,58 +224,37 @@ impl ArchivePipeline {
         self.archive_prepared_with(prepared, writer, options, sink, block_size)
     }
 
-    fn archive_directory_path_with<W, S>(
+    fn archive_directory_path_with<W>(
         &self,
         dir_path: &Path,
         writer: W,
-        options: &ArchiveOptions,
-        sink: &mut S,
-    ) -> Result<ArchiveOutcome<W>>
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<ArchiveRun<W>>
     where
         W: Write,
-        S: ProgressSink + ?Sized,
     {
         self.archive_directory_streaming_with(dir_path, writer, options, sink)
     }
 
-    /// Extracts all block payload bytes from an OXZ archive in block order.
-    pub fn extract_archive<R: Read + std::io::Seek>(&self, reader: R) -> Result<Vec<u8>> {
-        self.extract_archive_with_workers(reader, self.num_workers)
-    }
-
-    /// Extracts all block payload bytes from an OXZ archive in block order
-    /// using the provided decode worker count.
-    pub fn extract_archive_with_workers<R: Read + std::io::Seek>(
-        &self,
-        reader: R,
-        workers: usize,
-    ) -> Result<Vec<u8>> {
-        let decoded = Self::read_archive_payload_with_metrics(reader, workers)?;
-        Ok(decoded.payload)
-    }
-
     /// Extracts all block payload bytes from an OXZ archive in block order and
-    /// returns a detailed extract report.
-    pub fn extract_archive_with_report<R: Read + std::io::Seek>(
+    /// returns a detailed report.
+    pub fn extract_archive<R: Read + std::io::Seek>(
         &self,
         reader: R,
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
     ) -> Result<(Vec<u8>, ExtractReport)> {
-        self.extract_archive_with_workers_and_report(
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
+        let started_at = Instant::now();
+        let mut decoded = Self::read_archive_payload_with_metrics(
             reader,
             self.num_workers,
-            ReportBuildOptions::default(),
-        )
-    }
-
-    /// Extracts all block payload bytes with explicit worker count and report options.
-    pub fn extract_archive_with_workers_and_report<R: Read + std::io::Seek>(
-        &self,
-        reader: R,
-        workers: usize,
-        report_options: ReportBuildOptions,
-    ) -> Result<(Vec<u8>, ExtractReport)> {
-        let started_at = Instant::now();
-        let mut decoded = Self::read_archive_payload_with_metrics(reader, workers)?;
+            started_at,
+            &options,
+            sink,
+        )?;
         let source_kind = directory::source_kind_from_flags(decoded.flags);
         let extensions = Self::extract_extensions_from_flags(decoded.flags);
         let decoded_bytes_total = decoded.payload.len() as u64;
@@ -357,101 +266,99 @@ impl ArchivePipeline {
             decoded_bytes_total,
             decoded_bytes_total,
             extensions,
-            report_options,
+            options,
         );
+
+        sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
 
         Ok((payload, report))
     }
 
     /// Extracts a directory tree archive produced by [`archive_directory`].
-    pub fn extract_directory_archive<R, P>(&self, reader: R, output_dir: P) -> Result<()>
-    where
-        R: Read + std::io::Seek,
-        P: AsRef<Path>,
-    {
-        self.extract_directory_archive_with_workers(reader, output_dir, self.num_workers)
-    }
-
-    /// Extracts a directory tree archive with explicit decode worker count.
-    pub fn extract_directory_archive_with_workers<R, P>(
+    pub fn extract_directory_archive<R, P>(
         &self,
         reader: R,
         output_dir: P,
-        workers: usize,
-    ) -> Result<()>
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ExtractReport>
     where
         R: Read + std::io::Seek,
         P: AsRef<Path>,
     {
-        let decoded = Self::read_archive_payload_with_metrics(reader, workers)?;
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
+        let started_at = Instant::now();
+        let mut decoded = Self::read_archive_payload_with_metrics(
+            reader,
+            self.num_workers,
+            started_at,
+            &options,
+            sink,
+        )?;
+        let mut extensions = Self::extract_extensions_from_flags(decoded.flags);
+        let decoded_bytes_total = decoded.payload.len() as u64;
+
+        let directory_decode_started = Instant::now();
         let entries = directory::decode_directory_entries(&decoded.payload, decoded.flags)?.ok_or(
             crate::OxideError::InvalidFormat("archive does not contain a directory bundle"),
         )?;
-        directory::write_directory_entries(output_dir.as_ref(), entries)
+        decoded.stage_timings.directory_decode += directory_decode_started.elapsed();
+
+        let output_bytes_total = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                directory::DirectoryBundleEntry::File { data, .. } => Some(data.len() as u64),
+                directory::DirectoryBundleEntry::Directory { .. } => None,
+            })
+            .sum();
+        extensions.insert(
+            "extract.directory_entries".to_string(),
+            ReportValue::U64(entries.len() as u64),
+        );
+
+        let write_started = Instant::now();
+        directory::write_directory_entries(output_dir.as_ref(), entries)?;
+        decoded.stage_timings.output_write += write_started.elapsed();
+
+        let report = Self::build_extract_report_from_decoded(
+            started_at,
+            decoded,
+            ArchiveSourceKind::Directory,
+            decoded_bytes_total,
+            output_bytes_total,
+            extensions,
+            options,
+        );
+        sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
+        Ok(report)
     }
 
-    /// Extracts an archive to `output_path`.
+    /// Extracts an archive to `output_path` and returns the extract report.
     ///
     /// File payloads are written to `output_path` as a single file.
     /// Directory payloads are restored under `output_path` as a root directory.
-    pub fn extract_path<R, P>(&self, reader: R, output_path: P) -> Result<ArchiveSourceKind>
-    where
-        R: Read + std::io::Seek,
-        P: AsRef<Path>,
-    {
-        self.extract_path_with_workers(reader, output_path, self.num_workers)
-    }
-
-    /// Extracts an archive with explicit decode worker count.
-    pub fn extract_path_with_workers<R, P>(
+    pub fn extract_path<R, P>(
         &self,
         reader: R,
         output_path: P,
-        workers: usize,
-    ) -> Result<ArchiveSourceKind>
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ExtractReport>
     where
         R: Read + std::io::Seek,
         P: AsRef<Path>,
     {
-        let mut decoded = Self::read_archive_payload_with_metrics(reader, workers)?;
-        let mut extensions = Self::extract_extensions_from_flags(decoded.flags);
-        let (source_kind, _) =
-            Self::restore_decoded_payload(output_path.as_ref(), &mut decoded, &mut extensions)?;
-        Ok(source_kind)
-    }
-
-    /// Extracts an archive to `output_path` and returns a detailed extract report.
-    pub fn extract_path_with_report<R, P>(
-        &self,
-        reader: R,
-        output_path: P,
-    ) -> Result<(ArchiveSourceKind, ExtractReport)>
-    where
-        R: Read + std::io::Seek,
-        P: AsRef<Path>,
-    {
-        self.extract_path_with_workers_and_report(
-            reader,
-            output_path,
-            self.num_workers,
-            ReportBuildOptions::default(),
-        )
-    }
-
-    /// Extracts an archive with explicit worker count and report options.
-    pub fn extract_path_with_workers_and_report<R, P>(
-        &self,
-        reader: R,
-        output_path: P,
-        workers: usize,
-        report_options: ReportBuildOptions,
-    ) -> Result<(ArchiveSourceKind, ExtractReport)>
-    where
-        R: Read + std::io::Seek,
-        P: AsRef<Path>,
-    {
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
-        let mut decoded = Self::read_archive_payload_with_metrics(reader, workers)?;
+        let mut decoded = Self::read_archive_payload_with_metrics(
+            reader,
+            self.num_workers,
+            started_at,
+            &options,
+            sink,
+        )?;
         let mut extensions = Self::extract_extensions_from_flags(decoded.flags);
         let decoded_bytes_total = decoded.payload.len() as u64;
         let (source_kind, output_bytes_total) =
@@ -463,9 +370,10 @@ impl ArchivePipeline {
             decoded_bytes_total,
             output_bytes_total,
             extensions,
-            report_options,
+            options,
         );
-        Ok((source_kind, report))
+        sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
+        Ok(report)
     }
 
     fn extract_extensions_from_flags(flags: u32) -> BTreeMap<String, ReportValue> {
@@ -521,7 +429,7 @@ impl ArchivePipeline {
         decoded_bytes_total: u64,
         output_bytes_total: u64,
         extensions: BTreeMap<String, ReportValue>,
-        report_options: ReportBuildOptions,
+        options: RunTelemetryOptions,
     ) -> ExtractReport {
         Self::build_extract_report(
             source_kind,
@@ -533,16 +441,20 @@ impl ArchivePipeline {
             decoded.workers,
             decoded.stage_timings,
             extensions,
-            report_options,
+            options,
         )
     }
 
     fn read_archive_payload_with_metrics<R: Read + std::io::Seek>(
         reader: R,
         workers: usize,
+        started_at: Instant,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
         let mut archive = ArchiveReader::new(reader)?;
         let flags = archive.global_header().flags;
+        let source_kind = directory::source_kind_from_flags(flags);
         let block_capacity = archive.block_count() as usize;
         let mut expected_total = 0usize;
         let worker_count = workers.max(1);
@@ -583,6 +495,8 @@ impl ArchivePipeline {
         let mut stage_timings = ExtractStageTimings::default();
         let mut archive_bytes_total = GLOBAL_HEADER_SIZE as u64 + FOOTER_SIZE as u64;
         let mut submitted = 0usize;
+        let mut last_emit_at = Instant::now();
+        let emit_every = options.progress_interval.max(Duration::from_millis(100));
         for entry in archive.iter_blocks() {
             let read_started = Instant::now();
             let (header, block_data) = entry?;
@@ -606,6 +520,18 @@ impl ArchivePipeline {
                 })?;
             stage_timings.decode_submit += submit_started.elapsed();
             submitted += 1;
+
+            if last_emit_at.elapsed() >= emit_every {
+                sink.on_event(TelemetryEvent::ExtractProgress(ExtractProgressEvent {
+                    source_kind,
+                    elapsed: started_at.elapsed(),
+                    archive_bytes_completed: archive_bytes_total,
+                    decoded_bytes_completed: 0,
+                    blocks_total: block_capacity as u32,
+                    blocks_completed: submitted as u32,
+                }));
+                last_emit_at = Instant::now();
+            }
         }
         drop(task_tx);
 
@@ -618,6 +544,7 @@ impl ArchivePipeline {
         let mut decoded_blocks = vec![None; submitted];
         let mut received = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
+        let mut decoded_bytes_completed = 0u64;
         while received < submitted {
             let wait_started = Instant::now();
             let (index, block) = result_rx.recv().map_err(|_| {
@@ -638,6 +565,8 @@ impl ArchivePipeline {
                             "duplicate decode result index",
                         ));
                     }
+                    decoded_bytes_completed =
+                        decoded_bytes_completed.saturating_add(bytes.len() as u64);
                     decoded_blocks[index] = Some(bytes);
                 }
                 Err(error) => {
@@ -647,6 +576,18 @@ impl ArchivePipeline {
                 }
             }
             received += 1;
+
+            if last_emit_at.elapsed() >= emit_every {
+                sink.on_event(TelemetryEvent::ExtractProgress(ExtractProgressEvent {
+                    source_kind,
+                    elapsed: started_at.elapsed(),
+                    archive_bytes_completed: archive_bytes_total,
+                    decoded_bytes_completed,
+                    blocks_total: block_capacity as u32,
+                    blocks_completed: received as u32,
+                }));
+                last_emit_at = Instant::now();
+            }
         }
 
         let workers = Self::join_decode_workers(worker_handles)?;
@@ -663,6 +604,17 @@ impl ArchivePipeline {
             output.extend_from_slice(&block);
         }
         stage_timings.merge += merge_started.elapsed();
+
+        if options.emit_final_progress {
+            sink.on_event(TelemetryEvent::ExtractProgress(ExtractProgressEvent {
+                source_kind,
+                elapsed: started_at.elapsed(),
+                archive_bytes_completed: archive_bytes_total,
+                decoded_bytes_completed,
+                blocks_total: block_capacity as u32,
+                blocks_completed: received as u32,
+            }));
+        }
 
         Ok(DecodedArchivePayload {
             flags,
@@ -739,7 +691,7 @@ impl ArchivePipeline {
         worker_runtime: Vec<WorkerRuntimeSnapshot>,
         stage_timings: ExtractStageTimings,
         mut extensions: BTreeMap<String, ReportValue>,
-        report_options: ReportBuildOptions,
+        options: RunTelemetryOptions,
     ) -> ExtractReport {
         let decode_busy_us = worker_runtime
             .iter()
@@ -808,17 +760,17 @@ impl ArchivePipeline {
             workers,
             main_thread,
             extensions,
-            report_options,
+            options,
         )
     }
 
-    fn archive_directory_streaming_with<W: Write, S: ProgressSink + ?Sized>(
+    fn archive_directory_streaming_with<W: Write>(
         &self,
         root: &Path,
         writer: W,
-        options: &ArchiveOptions,
-        sink: &mut S,
-    ) -> Result<ArchiveOutcome<W>> {
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<ArchiveRun<W>> {
         let mut stage_timings = StageTimings::default();
 
         let discovery_started = Instant::now();
@@ -1194,21 +1146,22 @@ impl ArchivePipeline {
             stage_timings,
         );
 
-        let stats = ArchiveRunStats {
-            source_kind: ArchiveSourceKind::Directory,
-            elapsed: started_at.elapsed(),
+        let report = Self::build_archive_report(
+            ArchiveSourceKind::Directory,
+            started_at.elapsed(),
             input_bytes_total,
-            output_bytes_total: output_bytes_written,
-            blocks_total: block_count,
-            blocks_completed: final_runtime.completed as u32,
-            workers: final_runtime.workers,
+            output_bytes_written,
+            block_count,
+            final_runtime.completed as u32,
+            final_runtime.workers,
             extensions,
-        };
-
-        Ok(ArchiveOutcome { writer, stats })
+            *options,
+        );
+        sink.on_event(TelemetryEvent::ArchiveCompleted(report.clone()));
+        Ok(ArchiveRun { writer, report })
     }
 
-    fn emit_archive_progress_if_due<S: ProgressSink + ?Sized>(
+    fn emit_archive_progress_if_due(
         handle: &WorkerPoolHandle,
         source_kind: ArchiveSourceKind,
         started_at: Instant,
@@ -1219,11 +1172,11 @@ impl ArchivePipeline {
         emit_every: Duration,
         last_emit_at: &mut Instant,
         force: bool,
-        sink: &mut S,
+        sink: &mut dyn TelemetrySink,
     ) {
         if force || last_emit_at.elapsed() >= emit_every {
             let runtime = handle.runtime_snapshot();
-            sink.on_progress(ArchiveProgressSnapshot {
+            sink.on_event(TelemetryEvent::ArchiveProgress(ArchiveProgressEvent {
                 source_kind,
                 elapsed: started_at.elapsed(),
                 input_bytes_total,
@@ -1233,7 +1186,7 @@ impl ArchivePipeline {
                 blocks_completed: runtime.completed as u32,
                 blocks_pending: runtime.pending as u32,
                 runtime,
-            });
+            }));
             *last_emit_at = Instant::now();
         }
     }
@@ -1502,14 +1455,85 @@ impl ArchivePipeline {
         extensions
     }
 
-    fn archive_prepared_with<W: Write, S: ProgressSink + ?Sized>(
+    #[allow(clippy::too_many_arguments)]
+    fn build_archive_report(
+        source_kind: ArchiveSourceKind,
+        elapsed: Duration,
+        input_bytes_total: u64,
+        output_bytes_total: u64,
+        blocks_total: u32,
+        blocks_completed: u32,
+        worker_runtime: Vec<WorkerRuntimeSnapshot>,
+        extensions: BTreeMap<String, StatValue>,
+        options: RunTelemetryOptions,
+    ) -> ArchiveReport {
+        let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
+        let read_avg_bps = input_bytes_total as f64 / elapsed_secs;
+        let write_avg_bps = output_bytes_total as f64 / elapsed_secs;
+        let output_input_ratio = if input_bytes_total == 0 {
+            1.0
+        } else {
+            output_bytes_total as f64 / input_bytes_total as f64
+        };
+
+        let workers = worker_runtime
+            .iter()
+            .map(WorkerReport::from_runtime)
+            .collect::<Vec<_>>();
+        let mut main_thread = ThreadReport::new("main");
+        let mut report_extensions = BTreeMap::new();
+
+        for (key, value) in extensions {
+            if let Some(stage) = key
+                .strip_prefix("stage.")
+                .and_then(|stage| stage.strip_suffix("_us"))
+            {
+                if let StatValue::U64(value_us) = &value {
+                    main_thread.stage_us.insert(stage.to_string(), *value_us);
+                }
+            }
+            report_extensions.insert(key, Self::report_value_from_stat(value));
+        }
+
+        let telemetry = if options.include_telemetry_snapshot {
+            Some(crate::telemetry::snapshot())
+        } else {
+            None
+        };
+
+        ArchiveReport {
+            source_kind,
+            elapsed,
+            input_bytes_total,
+            output_bytes_total,
+            blocks_total,
+            blocks_completed,
+            read_avg_bps,
+            write_avg_bps,
+            output_input_ratio,
+            workers,
+            main_thread,
+            extensions: report_extensions,
+            telemetry,
+        }
+    }
+
+    fn report_value_from_stat(value: StatValue) -> ReportValue {
+        match value {
+            StatValue::U64(value) => ReportValue::U64(value),
+            StatValue::F64(value) => ReportValue::F64(value),
+            StatValue::Text(value) => ReportValue::Text(value),
+        }
+    }
+
+    fn archive_prepared_with<W: Write>(
         &self,
         prepared: PreparedInput,
         writer: W,
-        options: &ArchiveOptions,
-        sink: &mut S,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
         block_size: BlockSizeDecision,
-    ) -> Result<ArchiveOutcome<W>> {
+    ) -> Result<ArchiveRun<W>> {
         let PreparedInput {
             source_kind,
             batches,
@@ -1678,19 +1702,19 @@ impl ArchivePipeline {
             pending_write_peak,
             stage_timings,
         );
-
-        let stats = ArchiveRunStats {
+        let report = Self::build_archive_report(
             source_kind,
-            elapsed: started_at.elapsed(),
+            started_at.elapsed(),
             input_bytes_total,
-            output_bytes_total: output_bytes_written,
-            blocks_total: block_count,
-            blocks_completed: final_runtime.completed as u32,
-            workers: final_runtime.workers,
+            output_bytes_written,
+            block_count,
+            final_runtime.completed as u32,
+            final_runtime.workers,
             extensions,
-        };
-
-        Ok(ArchiveOutcome { writer, stats })
+            *options,
+        );
+        sink.on_event(TelemetryEvent::ArchiveCompleted(report.clone()));
+        Ok(ArchiveRun { writer, report })
     }
 
     fn process_batch(
