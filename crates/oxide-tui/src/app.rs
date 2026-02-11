@@ -1,26 +1,32 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use oxide_core::telemetry::tags;
 use oxide_core::{
     ArchiveProgressEvent, ArchiveReport, CompressionAlgo, ExtractProgressEvent, ExtractReport,
-    ProfileEvent, TelemetryEvent,
+    PoolRuntimeSnapshot, ProfileEvent, TelemetryEvent, WorkerRuntimeSnapshot,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::browser::{BrowseTarget, FileBrowser};
 use crate::formatters::{
-    archive_output_filename, default_archive_output_path, default_extract_output_path,
-    extract_output_filename, parse_size,
+    EPHEMERAL_OUTPUT_TOKEN, NULL_OUTPUT_TOKEN, archive_output_filename,
+    default_archive_output_path, default_extract_output_path, extract_output_filename,
+    is_ephemeral_output_value, is_null_output_value, parse_size,
 };
 use crate::job::{JobConfig, JobEvent, JobMode, JobResult, spawn_job};
 use crate::ui;
@@ -28,49 +34,157 @@ use crate::ui;
 const EVENT_TICK_MS: u64 = 50;
 const MIN_STATS_INTERVAL_MS: u64 = 50;
 const MAX_HISTORY_POINTS: usize = 160;
-const MAX_LOG_LINES: usize = 300;
-const MAX_PROFILE_EVENTS: usize = 200;
+const MAX_LOG_LINES: usize = 500;
+const MAX_PROFILE_EVENTS: usize = 300;
+const MAX_PROFILE_SAMPLES_PER_KEY: usize = 4096;
+const DEFAULT_PROFILE_WINDOW_SECONDS: u64 = 10;
+
+const PROFILE_TARGET_FILTERS: [&str; 8] = [
+    "all",
+    tags::PROFILE_MMAP,
+    tags::PROFILE_FORMAT,
+    tags::PROFILE_BUFFER,
+    tags::PROFILE_SCANNER,
+    tags::PROFILE_WORKER,
+    tags::PROFILE_PIPELINE,
+    "oxide.profile",
+];
+
+const PROFILE_OP_FILTERS: [&str; 17] = [
+    "all",
+    "open",
+    "slice",
+    "acquire",
+    "recycle",
+    "detect",
+    "scan_file",
+    "queue_depth",
+    "task_start",
+    "task_finish",
+    "archive_run",
+    "extract_run",
+    "stage_discovery",
+    "stage_writer",
+    "stage_decode_wait",
+    "stage_output_write",
+    "task",
+];
+
+const PROFILE_TAG_FILTERS: [&str; 8] = [
+    "all",
+    tags::TAG_SYSTEM,
+    tags::TAG_MMAP,
+    tags::TAG_FORMAT,
+    tags::TAG_BUFFER,
+    tags::TAG_SCANNER,
+    tags::TAG_WORKER,
+    tags::TAG_PIPELINE,
+];
 
 pub fn run() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+
+    let mouse_enabled = execute!(stdout, EnterAlternateScreen, EnableMouseCapture).is_ok();
+    if !mouse_enabled {
+        execute!(stdout, EnterAlternateScreen)?;
+    }
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
-    let result = run_loop(&mut terminal);
+    let result = run_loop(&mut terminal, mouse_enabled);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    if mouse_enabled {
+        execute!(
+            terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        )?;
+    } else {
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    }
     terminal.show_cursor()?;
 
     result
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mouse_enabled: bool,
+) -> Result<()> {
     let (tx, rx) = unbounded::<JobEvent>();
-    let mut app = App::default();
+    let mut app = App {
+        mouse_enabled,
+        ..App::default()
+    };
+    if !mouse_enabled {
+        app.status_line = "mouse capture unavailable; keyboard mode active".to_string();
+    }
 
     loop {
         app.drain_job_events(&rx);
+        app.tick();
 
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        let mut layout = ui::LayoutInfo::default();
+        terminal.draw(|frame| {
+            layout = ui::draw(frame, &app);
+        })?;
 
         if event::poll(Duration::from_millis(EVENT_TICK_MS))? {
             let evt = event::read()?;
-            if let CEvent::Key(key) = evt {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+            match evt {
+                CEvent::Key(key) => {
+                    if key.kind == KeyEventKind::Press && app.handle_key(key, &tx)? {
+                        break;
+                    }
                 }
-
-                if app.handle_key(key, &tx)? {
-                    break;
+                CEvent::Mouse(mouse) => {
+                    app.handle_mouse(mouse, &layout, &tx);
                 }
+                CEvent::Resize(_, _) => {
+                    // Redraw on next loop.
+                }
+                _ => {}
             }
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiTab {
+    Live,
+    Profile,
+    Logs,
+}
+
+impl UiTab {
+    pub const ALL: [Self; 3] = [Self::Live, Self::Profile, Self::Logs];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Live => "Live",
+            Self::Profile => "Profile",
+            Self::Logs => "Logs",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        let prev_idx = if idx == 0 {
+            Self::ALL.len() - 1
+        } else {
+            idx - 1
+        };
+        Self::ALL[prev_idx]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,12 +222,24 @@ impl ActiveField {
             .iter()
             .position(|field| *field == self)
             .unwrap_or(0);
-        let next_idx = if idx == 0 {
+        let prev_idx = if idx == 0 {
             Self::ALL.len() - 1
         } else {
             idx - 1
         };
-        Self::ALL[next_idx]
+        Self::ALL[prev_idx]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mode => "mode",
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::Compression => "compression",
+            Self::Workers => "workers",
+            Self::BlockSize => "block size",
+            Self::StatsInterval => "stats interval",
+        }
     }
 
     pub fn is_text(self) -> bool {
@@ -124,13 +250,194 @@ impl ActiveField {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunAction {
+    StartRun,
+    BrowseInput,
+    BrowseOutput,
+    EphemeralOutput,
+    NullOutput,
+    DefaultOutput,
+    Clear,
+}
+
+impl RunAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::StartRun => "Run",
+            Self::BrowseInput => "Browse Input",
+            Self::BrowseOutput => "Browse Output",
+            Self::EphemeralOutput => "Ephemeral",
+            Self::NullOutput => "Null Output",
+            Self::DefaultOutput => "Default Output",
+            Self::Clear => "Clear",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserAction {
+    OpenOrSelect,
+    SelectDir,
+    Parent,
+    ToggleHidden,
+    Refresh,
+    Close,
+}
+
+impl BrowserAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OpenOrSelect => "Open/Select",
+            Self::SelectDir => "Select Dir",
+            Self::Parent => "Parent",
+            Self::ToggleHidden => "Hidden",
+            Self::Refresh => "Refresh",
+            Self::Close => "Close",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileSortMode {
+    Total,
+    Avg,
+    Max,
+    Min,
+    Count,
+    P95,
+    Rate,
+}
+
+impl ProfileSortMode {
+    pub const ALL: [Self; 7] = [
+        Self::Total,
+        Self::Avg,
+        Self::Max,
+        Self::Min,
+        Self::Count,
+        Self::P95,
+        Self::Rate,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Total => "total",
+            Self::Avg => "avg",
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::Count => "count",
+            Self::P95 => "p95",
+            Self::Rate => "rate",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerSortMode {
+    Utilization,
+    Busy,
+    Tasks,
+    WorkerId,
+}
+
+impl WorkerSortMode {
+    pub const ALL: [Self; 4] = [Self::Utilization, Self::Busy, Self::Tasks, Self::WorkerId];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Utilization => "utilization",
+            Self::Busy => "busy",
+            Self::Tasks => "tasks",
+            Self::WorkerId => "worker id",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ViewConfig {
+    pub profile_sort_mode: ProfileSortMode,
+    pub worker_sort_mode: WorkerSortMode,
+    pub profile_rows_limit: usize,
+    pub worker_rows_limit: usize,
+    pub profile_window_seconds: u64,
+    pub profile_target_filter: String,
+    pub profile_op_filter: String,
+    pub profile_tag_filter: String,
+}
+
+impl Default for ViewConfig {
+    fn default() -> Self {
+        Self {
+            profile_sort_mode: ProfileSortMode::Total,
+            worker_sort_mode: WorkerSortMode::Utilization,
+            profile_rows_limit: 12,
+            worker_rows_limit: 10,
+            profile_window_seconds: DEFAULT_PROFILE_WINDOW_SECONDS,
+            profile_target_filter: "all".to_string(),
+            profile_op_filter: "all".to_string(),
+            profile_tag_filter: "all".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ProfileAggregate {
+    pub key: String,
+    pub target: String,
+    pub op: String,
     pub count: u64,
     pub total_us: u64,
+    pub min_us: u64,
     pub max_us: u64,
+    pub avg_us: f64,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub events_per_sec: f64,
     pub last_result: String,
     pub last_message: String,
+    pub tags_seen: BTreeSet<String>,
+}
+
+impl ProfileAggregate {
+    fn new(key: String, target: &str, op: &str) -> Self {
+        Self {
+            key,
+            target: target.to_string(),
+            op: op.to_string(),
+            count: 0,
+            total_us: 0,
+            min_us: u64::MAX,
+            max_us: 0,
+            avg_us: 0.0,
+            p50_us: 0,
+            p95_us: 0,
+            events_per_sec: 0.0,
+            last_result: String::new(),
+            last_message: String::new(),
+            tags_seen: BTreeSet::new(),
+        }
+    }
+
+    pub fn min_display(&self) -> u64 {
+        if self.count == 0 { 0 } else { self.min_us }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProfileSample {
+    at: Instant,
+    elapsed_us: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -144,23 +451,21 @@ pub struct ArchiveLiveRates {
     pub write_inst_bps: f64,
     pub peak_read_bps: f64,
     pub peak_write_bps: f64,
+    pub output_input_ratio: f64,
+    pub compression_ratio: f64,
 }
 
 impl ArchiveLiveRates {
     fn update(&mut self, event: &ArchiveProgressEvent) {
-        let elapsed = event.elapsed;
         let done = event.input_bytes_completed.min(event.input_bytes_total);
         let written = event.output_bytes_completed;
-        let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
-
-        self.read_avg_bps = done as f64 / elapsed_secs;
-        self.write_avg_bps = written as f64 / elapsed_secs;
-
         let delta_read = done.saturating_sub(self.last_input_bytes);
         let delta_write = written.saturating_sub(self.last_output_bytes);
-        let delta_elapsed = elapsed.saturating_sub(self.last_elapsed);
+        let delta_elapsed = event.elapsed.saturating_sub(self.last_elapsed);
         let delta_secs = delta_elapsed.as_secs_f64();
 
+        self.read_avg_bps = event.read_avg_bps;
+        self.write_avg_bps = event.write_avg_bps;
         self.read_inst_bps = if delta_secs > 0.0 {
             delta_read as f64 / delta_secs
         } else {
@@ -174,7 +479,10 @@ impl ArchiveLiveRates {
 
         self.peak_read_bps = self.peak_read_bps.max(self.read_inst_bps);
         self.peak_write_bps = self.peak_write_bps.max(self.write_inst_bps);
-        self.last_elapsed = elapsed;
+        self.output_input_ratio = event.output_input_ratio;
+        self.compression_ratio = event.compression_ratio;
+
+        self.last_elapsed = event.elapsed;
         self.last_input_bytes = done;
         self.last_output_bytes = written;
     }
@@ -195,14 +503,11 @@ pub struct ExtractLiveRates {
     pub decode_inst_bps: f64,
     pub peak_read_bps: f64,
     pub peak_decode_bps: f64,
+    pub decode_archive_ratio: f64,
 }
 
 impl ExtractLiveRates {
     fn update(&mut self, event: &ExtractProgressEvent) {
-        let elapsed_secs = event.elapsed.as_secs_f64().max(1e-6);
-        self.read_avg_bps = event.archive_bytes_completed as f64 / elapsed_secs;
-        self.decode_avg_bps = event.decoded_bytes_completed as f64 / elapsed_secs;
-
         let delta_archive = event
             .archive_bytes_completed
             .saturating_sub(self.last_archive_bytes);
@@ -212,6 +517,8 @@ impl ExtractLiveRates {
         let delta_elapsed = event.elapsed.saturating_sub(self.last_elapsed);
         let delta_secs = delta_elapsed.as_secs_f64();
 
+        self.read_avg_bps = event.read_avg_bps;
+        self.decode_avg_bps = event.decode_avg_bps;
         self.read_inst_bps = if delta_secs > 0.0 {
             delta_archive as f64 / delta_secs
         } else {
@@ -225,6 +532,8 @@ impl ExtractLiveRates {
 
         self.peak_read_bps = self.peak_read_bps.max(self.read_inst_bps);
         self.peak_decode_bps = self.peak_decode_bps.max(self.decode_inst_bps);
+        self.decode_archive_ratio = event.decode_archive_ratio;
+
         self.last_elapsed = event.elapsed;
         self.last_archive_bytes = event.archive_bytes_completed;
         self.last_decoded_bytes = event.decoded_bytes_completed;
@@ -245,10 +554,14 @@ pub struct App {
     pub block_size: String,
     pub stats_interval_ms: String,
     pub active_field: ActiveField,
+    pub active_tab: UiTab,
     pub editing: bool,
     pub running: bool,
+    pub mouse_enabled: bool,
     pub status_line: String,
     pub log_lines: VecDeque<String>,
+    pub logs_scroll_offset: usize,
+    pub profile_scroll_offset: usize,
     pub browser: Option<FileBrowser>,
     pub archive_progress: Option<ArchiveProgressEvent>,
     pub extract_progress: Option<ExtractProgressEvent>,
@@ -261,6 +574,8 @@ pub struct App {
     pub extract_live: ExtractLiveRates,
     pub profile_events: VecDeque<ProfileEvent>,
     pub profile_aggregates: BTreeMap<String, ProfileAggregate>,
+    profile_samples: BTreeMap<String, VecDeque<ProfileSample>>,
+    pub view: ViewConfig,
     pub run_started_at: Option<Instant>,
     pub last_finished_at: Option<Instant>,
 }
@@ -276,10 +591,14 @@ impl Default for App {
             block_size: "1M".to_string(),
             stats_interval_ms: "250".to_string(),
             active_field: ActiveField::Mode,
+            active_tab: UiTab::Live,
             editing: false,
             running: false,
+            mouse_enabled: true,
             status_line: "Ready. Press r to run.".to_string(),
             log_lines: VecDeque::new(),
+            logs_scroll_offset: 0,
+            profile_scroll_offset: 0,
             browser: None,
             archive_progress: None,
             extract_progress: None,
@@ -292,6 +611,8 @@ impl Default for App {
             extract_live: ExtractLiveRates::default(),
             profile_events: VecDeque::new(),
             profile_aggregates: BTreeMap::new(),
+            profile_samples: BTreeMap::new(),
+            view: ViewConfig::default(),
             run_started_at: None,
             last_finished_at: None,
         }
@@ -303,6 +624,11 @@ impl App {
         while let Ok(event) = rx.try_recv() {
             self.handle_job_event(event);
         }
+    }
+
+    pub fn tick(&mut self) {
+        self.refresh_profile_windows();
+        self.clamp_scroll_offsets();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, tx: &Sender<JobEvent>) -> Result<bool> {
@@ -318,6 +644,41 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => return Ok(true),
+            KeyCode::Char(ch) => match ch {
+                'r' => self.start_job(tx),
+                'b' => self.open_browser_for_active_field(),
+                'e' => self.enable_ephemeral_output(),
+                'n' => self.enable_null_output(),
+                'c' => self.clear_runtime_data(),
+                'd' => self.fill_default_output_if_possible(),
+                'm' => self.active_tab = self.active_tab.next(),
+                'M' => self.active_tab = self.active_tab.prev(),
+                'p' => self.view.profile_sort_mode = self.view.profile_sort_mode.next(),
+                'w' => self.view.worker_sort_mode = self.view.worker_sort_mode.next(),
+                't' => cycle_filter(
+                    &mut self.view.profile_target_filter,
+                    &PROFILE_TARGET_FILTERS,
+                ),
+                'o' => cycle_filter(&mut self.view.profile_op_filter, &PROFILE_OP_FILTERS),
+                'g' => cycle_filter(&mut self.view.profile_tag_filter, &PROFILE_TAG_FILTERS),
+                '+' | '=' => self.bump_visible_rows(1),
+                '-' => self.bump_visible_rows(-1),
+                '.' => {
+                    self.view.profile_window_seconds =
+                        self.view.profile_window_seconds.saturating_add(1)
+                }
+                ',' => {
+                    self.view.profile_window_seconds =
+                        self.view.profile_window_seconds.saturating_sub(1).max(1)
+                }
+                _ => {
+                    if self.active_field.is_text() && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        self.editing = true;
+                        self.handle_edit_key(key);
+                    }
+                }
+            },
             KeyCode::Tab => self.active_field = self.active_field.next(),
             KeyCode::BackTab => self.active_field = self.active_field.prev(),
             KeyCode::Enter => {
@@ -329,22 +690,119 @@ impl App {
             }
             KeyCode::Left => self.apply_non_text_adjustment(-1),
             KeyCode::Right => self.apply_non_text_adjustment(1),
-            KeyCode::Char('r') => self.start_job(tx),
-            KeyCode::Char('b') => self.open_browser_for_active_field(),
-            KeyCode::Char('c') => self.clear_runtime_data(),
-            KeyCode::Char('d') => self.fill_default_output_if_possible(),
-            _ => {
-                if matches!(key.code, KeyCode::Char(_))
-                    && self.active_field.is_text()
-                    && !key.modifiers.contains(KeyModifiers::CONTROL)
-                {
-                    self.editing = true;
-                    self.handle_edit_key(key);
-                }
-            }
+            KeyCode::Up => self.scroll_active_tab(-1),
+            KeyCode::Down => self.scroll_active_tab(1),
+            KeyCode::PageUp => self.scroll_active_tab(-8),
+            KeyCode::PageDown => self.scroll_active_tab(8),
+            _ => {}
         }
 
         Ok(false)
+    }
+
+    pub fn handle_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        layout: &ui::LayoutInfo,
+        tx: &Sender<JobEvent>,
+    ) {
+        if self.browser.is_some() {
+            self.handle_browser_mouse(mouse, layout);
+            return;
+        }
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(action) = layout.run_action_at(mouse.column, mouse.row) {
+                    self.apply_run_action(action, tx);
+                    return;
+                }
+
+                if let Some(field) = layout.run_field_at(mouse.column, mouse.row) {
+                    self.active_field = field;
+                    if field.is_text() {
+                        self.editing = true;
+                    } else {
+                        self.apply_non_text_adjustment(1);
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => self.handle_mouse_scroll(-1, mouse, layout),
+            MouseEventKind::ScrollDown => self.handle_mouse_scroll(1, mouse, layout),
+            _ => {}
+        }
+    }
+
+    pub fn current_runtime(&self) -> Option<&PoolRuntimeSnapshot> {
+        if let Some(progress) = &self.archive_progress {
+            return Some(&progress.runtime);
+        }
+        if let Some(progress) = &self.extract_progress {
+            return Some(&progress.runtime);
+        }
+        None
+    }
+
+    pub fn filtered_sorted_profile_rows(&self) -> Vec<ProfileAggregate> {
+        let mut rows = self
+            .profile_aggregates
+            .values()
+            .filter(|aggregate| self.profile_filter_matches(aggregate))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        rows.sort_by(|left, right| {
+            let order = match self.view.profile_sort_mode {
+                ProfileSortMode::Total => right.total_us.cmp(&left.total_us),
+                ProfileSortMode::Avg => right
+                    .avg_us
+                    .partial_cmp(&left.avg_us)
+                    .unwrap_or(Ordering::Equal),
+                ProfileSortMode::Max => right.max_us.cmp(&left.max_us),
+                ProfileSortMode::Min => right.min_display().cmp(&left.min_display()),
+                ProfileSortMode::Count => right.count.cmp(&left.count),
+                ProfileSortMode::P95 => right.p95_us.cmp(&left.p95_us),
+                ProfileSortMode::Rate => right
+                    .events_per_sec
+                    .partial_cmp(&left.events_per_sec)
+                    .unwrap_or(Ordering::Equal),
+            };
+
+            if order == Ordering::Equal {
+                left.key.cmp(&right.key)
+            } else {
+                order
+            }
+        });
+
+        rows
+    }
+
+    pub fn sorted_worker_rows(&self) -> Vec<WorkerRuntimeSnapshot> {
+        let Some(runtime) = self.current_runtime() else {
+            return Vec::new();
+        };
+
+        let mut rows = runtime.workers.clone();
+        rows.sort_by(|left, right| {
+            let order = match self.view.worker_sort_mode {
+                WorkerSortMode::Utilization => right
+                    .utilization
+                    .partial_cmp(&left.utilization)
+                    .unwrap_or(Ordering::Equal),
+                WorkerSortMode::Busy => right.busy.cmp(&left.busy),
+                WorkerSortMode::Tasks => right.tasks_completed.cmp(&left.tasks_completed),
+                WorkerSortMode::WorkerId => left.worker_id.cmp(&right.worker_id),
+            };
+
+            if order == Ordering::Equal {
+                left.worker_id.cmp(&right.worker_id)
+            } else {
+                order
+            }
+        });
+
+        rows
     }
 
     fn handle_edit_key(&mut self, key: KeyEvent) {
@@ -410,6 +868,93 @@ impl App {
         }
     }
 
+    fn handle_browser_mouse(&mut self, mouse: MouseEvent, layout: &ui::LayoutInfo) {
+        let Some(browser_layout) = layout.browser.as_ref() else {
+            return;
+        };
+        let Some(browser) = self.browser.as_mut() else {
+            return;
+        };
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(action) = browser_layout.action_at(mouse.column, mouse.row) {
+                    self.apply_browser_action(action);
+                    return;
+                }
+
+                if rect_contains(browser_layout.list_rect, mouse.column, mouse.row) {
+                    let relative = mouse.row.saturating_sub(browser_layout.list_rect.y) as usize;
+                    let index = browser_layout
+                        .list_start_index
+                        .saturating_add(relative)
+                        .min(browser.len().saturating_sub(1));
+                    browser.set_selected(index);
+                }
+            }
+            MouseEventKind::ScrollUp => browser.scroll(-1),
+            MouseEventKind::ScrollDown => browser.scroll(1),
+            _ => {}
+        }
+    }
+
+    fn apply_browser_action(&mut self, action: BrowserAction) {
+        let Some(browser) = self.browser.as_mut() else {
+            return;
+        };
+
+        match action {
+            BrowserAction::OpenOrSelect => {
+                let target = browser.target;
+                if let Some(path) = browser.enter_selected() {
+                    self.apply_browser_selection(target, path);
+                }
+            }
+            BrowserAction::SelectDir => {
+                let target = browser.target;
+                let path = browser.choose_current_dir();
+                self.apply_browser_selection(target, path);
+            }
+            BrowserAction::Parent => browser.go_parent(),
+            BrowserAction::ToggleHidden => browser.toggle_hidden(),
+            BrowserAction::Refresh => browser.reload(),
+            BrowserAction::Close => {
+                self.browser = None;
+                self.status_line = "Closed browser".to_string();
+            }
+        }
+    }
+
+    fn handle_mouse_scroll(&mut self, delta: i32, mouse: MouseEvent, layout: &ui::LayoutInfo) {
+        if let Some(rect) = layout.logs_rect {
+            if rect_contains(rect, mouse.column, mouse.row) {
+                self.logs_scroll_offset = scroll_with_floor(self.logs_scroll_offset, delta);
+                return;
+            }
+        }
+
+        if let Some(rect) = layout.profile_rect {
+            if rect_contains(rect, mouse.column, mouse.row) {
+                self.profile_scroll_offset = scroll_with_floor(self.profile_scroll_offset, delta);
+                return;
+            }
+        }
+
+        self.scroll_active_tab(delta);
+    }
+
+    fn scroll_active_tab(&mut self, delta: i32) {
+        match self.active_tab {
+            UiTab::Logs => {
+                self.logs_scroll_offset = scroll_with_floor(self.logs_scroll_offset, delta)
+            }
+            UiTab::Profile => {
+                self.profile_scroll_offset = scroll_with_floor(self.profile_scroll_offset, delta)
+            }
+            _ => {}
+        }
+    }
+
     fn apply_browser_selection(&mut self, target: BrowseTarget, mut selected: PathBuf) {
         if target == BrowseTarget::Output && selected.is_dir() {
             selected = self.default_output_in_directory(&selected);
@@ -451,13 +996,24 @@ impl App {
     fn apply_non_text_adjustment(&mut self, direction: i32) {
         match self.active_field {
             ActiveField::Mode => {
+                let keep_special_output = if is_null_output_value(&self.output_path) {
+                    Some(NULL_OUTPUT_TOKEN)
+                } else if is_ephemeral_output_value(&self.output_path) {
+                    Some(EPHEMERAL_OUTPUT_TOKEN)
+                } else {
+                    None
+                };
                 self.mode = match (self.mode, direction >= 0) {
                     (JobMode::Archive, true) => JobMode::Extract,
                     (JobMode::Archive, false) => JobMode::Extract,
                     (JobMode::Extract, true) => JobMode::Archive,
                     (JobMode::Extract, false) => JobMode::Archive,
                 };
-                self.fill_default_output_if_possible();
+                if let Some(token) = keep_special_output {
+                    self.output_path = token.to_string();
+                } else {
+                    self.fill_default_output_if_possible();
+                }
             }
             ActiveField::Compression => {
                 self.compression = match (self.compression, direction >= 0) {
@@ -470,6 +1026,32 @@ impl App {
                 };
             }
             _ => {}
+        }
+    }
+
+    fn apply_run_action(&mut self, action: RunAction, tx: &Sender<JobEvent>) {
+        match action {
+            RunAction::StartRun => self.start_job(tx),
+            RunAction::BrowseInput => {
+                self.active_field = ActiveField::Input;
+                self.open_browser_for_active_field();
+            }
+            RunAction::BrowseOutput => {
+                self.active_field = ActiveField::Output;
+                self.open_browser_for_active_field();
+            }
+            RunAction::EphemeralOutput => self.enable_ephemeral_output(),
+            RunAction::NullOutput => self.enable_null_output(),
+            RunAction::DefaultOutput => self.fill_default_output_if_possible(),
+            RunAction::Clear => self.clear_runtime_data(),
+        }
+    }
+
+    fn bump_visible_rows(&mut self, delta: i32) {
+        if self.active_tab == UiTab::Profile {
+            self.view.profile_rows_limit = bump_usize(self.view.profile_rows_limit, delta, 4, 100);
+        } else if self.active_tab == UiTab::Live {
+            self.view.worker_rows_limit = bump_usize(self.view.worker_rows_limit, delta, 4, 100);
         }
     }
 
@@ -501,12 +1083,12 @@ impl App {
         self.archive_report = None;
         self.extract_report = None;
 
-        self.output_path = config.output_path.to_string_lossy().into_owned();
+        self.output_path = config.output_display.clone();
         self.status_line = format!(
             "starting {:?}: {} -> {}",
             config.mode,
             config.input_path.display(),
-            config.output_path.display()
+            config.output_display
         );
         self.log_line(self.status_line.clone());
         spawn_job(config, tx.clone());
@@ -529,23 +1111,59 @@ impl App {
             .map_err(|_| "stats interval must be a positive integer (ms)".to_string())?
             .max(MIN_STATS_INTERVAL_MS);
 
-        let output_path = if let Some(output) = as_path_opt(&self.output_path) {
-            if output.is_dir() {
-                self.default_output_in_directory(&output)
+        let output_raw = self.output_path.trim();
+        let (output_path, output_display, ephemeral_output, null_output) =
+            if is_null_output_value(output_raw) {
+                (
+                    PathBuf::from(NULL_OUTPUT_TOKEN),
+                    NULL_OUTPUT_TOKEN.to_string(),
+                    false,
+                    true,
+                )
+            } else if is_ephemeral_output_value(output_raw) {
+                (
+                    PathBuf::from(EPHEMERAL_OUTPUT_TOKEN),
+                    EPHEMERAL_OUTPUT_TOKEN.to_string(),
+                    true,
+                    false,
+                )
+            } else if let Some(output) = as_path_opt(&self.output_path) {
+                if output.is_dir() {
+                    let resolved = self.default_output_in_directory(&output);
+                    (
+                        resolved.clone(),
+                        resolved.to_string_lossy().into_owned(),
+                        false,
+                        false,
+                    )
+                } else {
+                    (
+                        output.clone(),
+                        output.to_string_lossy().into_owned(),
+                        false,
+                        false,
+                    )
+                }
             } else {
-                output
-            }
-        } else {
-            match self.mode {
-                JobMode::Archive => default_archive_output_path(&input_path),
-                JobMode::Extract => default_extract_output_path(&input_path),
-            }
-        };
+                let resolved = match self.mode {
+                    JobMode::Archive => default_archive_output_path(&input_path),
+                    JobMode::Extract => default_extract_output_path(&input_path),
+                };
+                (
+                    resolved.clone(),
+                    resolved.to_string_lossy().into_owned(),
+                    false,
+                    false,
+                )
+            };
 
         Ok(JobConfig {
             mode: self.mode,
             input_path,
             output_path,
+            output_display,
+            ephemeral_output,
+            null_output,
             workers,
             block_size,
             compression: self.compression,
@@ -574,6 +1192,20 @@ impl App {
         }
     }
 
+    fn enable_ephemeral_output(&mut self) {
+        self.output_path = EPHEMERAL_OUTPUT_TOKEN.to_string();
+        self.status_line =
+            "output set to ephemeral temp path (written for speed test, auto-deleted)".to_string();
+        self.log_line(self.status_line.clone());
+    }
+
+    fn enable_null_output(&mut self) {
+        self.output_path = NULL_OUTPUT_TOKEN.to_string();
+        self.status_line =
+            "output set to null sink (discard output, no persistent writes)".to_string();
+        self.log_line(self.status_line.clone());
+    }
+
     fn fill_default_output_if_possible(&mut self) {
         let Some(input_path) = as_path_opt(&self.input_path) else {
             return;
@@ -598,7 +1230,10 @@ impl App {
         self.decode_rate_history.clear();
         self.profile_events.clear();
         self.profile_aggregates.clear();
+        self.profile_samples.clear();
         self.log_lines.clear();
+        self.logs_scroll_offset = 0;
+        self.profile_scroll_offset = 0;
         self.status_line = "cleared telemetry + reports".to_string();
     }
 
@@ -625,7 +1260,7 @@ impl App {
                     "running {:?}: {} -> {}",
                     mode,
                     input_path.display(),
-                    output_path.display()
+                    output_path
                 );
                 self.log_line(self.status_line.clone());
             }
@@ -694,18 +1329,103 @@ impl App {
     }
 
     fn push_profile_event(&mut self, event: ProfileEvent) {
+        let now = Instant::now();
         let key = format!("{}::{}", event.target, event.op);
-        let aggregate = self.profile_aggregates.entry(key).or_default();
+        let aggregate = self
+            .profile_aggregates
+            .entry(key.clone())
+            .or_insert_with(|| ProfileAggregate::new(key.clone(), event.target, event.op));
+
         aggregate.count = aggregate.count.saturating_add(1);
         aggregate.total_us = aggregate.total_us.saturating_add(event.elapsed_us);
         aggregate.max_us = aggregate.max_us.max(event.elapsed_us);
+        aggregate.min_us = aggregate.min_us.min(event.elapsed_us);
+        aggregate.avg_us = aggregate.total_us as f64 / aggregate.count.max(1) as f64;
         aggregate.last_result = event.result.to_string();
         aggregate.last_message = event.message.to_string();
+        for tag in &event.tags {
+            aggregate.tags_seen.insert(tag.to_ascii_lowercase());
+        }
+
+        let samples = self.profile_samples.entry(key).or_default();
+        samples.push_back(ProfileSample {
+            at: now,
+            elapsed_us: event.elapsed_us,
+        });
+        while samples.len() > MAX_PROFILE_SAMPLES_PER_KEY {
+            samples.pop_front();
+        }
 
         self.profile_events.push_back(event);
         while self.profile_events.len() > MAX_PROFILE_EVENTS {
             self.profile_events.pop_front();
         }
+
+        self.refresh_profile_windows();
+    }
+
+    fn refresh_profile_windows(&mut self) {
+        let now = Instant::now();
+        let window = Duration::from_secs(self.view.profile_window_seconds.max(1));
+
+        for (key, samples) in &mut self.profile_samples {
+            while let Some(front) = samples.front() {
+                if now.duration_since(front.at) > window {
+                    samples.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            let Some(aggregate) = self.profile_aggregates.get_mut(key) else {
+                continue;
+            };
+
+            if samples.is_empty() {
+                aggregate.p50_us = 0;
+                aggregate.p95_us = 0;
+                aggregate.events_per_sec = 0.0;
+                continue;
+            }
+
+            let mut values = samples
+                .iter()
+                .map(|sample| sample.elapsed_us)
+                .collect::<Vec<_>>();
+            values.sort_unstable();
+            aggregate.p50_us = percentile(&values, 50.0);
+            aggregate.p95_us = percentile(&values, 95.0);
+            aggregate.events_per_sec = samples.len() as f64 / window.as_secs_f64().max(1e-6);
+        }
+    }
+
+    fn profile_filter_matches(&self, aggregate: &ProfileAggregate) -> bool {
+        if !matches_filter(&aggregate.target, &self.view.profile_target_filter) {
+            return false;
+        }
+        if !matches_filter(&aggregate.op, &self.view.profile_op_filter) {
+            return false;
+        }
+
+        let tag_filter = self.view.profile_tag_filter.trim().to_ascii_lowercase();
+        if tag_filter.is_empty() || tag_filter == "all" {
+            return true;
+        }
+
+        aggregate
+            .tags_seen
+            .iter()
+            .any(|tag| tag.contains(&tag_filter))
+    }
+
+    fn clamp_scroll_offsets(&mut self) {
+        let max_logs = self.log_lines.len().saturating_sub(1);
+        self.logs_scroll_offset = self.logs_scroll_offset.min(max_logs);
+
+        let profile_len = self.filtered_sorted_profile_rows().len();
+        self.profile_scroll_offset = self
+            .profile_scroll_offset
+            .min(profile_len.saturating_sub(1));
     }
 
     fn log_line(&mut self, line: String) {
@@ -716,6 +1436,35 @@ impl App {
     }
 }
 
+fn rect_contains(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && y >= rect.y
+        && x < rect.x.saturating_add(rect.width)
+        && y < rect.y.saturating_add(rect.height)
+}
+
+fn bump_usize(current: usize, delta: i32, min: usize, max: usize) -> usize {
+    if delta > 0 {
+        current.saturating_add(delta as usize).clamp(min, max)
+    } else if delta < 0 {
+        current
+            .saturating_sub(delta.unsigned_abs() as usize)
+            .clamp(min, max)
+    } else {
+        current.clamp(min, max)
+    }
+}
+
+fn scroll_with_floor(current: usize, delta: i32) -> usize {
+    if delta > 0 {
+        current.saturating_add(delta as usize)
+    } else if delta < 0 {
+        current.saturating_sub(delta.unsigned_abs() as usize)
+    } else {
+        current
+    }
+}
+
 fn as_path_opt(value: &str) -> Option<PathBuf> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -723,6 +1472,34 @@ fn as_path_opt(value: &str) -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(trimmed))
     }
+}
+
+fn matches_filter(value: &str, filter: &str) -> bool {
+    let filter = filter.trim().to_ascii_lowercase();
+    if filter.is_empty() || filter == "all" {
+        return true;
+    }
+
+    value.to_ascii_lowercase().contains(&filter)
+}
+
+fn percentile(values: &[u64], percentile: f64) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+
+    let rank = ((percentile / 100.0) * (values.len().saturating_sub(1) as f64)).round() as usize;
+    values[rank.min(values.len().saturating_sub(1))]
+}
+
+fn cycle_filter(current: &mut String, presets: &[&str]) {
+    let normalized = current.trim().to_ascii_lowercase();
+    let idx = presets
+        .iter()
+        .position(|value| value.eq_ignore_ascii_case(&normalized))
+        .unwrap_or(0);
+    let next = (idx + 1) % presets.len();
+    *current = presets[next].to_string();
 }
 
 fn push_history_point(history: &mut Vec<u64>, rate_bps: f64) {
