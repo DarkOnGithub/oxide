@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use crossbeam_channel::Sender;
 use oxide_core::telemetry::events::{self, GlobalTelemetrySink};
+use oxide_core::telemetry::tags;
 use oxide_core::{
     ArchivePipeline, ArchivePipelineConfig, ArchiveReport, BufferPool, CompressionAlgo,
     ExtractReport, PipelinePerformanceOptions, RunTelemetryOptions, TelemetryEvent, TelemetrySink,
@@ -29,6 +30,12 @@ pub struct JobConfig {
     pub null_output: bool,
     pub workers: usize,
     pub block_size: usize,
+    pub inflight_bytes: usize,
+    pub stream_read_buffer: usize,
+    pub producer_threads: usize,
+    pub directory_mmap_threshold: usize,
+    pub writer_queue_blocks: usize,
+    pub result_wait_ms: u64,
     pub compression: CompressionAlgo,
     pub stats_interval: Duration,
 }
@@ -89,17 +96,33 @@ fn run_archive(config: JobConfig, sink: &mut dyn TelemetrySink) -> anyhow::Resul
 
     let output_path = resolve_output_path(&config);
 
+    let producer_threads = config.producer_threads.clamp(1, 2);
+    let physical_cores = num_cpus::get_physical().max(1);
+    let reserved_threads = producer_threads.saturating_add(1);
+    let auto_workers = physical_cores.saturating_sub(reserved_threads).max(1);
+    let compression_workers = if config.workers == 0 {
+        auto_workers
+    } else {
+        config.workers.max(1)
+    };
     let buffer_pool = Arc::new(BufferPool::new(
         1024 * 1024,
-        config.workers.saturating_mul(16),
+        compression_workers.saturating_mul(16),
     ));
     let mut pipeline_config = ArchivePipelineConfig::new(
         config.block_size.max(1),
-        config.workers.max(1),
+        compression_workers,
         buffer_pool,
         config.compression,
     );
-    pipeline_config.performance = PipelinePerformanceOptions::default();
+    let mut performance = PipelinePerformanceOptions::default();
+    performance.max_inflight_bytes = config.inflight_bytes.max(1);
+    performance.directory_stream_read_buffer_size = config.stream_read_buffer.max(1);
+    performance.producer_threads = producer_threads;
+    performance.directory_mmap_threshold_bytes = config.directory_mmap_threshold.max(1);
+    performance.writer_result_queue_blocks = config.writer_queue_blocks.max(1);
+    performance.result_wait_timeout = Duration::from_millis(config.result_wait_ms.max(1));
+    pipeline_config.performance = performance;
     let pipeline = ArchivePipeline::new(pipeline_config);
 
     if config.null_output {
@@ -136,13 +159,18 @@ fn run_archive(config: JobConfig, sink: &mut dyn TelemetrySink) -> anyhow::Resul
 }
 
 fn run_extract(config: JobConfig, sink: &mut dyn TelemetrySink) -> anyhow::Result<JobResult> {
+    let decode_workers = if config.workers == 0 {
+        num_cpus::get_physical().max(1)
+    } else {
+        config.workers.max(1)
+    };
     let buffer_pool = Arc::new(BufferPool::new(
         1024 * 1024,
-        config.workers.saturating_mul(8).max(8),
+        decode_workers.saturating_mul(8).max(8),
     ));
     let mut pipeline_config = ArchivePipelineConfig::new(
         1024 * 1024,
-        config.workers.max(1),
+        decode_workers,
         buffer_pool,
         CompressionAlgo::Lz4,
     );
@@ -260,6 +288,17 @@ struct ChannelGlobalSink {
 
 impl GlobalTelemetrySink for ChannelGlobalSink {
     fn on_event(&mut self, event: TelemetryEvent) {
-        let _ = self.tx.send(JobEvent::Telemetry(event));
+        if should_forward_global_telemetry(&event) {
+            let _ = self.tx.send(JobEvent::Telemetry(event));
+        }
+    }
+}
+
+fn should_forward_global_telemetry(event: &TelemetryEvent) -> bool {
+    match event {
+        // Worker profiling emits a very high-frequency stream (queue depth/task start/task finish)
+        // that can starve TUI rendering on very large archives.
+        TelemetryEvent::Profile(profile) => profile.target != tags::PROFILE_WORKER,
+        _ => true,
     }
 }

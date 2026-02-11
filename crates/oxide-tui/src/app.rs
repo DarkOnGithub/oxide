@@ -32,12 +32,26 @@ use crate::job::{JobConfig, JobEvent, JobMode, JobResult, spawn_job};
 use crate::ui;
 
 const EVENT_TICK_MS: u64 = 50;
+const MAX_JOB_EVENTS_PER_TICK: usize = 4096;
 const MIN_STATS_INTERVAL_MS: u64 = 50;
 const MAX_HISTORY_POINTS: usize = 160;
 const MAX_LOG_LINES: usize = 500;
 const MAX_PROFILE_EVENTS: usize = 300;
 const MAX_PROFILE_SAMPLES_PER_KEY: usize = 4096;
 const DEFAULT_PROFILE_WINDOW_SECONDS: u64 = 10;
+const DEFAULT_ARCHIVE_BLOCK_SIZE: &str = "2M";
+const DEFAULT_INFLIGHT_BYTES: &str = "2G";
+const DEFAULT_STREAM_READ_BUFFER: &str = "64M";
+const DEFAULT_PRODUCER_THREADS: &str = "5";
+const DEFAULT_DIRECTORY_MMAP_THRESHOLD: &str = "8M";
+const DEFAULT_WRITER_QUEUE_BLOCKS: &str = "1024";
+const DEFAULT_RESULT_WAIT_MS: &str = "1";
+
+fn default_archive_workers() -> usize {
+    let physical_cores = num_cpus::get_physical().max(1);
+    // Reserve one producer and one writer thread by default.
+    physical_cores.saturating_sub(2).max(1)
+}
 
 const PROFILE_TARGET_FILTERS: [&str; 8] = [
     "all",
@@ -195,17 +209,29 @@ pub enum ActiveField {
     Compression,
     Workers,
     BlockSize,
+    InflightBytes,
+    StreamReadBuffer,
+    ProducerThreads,
+    DirectoryMmapThreshold,
+    WriterQueueBlocks,
+    ResultWaitMs,
     StatsInterval,
 }
 
 impl ActiveField {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 13] = [
         Self::Mode,
         Self::Input,
         Self::Output,
         Self::Compression,
         Self::Workers,
         Self::BlockSize,
+        Self::InflightBytes,
+        Self::StreamReadBuffer,
+        Self::ProducerThreads,
+        Self::DirectoryMmapThreshold,
+        Self::WriterQueueBlocks,
+        Self::ResultWaitMs,
         Self::StatsInterval,
     ];
 
@@ -238,6 +264,12 @@ impl ActiveField {
             Self::Compression => "compression",
             Self::Workers => "workers",
             Self::BlockSize => "block size",
+            Self::InflightBytes => "inflight bytes",
+            Self::StreamReadBuffer => "stream read buffer",
+            Self::ProducerThreads => "producer threads",
+            Self::DirectoryMmapThreshold => "mmap threshold",
+            Self::WriterQueueBlocks => "writer queue blocks",
+            Self::ResultWaitMs => "result wait",
             Self::StatsInterval => "stats interval",
         }
     }
@@ -245,7 +277,17 @@ impl ActiveField {
     pub fn is_text(self) -> bool {
         matches!(
             self,
-            Self::Input | Self::Output | Self::Workers | Self::BlockSize | Self::StatsInterval
+            Self::Input
+                | Self::Output
+                | Self::Workers
+                | Self::BlockSize
+                | Self::InflightBytes
+                | Self::StreamReadBuffer
+                | Self::ProducerThreads
+                | Self::DirectoryMmapThreshold
+                | Self::WriterQueueBlocks
+                | Self::ResultWaitMs
+                | Self::StatsInterval
         )
     }
 }
@@ -552,6 +594,12 @@ pub struct App {
     pub compression: CompressionAlgo,
     pub workers: String,
     pub block_size: String,
+    pub inflight_bytes: String,
+    pub stream_read_buffer: String,
+    pub producer_threads: String,
+    pub directory_mmap_threshold: String,
+    pub writer_queue_blocks: String,
+    pub result_wait_ms: String,
     pub stats_interval_ms: String,
     pub active_field: ActiveField,
     pub active_tab: UiTab,
@@ -587,8 +635,14 @@ impl Default for App {
             input_path: String::new(),
             output_path: String::new(),
             compression: CompressionAlgo::Lz4,
-            workers: num_cpus::get().max(1).to_string(),
-            block_size: "1M".to_string(),
+            workers: default_archive_workers().to_string(),
+            block_size: DEFAULT_ARCHIVE_BLOCK_SIZE.to_string(),
+            inflight_bytes: DEFAULT_INFLIGHT_BYTES.to_string(),
+            stream_read_buffer: DEFAULT_STREAM_READ_BUFFER.to_string(),
+            producer_threads: DEFAULT_PRODUCER_THREADS.to_string(),
+            directory_mmap_threshold: DEFAULT_DIRECTORY_MMAP_THRESHOLD.to_string(),
+            writer_queue_blocks: DEFAULT_WRITER_QUEUE_BLOCKS.to_string(),
+            result_wait_ms: DEFAULT_RESULT_WAIT_MS.to_string(),
             stats_interval_ms: "250".to_string(),
             active_field: ActiveField::Mode,
             active_tab: UiTab::Live,
@@ -621,8 +675,33 @@ impl Default for App {
 
 impl App {
     pub fn drain_job_events(&mut self, rx: &Receiver<JobEvent>) {
-        while let Ok(event) = rx.try_recv() {
-            self.handle_job_event(event);
+        let mut drained = 0usize;
+        let mut latest_archive_progress = None;
+        let mut latest_extract_progress = None;
+
+        while drained < MAX_JOB_EVENTS_PER_TICK {
+            let event = match rx.try_recv() {
+                Ok(event) => event,
+                Err(_) => break,
+            };
+            drained += 1;
+
+            match event {
+                JobEvent::Telemetry(TelemetryEvent::ArchiveProgress(progress)) => {
+                    latest_archive_progress = Some(progress);
+                }
+                JobEvent::Telemetry(TelemetryEvent::ExtractProgress(progress)) => {
+                    latest_extract_progress = Some(progress);
+                }
+                other => self.handle_job_event(other),
+            }
+        }
+
+        if let Some(progress) = latest_archive_progress {
+            self.handle_telemetry_event(TelemetryEvent::ArchiveProgress(progress));
+        }
+        if let Some(progress) = latest_extract_progress {
+            self.handle_telemetry_event(TelemetryEvent::ExtractProgress(progress));
         }
     }
 
@@ -1101,9 +1180,29 @@ impl App {
             .workers
             .trim()
             .parse::<usize>()
-            .map_err(|_| "workers must be a positive integer".to_string())?
-            .max(1);
+            .map_err(|_| "workers must be a non-negative integer (0 = auto)".to_string())?;
         let block_size = parse_size(self.block_size.trim())?;
+        let inflight_bytes = parse_size(self.inflight_bytes.trim())?;
+        let stream_read_buffer = parse_size(self.stream_read_buffer.trim())?;
+        let producer_threads = self
+            .producer_threads
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| "producer threads must be an integer (1-2)".to_string())?
+            .clamp(1, 2);
+        let directory_mmap_threshold = parse_size(self.directory_mmap_threshold.trim())?;
+        let writer_queue_blocks = self
+            .writer_queue_blocks
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| "writer queue blocks must be a positive integer".to_string())?
+            .max(1);
+        let result_wait_ms = self
+            .result_wait_ms
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "result wait must be a positive integer (ms)".to_string())?
+            .max(1);
         let stats_interval_ms = self
             .stats_interval_ms
             .trim()
@@ -1166,6 +1265,12 @@ impl App {
             null_output,
             workers,
             block_size,
+            inflight_bytes,
+            stream_read_buffer,
+            producer_threads,
+            directory_mmap_threshold,
+            writer_queue_blocks,
+            result_wait_ms,
             compression: self.compression,
             stats_interval: Duration::from_millis(stats_interval_ms),
         })
@@ -1243,6 +1348,12 @@ impl App {
             ActiveField::Output => Some(&mut self.output_path),
             ActiveField::Workers => Some(&mut self.workers),
             ActiveField::BlockSize => Some(&mut self.block_size),
+            ActiveField::InflightBytes => Some(&mut self.inflight_bytes),
+            ActiveField::StreamReadBuffer => Some(&mut self.stream_read_buffer),
+            ActiveField::ProducerThreads => Some(&mut self.producer_threads),
+            ActiveField::DirectoryMmapThreshold => Some(&mut self.directory_mmap_threshold),
+            ActiveField::WriterQueueBlocks => Some(&mut self.writer_queue_blocks),
+            ActiveField::ResultWaitMs => Some(&mut self.result_wait_ms),
             ActiveField::StatsInterval => Some(&mut self.stats_interval_ms),
             _ => None,
         }
