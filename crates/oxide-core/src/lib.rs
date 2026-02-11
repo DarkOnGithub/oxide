@@ -6,6 +6,7 @@ pub mod format;
 pub mod io;
 pub mod pipeline;
 pub mod preprocessing;
+pub mod report;
 pub mod telemetry;
 pub mod types;
 
@@ -27,6 +28,10 @@ pub use pipeline::{
     ArchiveSourceKind, NoopProgress, PipelinePerformanceOptions, ProgressSink, StatValue,
 };
 pub use preprocessing::{apply_preprocessing, reverse_preprocessing};
+pub use report::{
+    ArchiveReport, ExtractReport, ReportBuildOptions, ReportExport, ReportValue, RunReport,
+    ThreadReport, WorkerReport,
+};
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use types::{
     AudioStrategy, Batch, BatchData, BinaryStrategy, CompressedBlock, CompressionAlgo,
