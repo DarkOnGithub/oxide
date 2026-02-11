@@ -1,14 +1,26 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
+pub mod events;
 pub mod memory;
 pub mod profile;
+pub mod report;
 pub mod tags;
 pub mod worker;
 
+pub use events::{
+    ArchiveProgressEvent, ExtractProgressEvent, GlobalTelemetrySink, ProfileEvent, TelemetryEvent,
+    TelemetrySink,
+};
 pub use memory::ProcessMemorySample;
+pub use report::{
+    ArchiveReport, ArchiveRun, ExtractReport, ReportExport, ReportValue, RunReport,
+    RunTelemetryOptions, ThreadReport, WorkerReport,
+};
 
 /// Histogram summary captured in telemetry snapshots.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct HistogramSnapshot {
     pub count: u64,
     pub total: u64,
@@ -18,7 +30,7 @@ pub struct HistogramSnapshot {
 }
 
 /// In-memory view of collected telemetry metrics.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
     pub counters: BTreeMap<String, u64>,
     pub gauges: BTreeMap<String, u64>,

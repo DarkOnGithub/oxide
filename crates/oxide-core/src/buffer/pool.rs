@@ -1,6 +1,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 
@@ -58,7 +59,8 @@ impl BufferPool {
     /// Returns a recycled buffer if available, otherwise creates a new one.
     /// The buffer will be automatically returned to the pool when dropped.
     pub fn acquire(&self) -> PooledBuffer {
-        match self.receiver.try_recv() {
+        let started_at = Instant::now();
+        let (result, capacity, buffer) = match self.receiver.try_recv() {
             Ok(mut buffer) => {
                 let capacity = buffer.capacity();
                 buffer.clear();
@@ -77,18 +79,7 @@ impl BufferPool {
                     capacity as u64,
                     &[("subsystem", "buffer"), ("op", "acquire")],
                 );
-                #[cfg(feature = "profiling")]
-                if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_BUFFER) {
-                    tracing::debug!(
-                        target: tags::PROFILE_BUFFER,
-                        op = "acquire",
-                        result = "recycled",
-                        tags = ?PROFILE_TAG_STACK_BUFFER,
-                        buffer_capacity = capacity,
-                        "buffer recycled from pool"
-                    );
-                }
-                PooledBuffer::new(buffer, self.recycler.clone(), Arc::clone(&self.metrics))
+                ("recycled", capacity, buffer)
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
                 self.metrics.created.fetch_add(1, Ordering::Relaxed);
@@ -101,24 +92,45 @@ impl BufferPool {
                         ("result", "created"),
                     ],
                 );
-                #[cfg(feature = "profiling")]
-                if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_BUFFER) {
-                    tracing::debug!(
-                        target: tags::PROFILE_BUFFER,
-                        op = "acquire",
-                        result = "created",
-                        tags = ?PROFILE_TAG_STACK_BUFFER,
-                        buffer_capacity = self.default_capacity,
-                        "buffer created for pool"
-                    );
-                }
-                PooledBuffer::new(
+                let capacity = self.default_capacity;
+                (
+                    "created",
+                    capacity,
                     Vec::with_capacity(self.default_capacity),
-                    self.recycler.clone(),
-                    Arc::clone(&self.metrics),
                 )
             }
+        };
+        let elapsed_us = started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        telemetry::record_histogram(
+            tags::METRIC_BUFFER_ACQUIRE_LATENCY_US,
+            elapsed_us,
+            &[("subsystem", "buffer"), ("op", "acquire")],
+        );
+        #[cfg(not(feature = "profiling"))]
+        let _ = (result, capacity);
+        #[cfg(feature = "profiling")]
+        profile::event(
+            tags::PROFILE_BUFFER,
+            &PROFILE_TAG_STACK_BUFFER,
+            "acquire",
+            result,
+            elapsed_us,
+            "buffer acquire completed",
+        );
+        #[cfg(feature = "profiling")]
+        if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_BUFFER) {
+            tracing::debug!(
+                target: tags::PROFILE_BUFFER,
+                op = "acquire",
+                result,
+                elapsed_us,
+                tags = ?PROFILE_TAG_STACK_BUFFER,
+                buffer_capacity = capacity,
+                "buffer acquire completed"
+            );
         }
+
+        PooledBuffer::new(buffer, self.recycler.clone(), Arc::clone(&self.metrics))
     }
 
     /// Returns a snapshot of the current pool metrics.
@@ -207,6 +219,7 @@ impl DerefMut for PooledBuffer {
 
 impl Drop for PooledBuffer {
     fn drop(&mut self) {
+        let started_at = Instant::now();
         let buffer = std::mem::take(&mut self.buffer);
         let capacity = buffer.capacity();
         if let Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) =
@@ -222,22 +235,62 @@ impl Drop for PooledBuffer {
                     ("result", "dropped"),
                 ],
             );
+            let elapsed_us = started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            telemetry::record_histogram(
+                tags::METRIC_BUFFER_RECYCLE_LATENCY_US,
+                elapsed_us,
+                &[("subsystem", "buffer"), ("op", "recycle")],
+            );
+            #[cfg(feature = "profiling")]
+            profile::event(
+                tags::PROFILE_BUFFER,
+                &PROFILE_TAG_STACK_BUFFER,
+                "recycle",
+                "dropped",
+                elapsed_us,
+                "buffer recycle dropped",
+            );
             #[cfg(feature = "profiling")]
             if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_BUFFER) {
                 tracing::debug!(
                     target: tags::PROFILE_BUFFER,
                     op = "recycle",
                     result = "dropped",
+                    elapsed_us,
                     tags = ?PROFILE_TAG_STACK_BUFFER,
                     buffer_capacity = capacity,
                     "buffer dropped instead of recycled"
                 );
             }
         } else {
+            telemetry::increment_counter(
+                tags::METRIC_BUFFER_RECYCLE_OK_COUNT,
+                1,
+                &[
+                    ("subsystem", "buffer"),
+                    ("op", "recycle"),
+                    ("result", "recycled"),
+                ],
+            );
             telemetry::add_gauge(
                 tags::METRIC_MEMORY_POOL_ESTIMATED_BYTES,
                 capacity as u64,
                 &[("subsystem", "buffer"), ("op", "recycle")],
+            );
+            let elapsed_us = started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            telemetry::record_histogram(
+                tags::METRIC_BUFFER_RECYCLE_LATENCY_US,
+                elapsed_us,
+                &[("subsystem", "buffer"), ("op", "recycle")],
+            );
+            #[cfg(feature = "profiling")]
+            profile::event(
+                tags::PROFILE_BUFFER,
+                &PROFILE_TAG_STACK_BUFFER,
+                "recycle",
+                "recycled",
+                elapsed_us,
+                "buffer recycled to pool",
             );
             #[cfg(feature = "profiling")]
             if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_BUFFER) {
@@ -245,6 +298,7 @@ impl Drop for PooledBuffer {
                     target: tags::PROFILE_BUFFER,
                     op = "recycle",
                     result = "recycled",
+                    elapsed_us,
                     tags = ?PROFILE_TAG_STACK_BUFFER,
                     buffer_capacity = capacity,
                     "buffer recycled to pool"

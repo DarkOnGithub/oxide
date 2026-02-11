@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default = ["telemetry"]
 profiling = []
 telemetry = []
 
@@ -35,7 +35,6 @@ byteorder = "1.5"
 infer = "0.16"
 image = "0.25.9"
 symphonia = "0.5.5"
-rayon = "1.10"
 jwalk = "0.8"
 
 [dev-dependencies]
