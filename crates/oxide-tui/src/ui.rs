@@ -265,6 +265,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, _layout: &mut Lay
         Span::styled(app.workers.trim(), Style::default().fg(COLOR_TEXT)),
         Span::styled(" block=", Style::default().fg(COLOR_MUTED)),
         Span::styled(app.block_size.trim(), Style::default().fg(COLOR_TEXT)),
+        Span::styled(" prod=", Style::default().fg(COLOR_MUTED)),
+        Span::styled(app.producer_threads.trim(), Style::default().fg(COLOR_TEXT)),
+        Span::styled(" inflight=", Style::default().fg(COLOR_MUTED)),
+        Span::styled(app.inflight_bytes.trim(), Style::default().fg(COLOR_TEXT)),
         Span::styled(" stats=", Style::default().fg(COLOR_MUTED)),
         Span::styled(
             format!("{}ms", app.stats_interval_ms.trim()),
@@ -284,7 +288,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, _layout: &mut Lay
         ),
     ]);
     let hints = Line::from(vec![Span::styled(
-        "keys: r run | b browse | e ephemeral | n null | m detail | Tab fields | p/t/o/g profile | w worker sort | +/- rows | ,/. window | q quit",
+        "keys: r run | b browse | e ephemeral | n null | m detail | Tab fields | Enter edit | p/t/o/g profile | w worker sort | +/- rows | ,/. window | q quit",
         Style::default().fg(COLOR_MUTED),
     )]);
 
@@ -322,7 +326,7 @@ fn render_run_tab(frame: &mut Frame<'_>, area: Rect, app: &App, layout: &mut Lay
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(10),
+            Constraint::Length(16),
             Constraint::Length(3),
             Constraint::Min(3),
         ])
@@ -354,6 +358,24 @@ fn render_run_tab(frame: &mut Frame<'_>, area: Rect, app: &App, layout: &mut Lay
         ),
         (ActiveField::Workers, app.workers.clone()),
         (ActiveField::BlockSize, app.block_size.clone()),
+        (ActiveField::InflightBytes, app.inflight_bytes.clone()),
+        (
+            ActiveField::StreamReadBuffer,
+            app.stream_read_buffer.clone(),
+        ),
+        (ActiveField::ProducerThreads, app.producer_threads.clone()),
+        (
+            ActiveField::DirectoryMmapThreshold,
+            app.directory_mmap_threshold.clone(),
+        ),
+        (
+            ActiveField::WriterQueueBlocks,
+            app.writer_queue_blocks.clone(),
+        ),
+        (
+            ActiveField::ResultWaitMs,
+            format!("{} ms", app.result_wait_ms),
+        ),
         (
             ActiveField::StatsInterval,
             format!("{} ms", app.stats_interval_ms),
