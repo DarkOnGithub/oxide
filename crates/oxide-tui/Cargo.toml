@@ -1,0 +1,12 @@
+[package]
+name = "oxide-tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+crossbeam-channel = "0.5"
+crossterm = "0.28"
+num_cpus = "1.16"
+oxide-core = { path = "../oxide-core", features = ["profiling", "telemetry"] }
+ratatui = "0.28"
