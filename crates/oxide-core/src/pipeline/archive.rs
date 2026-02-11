@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,8 +17,9 @@ use crate::format::{
 };
 use crate::io::InputScanner;
 use crate::telemetry::{
-    ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent, ExtractReport,
+    self, ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent, ExtractReport,
     ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
+    profile, tags,
 };
 use crate::types::{
     Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
@@ -33,6 +35,7 @@ const SUBMISSION_DRAIN_BUDGET: usize = 128;
 const DIRECTORY_FORMAT_PROBE_LIMIT: usize = 64 * 1024;
 const MIN_INFLIGHT_BLOCKS: usize = 64;
 const MAX_INFLIGHT_BLOCKS: usize = 4096;
+const PROFILE_TAG_STACK_PIPELINE: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_PIPELINE];
 const AUTOTUNE_CANDIDATE_BLOCK_SIZES: [usize; 5] = [
     256 * 1024,
     512 * 1024,
@@ -111,6 +114,118 @@ struct DecodeWorkerOutcome {
     tasks_completed: usize,
     busy: Duration,
     uptime: Duration,
+}
+
+#[derive(Debug)]
+struct DecodeRuntimeState {
+    started_at: Instant,
+    submitted: AtomicUsize,
+    completed: AtomicUsize,
+    worker_started_offsets_us: Vec<AtomicU64>,
+    worker_stopped_offsets_us: Vec<AtomicU64>,
+    worker_busy_us: Vec<AtomicU64>,
+    worker_task_counts: Vec<AtomicUsize>,
+}
+
+impl DecodeRuntimeState {
+    fn new(worker_count: usize, started_at: Instant) -> Self {
+        Self {
+            started_at,
+            submitted: AtomicUsize::new(0),
+            completed: AtomicUsize::new(0),
+            worker_started_offsets_us: (0..worker_count).map(|_| AtomicU64::new(0)).collect(),
+            worker_stopped_offsets_us: (0..worker_count).map(|_| AtomicU64::new(0)).collect(),
+            worker_busy_us: (0..worker_count).map(|_| AtomicU64::new(0)).collect(),
+            worker_task_counts: (0..worker_count).map(|_| AtomicUsize::new(0)).collect(),
+        }
+    }
+
+    fn mark_worker_started(&self, worker_id: usize) {
+        let started_offset = duration_to_us(self.started_at.elapsed()).saturating_add(1);
+        let _ = self.worker_started_offsets_us[worker_id].compare_exchange(
+            0,
+            started_offset,
+            AtomicOrdering::AcqRel,
+            AtomicOrdering::Acquire,
+        );
+    }
+
+    fn mark_worker_stopped(&self, worker_id: usize) {
+        let stopped_offset = duration_to_us(self.started_at.elapsed()).saturating_add(1);
+        self.worker_stopped_offsets_us[worker_id].store(stopped_offset, AtomicOrdering::Release);
+    }
+
+    fn record_submission(&self) {
+        self.submitted.fetch_add(1, AtomicOrdering::AcqRel);
+    }
+
+    fn record_completion(&self) {
+        self.completed.fetch_add(1, AtomicOrdering::AcqRel);
+    }
+
+    fn record_worker_task(&self, worker_id: usize, busy: Duration) {
+        let busy_us = duration_to_us(busy);
+        self.worker_busy_us[worker_id].fetch_add(busy_us, AtomicOrdering::AcqRel);
+        self.worker_task_counts[worker_id].fetch_add(1, AtomicOrdering::AcqRel);
+    }
+
+    fn snapshot(&self) -> PoolRuntimeSnapshot {
+        let elapsed = self.started_at.elapsed();
+        let elapsed_us = duration_to_us(elapsed);
+        let submitted = self.submitted.load(AtomicOrdering::Acquire);
+        let completed = self.completed.load(AtomicOrdering::Acquire);
+        let pending = submitted.saturating_sub(completed);
+
+        let mut workers = Vec::with_capacity(self.worker_task_counts.len());
+        for worker_id in 0..self.worker_task_counts.len() {
+            let started_raw =
+                self.worker_started_offsets_us[worker_id].load(AtomicOrdering::Acquire);
+            let stopped_raw =
+                self.worker_stopped_offsets_us[worker_id].load(AtomicOrdering::Acquire);
+            let busy_us_raw = self.worker_busy_us[worker_id].load(AtomicOrdering::Acquire);
+
+            let start_us = started_raw.saturating_sub(1);
+            let stop_us = if stopped_raw == 0 {
+                elapsed_us
+            } else {
+                stopped_raw.saturating_sub(1)
+            };
+            let uptime_us = if started_raw == 0 {
+                0
+            } else {
+                stop_us.saturating_sub(start_us)
+            };
+            let busy_us = busy_us_raw.min(uptime_us);
+            let idle_us = uptime_us.saturating_sub(busy_us);
+            let utilization = if uptime_us == 0 {
+                0.0
+            } else {
+                busy_us as f64 / uptime_us as f64
+            };
+
+            workers.push(WorkerRuntimeSnapshot {
+                worker_id,
+                tasks_completed: self.worker_task_counts[worker_id].load(AtomicOrdering::Acquire),
+                uptime: Duration::from_micros(uptime_us),
+                busy: Duration::from_micros(busy_us),
+                idle: Duration::from_micros(idle_us),
+                utilization,
+            });
+        }
+
+        PoolRuntimeSnapshot {
+            elapsed,
+            submitted,
+            completed,
+            pending,
+            workers,
+        }
+    }
+}
+
+#[inline]
+fn duration_to_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u64::MAX as u128) as u64
 }
 
 struct NoopTelemetrySink;
@@ -258,6 +373,7 @@ impl ArchivePipeline {
         let source_kind = directory::source_kind_from_flags(decoded.flags);
         let extensions = Self::extract_extensions_from_flags(decoded.flags);
         let decoded_bytes_total = decoded.payload.len() as u64;
+        let stage_timings = decoded.stage_timings;
         let payload = std::mem::take(&mut decoded.payload);
         let report = Self::build_extract_report_from_decoded(
             started_at,
@@ -268,6 +384,7 @@ impl ArchivePipeline {
             extensions,
             options,
         );
+        Self::record_extract_run_telemetry(report.elapsed, stage_timings);
 
         sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
 
@@ -320,6 +437,7 @@ impl ArchivePipeline {
         let write_started = Instant::now();
         directory::write_directory_entries(output_dir.as_ref(), entries)?;
         decoded.stage_timings.output_write += write_started.elapsed();
+        let stage_timings = decoded.stage_timings;
 
         let report = Self::build_extract_report_from_decoded(
             started_at,
@@ -330,6 +448,7 @@ impl ArchivePipeline {
             extensions,
             options,
         );
+        Self::record_extract_run_telemetry(report.elapsed, stage_timings);
         sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
         Ok(report)
     }
@@ -363,6 +482,7 @@ impl ArchivePipeline {
         let decoded_bytes_total = decoded.payload.len() as u64;
         let (source_kind, output_bytes_total) =
             Self::restore_decoded_payload(output_path.as_ref(), &mut decoded, &mut extensions)?;
+        let stage_timings = decoded.stage_timings;
         let report = Self::build_extract_report_from_decoded(
             started_at,
             decoded,
@@ -372,6 +492,7 @@ impl ArchivePipeline {
             extensions,
             options,
         );
+        Self::record_extract_run_telemetry(report.elapsed, stage_timings);
         sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
         Ok(report)
     }
@@ -461,25 +582,31 @@ impl ArchivePipeline {
         let queue_capacity = worker_count.saturating_mul(4).max(1);
         let (task_tx, task_rx) = bounded::<DecodeTask>(queue_capacity);
         let (result_tx, result_rx) = bounded::<(usize, Result<Vec<u8>>)>(queue_capacity);
+        let runtime_state = Arc::new(DecodeRuntimeState::new(worker_count, started_at));
         let mut worker_handles = Vec::with_capacity(worker_count);
 
         for worker_id in 0..worker_count {
             let local_task_rx = task_rx.clone();
             let local_result_tx = result_tx.clone();
+            let local_runtime = Arc::clone(&runtime_state);
             let handle = thread::spawn(move || -> DecodeWorkerOutcome {
                 let started = Instant::now();
                 let mut tasks_completed = 0usize;
                 let mut busy = Duration::ZERO;
+                local_runtime.mark_worker_started(worker_id);
 
                 while let Ok(task) = local_task_rx.recv() {
                     let decode_started = Instant::now();
                     let decoded = Self::decode_block_payload(task.header, task.block_data);
-                    busy += decode_started.elapsed();
+                    let busy_elapsed = decode_started.elapsed();
+                    busy += busy_elapsed;
+                    local_runtime.record_worker_task(worker_id, busy_elapsed);
                     tasks_completed += 1;
                     if local_result_tx.send((task.index, decoded)).is_err() {
                         break;
                     }
                 }
+                local_runtime.mark_worker_stopped(worker_id);
 
                 DecodeWorkerOutcome {
                     worker_id,
@@ -520,16 +647,19 @@ impl ArchivePipeline {
                 })?;
             stage_timings.decode_submit += submit_started.elapsed();
             submitted += 1;
+            runtime_state.record_submission();
 
             if last_emit_at.elapsed() >= emit_every {
-                sink.on_event(TelemetryEvent::ExtractProgress(ExtractProgressEvent {
+                Self::emit_extract_progress(
                     source_kind,
-                    elapsed: started_at.elapsed(),
-                    archive_bytes_completed: archive_bytes_total,
-                    decoded_bytes_completed: 0,
-                    blocks_total: block_capacity as u32,
-                    blocks_completed: submitted as u32,
-                }));
+                    started_at,
+                    archive_bytes_total,
+                    0,
+                    block_capacity as u32,
+                    submitted as u32,
+                    runtime_state.snapshot(),
+                    sink,
+                );
                 last_emit_at = Instant::now();
             }
         }
@@ -576,16 +706,19 @@ impl ArchivePipeline {
                 }
             }
             received += 1;
+            runtime_state.record_completion();
 
             if last_emit_at.elapsed() >= emit_every {
-                sink.on_event(TelemetryEvent::ExtractProgress(ExtractProgressEvent {
+                Self::emit_extract_progress(
                     source_kind,
-                    elapsed: started_at.elapsed(),
-                    archive_bytes_completed: archive_bytes_total,
+                    started_at,
+                    archive_bytes_total,
                     decoded_bytes_completed,
-                    blocks_total: block_capacity as u32,
-                    blocks_completed: received as u32,
-                }));
+                    block_capacity as u32,
+                    received as u32,
+                    runtime_state.snapshot(),
+                    sink,
+                );
                 last_emit_at = Instant::now();
             }
         }
@@ -606,14 +739,16 @@ impl ArchivePipeline {
         stage_timings.merge += merge_started.elapsed();
 
         if options.emit_final_progress {
-            sink.on_event(TelemetryEvent::ExtractProgress(ExtractProgressEvent {
+            Self::emit_extract_progress(
                 source_kind,
-                elapsed: started_at.elapsed(),
-                archive_bytes_completed: archive_bytes_total,
+                started_at,
+                archive_bytes_total,
                 decoded_bytes_completed,
-                blocks_total: block_capacity as u32,
-                blocks_completed: received as u32,
-            }));
+                block_capacity as u32,
+                received as u32,
+                runtime_state.snapshot(),
+                sink,
+            );
         }
 
         Ok(DecodedArchivePayload {
@@ -1157,6 +1292,7 @@ impl ArchivePipeline {
             extensions,
             *options,
         );
+        Self::record_archive_run_telemetry(report.elapsed, stage_timings);
         sink.on_event(TelemetryEvent::ArchiveCompleted(report.clone()));
         Ok(ArchiveRun { writer, report })
     }
@@ -1176,12 +1312,31 @@ impl ArchivePipeline {
     ) {
         if force || last_emit_at.elapsed() >= emit_every {
             let runtime = handle.runtime_snapshot();
+            let elapsed = started_at.elapsed();
+            let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
+            let input_done = input_bytes_completed.min(input_bytes_total);
+            let read_avg_bps = input_done as f64 / elapsed_secs;
+            let write_avg_bps = output_bytes_completed as f64 / elapsed_secs;
+            let output_input_ratio = if input_done == 0 {
+                1.0
+            } else {
+                output_bytes_completed as f64 / input_done as f64
+            };
+            let compression_ratio = if output_bytes_completed == 0 {
+                0.0
+            } else {
+                input_done as f64 / output_bytes_completed as f64
+            };
             sink.on_event(TelemetryEvent::ArchiveProgress(ArchiveProgressEvent {
                 source_kind,
-                elapsed: started_at.elapsed(),
+                elapsed,
                 input_bytes_total,
-                input_bytes_completed: input_bytes_completed.min(input_bytes_total),
+                input_bytes_completed: input_done,
                 output_bytes_completed,
+                read_avg_bps,
+                write_avg_bps,
+                output_input_ratio,
+                compression_ratio,
                 blocks_total,
                 blocks_completed: runtime.completed as u32,
                 blocks_pending: runtime.pending as u32,
@@ -1189,6 +1344,158 @@ impl ArchivePipeline {
             }));
             *last_emit_at = Instant::now();
         }
+    }
+
+    fn emit_extract_progress(
+        source_kind: ArchiveSourceKind,
+        started_at: Instant,
+        archive_bytes_completed: u64,
+        decoded_bytes_completed: u64,
+        blocks_total: u32,
+        blocks_completed: u32,
+        runtime: PoolRuntimeSnapshot,
+        sink: &mut dyn TelemetrySink,
+    ) {
+        let elapsed = started_at.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
+        let read_avg_bps = archive_bytes_completed as f64 / elapsed_secs;
+        let decode_avg_bps = decoded_bytes_completed as f64 / elapsed_secs;
+        let decode_archive_ratio = if archive_bytes_completed == 0 {
+            1.0
+        } else {
+            decoded_bytes_completed as f64 / archive_bytes_completed as f64
+        };
+        sink.on_event(TelemetryEvent::ExtractProgress(ExtractProgressEvent {
+            source_kind,
+            elapsed,
+            archive_bytes_completed,
+            decoded_bytes_completed,
+            read_avg_bps,
+            decode_avg_bps,
+            decode_archive_ratio,
+            blocks_total,
+            blocks_completed,
+            runtime,
+        }));
+    }
+
+    fn record_pipeline_stage(metric: &'static str, op: &'static str, elapsed: Duration) {
+        let elapsed_us = duration_to_us(elapsed);
+        telemetry::record_histogram(metric, elapsed_us, &[("subsystem", "pipeline"), ("op", op)]);
+        profile::event(
+            tags::PROFILE_PIPELINE,
+            &PROFILE_TAG_STACK_PIPELINE,
+            op,
+            "ok",
+            elapsed_us,
+            "pipeline stage measured",
+        );
+    }
+
+    fn record_archive_run_telemetry(elapsed: Duration, stage_timings: StageTimings) {
+        let elapsed_us = duration_to_us(elapsed);
+        telemetry::increment_counter(
+            tags::METRIC_PIPELINE_ARCHIVE_RUN_COUNT,
+            1,
+            &[("subsystem", "pipeline"), ("op", "archive_run")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_PIPELINE_ARCHIVE_RUN_LATENCY_US,
+            elapsed_us,
+            &[("subsystem", "pipeline"), ("op", "archive_run")],
+        );
+        profile::event(
+            tags::PROFILE_PIPELINE,
+            &PROFILE_TAG_STACK_PIPELINE,
+            "archive_run",
+            "ok",
+            elapsed_us,
+            "archive run completed",
+        );
+
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_DISCOVERY_US,
+            "stage_discovery",
+            stage_timings.discovery,
+        );
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_FORMAT_PROBE_US,
+            "stage_format_probe",
+            stage_timings.format_probe,
+        );
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_PRODUCER_READ_US,
+            "stage_producer_read",
+            stage_timings.producer_read,
+        );
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_SUBMIT_WAIT_US,
+            "stage_submit_wait",
+            stage_timings.submit_wait,
+        );
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_RESULT_WAIT_US,
+            "stage_result_wait",
+            stage_timings.result_wait,
+        );
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_WRITER_US,
+            "stage_writer",
+            stage_timings.writer,
+        );
+    }
+
+    fn record_extract_run_telemetry(elapsed: Duration, stage_timings: ExtractStageTimings) {
+        let elapsed_us = duration_to_us(elapsed);
+        telemetry::increment_counter(
+            tags::METRIC_PIPELINE_EXTRACT_RUN_COUNT,
+            1,
+            &[("subsystem", "pipeline"), ("op", "extract_run")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_PIPELINE_EXTRACT_RUN_LATENCY_US,
+            elapsed_us,
+            &[("subsystem", "pipeline"), ("op", "extract_run")],
+        );
+        profile::event(
+            tags::PROFILE_PIPELINE,
+            &PROFILE_TAG_STACK_PIPELINE,
+            "extract_run",
+            "ok",
+            elapsed_us,
+            "extract run completed",
+        );
+
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_ARCHIVE_READ_US,
+            "stage_archive_read",
+            stage_timings.archive_read,
+        );
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_DECODE_SUBMIT_US,
+            "stage_decode_submit",
+            stage_timings.decode_submit,
+        );
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_DECODE_WAIT_US,
+            "stage_decode_wait",
+            stage_timings.decode_wait,
+        );
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_MERGE_US,
+            "stage_merge",
+            stage_timings.merge,
+        );
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_DIRECTORY_DECODE_US,
+            "stage_directory_decode",
+            stage_timings.directory_decode,
+        );
+        Self::record_pipeline_stage(
+            tags::METRIC_PIPELINE_STAGE_OUTPUT_WRITE_US,
+            "stage_output_write",
+            stage_timings.output_write,
+        );
     }
 
     fn max_inflight_blocks(
@@ -1713,6 +2020,7 @@ impl ArchivePipeline {
             extensions,
             *options,
         );
+        Self::record_archive_run_telemetry(report.elapsed, stage_timings);
         sink.on_event(TelemetryEvent::ArchiveCompleted(report.clone()));
         Ok(ArchiveRun { writer, report })
     }

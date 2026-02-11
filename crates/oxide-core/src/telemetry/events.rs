@@ -13,6 +13,10 @@ pub struct ArchiveProgressEvent {
     pub input_bytes_total: u64,
     pub input_bytes_completed: u64,
     pub output_bytes_completed: u64,
+    pub read_avg_bps: f64,
+    pub write_avg_bps: f64,
+    pub output_input_ratio: f64,
+    pub compression_ratio: f64,
     pub blocks_total: u32,
     pub blocks_completed: u32,
     pub blocks_pending: u32,
@@ -25,8 +29,12 @@ pub struct ExtractProgressEvent {
     pub elapsed: Duration,
     pub archive_bytes_completed: u64,
     pub decoded_bytes_completed: u64,
+    pub read_avg_bps: f64,
+    pub decode_avg_bps: f64,
+    pub decode_archive_ratio: f64,
     pub blocks_total: u32,
     pub blocks_completed: u32,
+    pub runtime: PoolRuntimeSnapshot,
 }
 
 #[derive(Debug, Clone)]

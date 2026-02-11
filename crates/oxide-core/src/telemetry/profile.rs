@@ -185,6 +185,9 @@ pub fn event(
         tags::PROFILE_WORKER => {
             tracing::debug!(target: tags::PROFILE_WORKER, op, result, elapsed_us, tags = ?tag_stack, "{message}");
         }
+        tags::PROFILE_PIPELINE => {
+            tracing::debug!(target: tags::PROFILE_PIPELINE, op, result, elapsed_us, tags = ?tag_stack, "{message}");
+        }
         _ => {
             tracing::debug!(target: "oxide.profile", op, result, elapsed_us, original_target = target, tags = ?tag_stack, "{message}");
         }
