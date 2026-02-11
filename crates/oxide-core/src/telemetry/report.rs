@@ -4,14 +4,28 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::core::WorkerRuntimeSnapshot;
-use crate::pipeline::{ArchiveRunStats, ArchiveSourceKind, StatValue};
+use crate::pipeline::ArchiveSourceKind;
 use crate::telemetry::{self, TelemetrySnapshot};
 
-/// Options controlling how reports are built.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReportBuildOptions {
-    /// Attaches a point-in-time telemetry snapshot to the report.
+/// Unified runtime telemetry options for archive/extract operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunTelemetryOptions {
+    /// Progress emission interval for real-time run events.
+    pub progress_interval: Duration,
+    /// Emit a final forced progress event before completion.
+    pub emit_final_progress: bool,
+    /// Attach a point-in-time telemetry snapshot to final reports.
     pub include_telemetry_snapshot: bool,
+}
+
+impl Default for RunTelemetryOptions {
+    fn default() -> Self {
+        Self {
+            progress_interval: Duration::from_millis(250),
+            emit_final_progress: true,
+            include_telemetry_snapshot: true,
+        }
+    }
 }
 
 /// Extensible scalar value used by report exports.
@@ -22,17 +36,6 @@ pub enum ReportValue {
     Duration(Duration),
     Bool(bool),
     Text(String),
-}
-
-impl From<&StatValue> for ReportValue {
-    fn from(value: &StatValue) -> Self {
-        match value {
-            StatValue::U64(value) => Self::U64(*value),
-            StatValue::F64(value) => Self::F64(*value),
-            StatValue::Duration(value) => Self::Duration(*value),
-            StatValue::Text(value) => Self::Text(value.clone()),
-        }
-    }
 }
 
 /// Worker-level metrics used in exported reports.
@@ -79,7 +82,7 @@ impl ThreadReport {
     }
 }
 
-/// Detailed archive report built from run stats.
+/// Detailed archive report built from a completed run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArchiveReport {
     pub source_kind: ArchiveSourceKind,
@@ -98,61 +101,21 @@ pub struct ArchiveReport {
 }
 
 impl ArchiveReport {
-    pub fn from_run_stats(stats: &ArchiveRunStats, options: ReportBuildOptions) -> Self {
-        let elapsed_secs = stats.elapsed.as_secs_f64().max(1e-6);
-        let read_avg_bps = stats.input_bytes_total as f64 / elapsed_secs;
-        let write_avg_bps = stats.output_bytes_total as f64 / elapsed_secs;
-        let output_input_ratio = if stats.input_bytes_total == 0 {
-            1.0
-        } else {
-            stats.output_bytes_total as f64 / stats.input_bytes_total as f64
-        };
-
-        let workers = stats
-            .workers
-            .iter()
-            .map(WorkerReport::from_runtime)
-            .collect::<Vec<_>>();
-        let extensions = stats
-            .extensions
-            .iter()
-            .map(|(key, value)| (key.clone(), ReportValue::from(value)))
-            .collect::<BTreeMap<_, _>>();
-
-        let mut main_thread = ThreadReport::new("main");
-        for (key, value) in &stats.extensions {
-            if let Some(stage) = key
-                .strip_prefix("stage.")
-                .and_then(|stage| stage.strip_suffix("_us"))
-            {
-                if let StatValue::U64(value) = value {
-                    main_thread.stage_us.insert(stage.to_string(), *value);
-                }
-            }
-        }
-
-        let telemetry = if options.include_telemetry_snapshot {
+    pub fn with_telemetry_snapshot(mut self, include_telemetry_snapshot: bool) -> Self {
+        self.telemetry = if include_telemetry_snapshot {
             Some(telemetry::snapshot())
         } else {
             None
         };
-
-        Self {
-            source_kind: stats.source_kind,
-            elapsed: stats.elapsed,
-            input_bytes_total: stats.input_bytes_total,
-            output_bytes_total: stats.output_bytes_total,
-            blocks_total: stats.blocks_total,
-            blocks_completed: stats.blocks_completed,
-            read_avg_bps,
-            write_avg_bps,
-            output_input_ratio,
-            workers,
-            main_thread,
-            extensions,
-            telemetry,
-        }
+        self
     }
+}
+
+/// Wrapper for archive operations that return writer + report.
+#[derive(Debug)]
+pub struct ArchiveRun<W> {
+    pub writer: W,
+    pub report: ArchiveReport,
 }
 
 /// Detailed extract report including worker and main-thread timing.
@@ -186,7 +149,7 @@ impl ExtractReport {
         workers: Vec<WorkerReport>,
         main_thread: ThreadReport,
         extensions: BTreeMap<String, ReportValue>,
-        options: ReportBuildOptions,
+        options: RunTelemetryOptions,
     ) -> Self {
         let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
         let read_avg_bps = archive_bytes_total as f64 / elapsed_secs;
@@ -354,18 +317,6 @@ impl ReportExport for RunReport {
             RunReport::Archive(report) => report.to_flat_map(),
             RunReport::Extract(report) => report.to_flat_map(),
         }
-    }
-}
-
-impl ArchiveRunStats {
-    /// Converts archive run stats into an export-oriented report.
-    pub fn to_report(&self, options: ReportBuildOptions) -> ArchiveReport {
-        ArchiveReport::from_run_stats(self, options)
-    }
-
-    /// Converts archive run stats to a flat export map.
-    pub fn to_flat_map(&self, options: ReportBuildOptions) -> BTreeMap<String, ReportValue> {
-        self.to_report(options).to_flat_map()
     }
 }
 

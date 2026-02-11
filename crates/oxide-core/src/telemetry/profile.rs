@@ -1,6 +1,8 @@
 use std::time::Instant;
 
 #[cfg(feature = "profiling")]
+use crate::telemetry::events::{ProfileEvent, TelemetryEvent, emit_global};
+#[cfg(feature = "profiling")]
 use crate::telemetry::tags;
 #[cfg(feature = "profiling")]
 use std::collections::BTreeSet;
@@ -157,6 +159,15 @@ pub fn event(
     if !is_tag_stack_enabled(tag_stack) {
         return;
     }
+
+    emit_global(TelemetryEvent::Profile(ProfileEvent {
+        target,
+        op,
+        result,
+        elapsed_us,
+        tags: tag_stack.iter().map(|tag| (*tag).to_string()).collect(),
+        message,
+    }));
 
     match target {
         tags::PROFILE_MMAP => {
