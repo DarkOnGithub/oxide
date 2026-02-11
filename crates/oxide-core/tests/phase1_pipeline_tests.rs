@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oxide_core::{
-    ArchiveOptions, ArchivePipeline, ArchiveProgressSnapshot, ArchiveReader, BufferPool,
-    CompressionAlgo, PreProcessingStrategy, ProgressSink, StatValue,
+    ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader, BufferPool,
+    CompressionAlgo, ExtractProgressEvent, PreProcessingStrategy, ReportValue, RunTelemetryOptions,
+    TelemetryEvent, TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -39,14 +40,39 @@ fn write_directory_file(
     Ok(())
 }
 
-#[derive(Default)]
-struct CollectProgress {
-    snapshots: Vec<ArchiveProgressSnapshot>,
+fn build_pipeline(
+    block_size: usize,
+    workers: usize,
+    pool: Arc<BufferPool>,
+    compression: CompressionAlgo,
+) -> ArchivePipeline {
+    let config = ArchivePipelineConfig::new(block_size, workers, pool, compression);
+    ArchivePipeline::new(config)
 }
 
-impl ProgressSink for CollectProgress {
-    fn on_progress(&mut self, snapshot: ArchiveProgressSnapshot) {
-        self.snapshots.push(snapshot);
+#[derive(Default)]
+struct CollectProgress {
+    snapshots: Vec<ArchiveProgressEvent>,
+}
+
+impl TelemetrySink for CollectProgress {
+    fn on_event(&mut self, event: TelemetryEvent) {
+        if let TelemetryEvent::ArchiveProgress(snapshot) = event {
+            self.snapshots.push(snapshot);
+        }
+    }
+}
+
+#[derive(Default)]
+struct CollectExtractProgress {
+    snapshots: Vec<ExtractProgressEvent>,
+}
+
+impl TelemetrySink for CollectExtractProgress {
+    fn on_event(&mut self, event: TelemetryEvent) {
+        if let TelemetryEvent::ExtractProgress(snapshot) = event {
+            self.snapshots.push(snapshot);
+        }
     }
 }
 
@@ -56,11 +82,18 @@ fn pipeline_roundtrip_reconstructs_original_bytes() -> Result<(), Box<dyn std::e
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(64 * 1024, 128));
-    let pipeline =
-        ArchivePipeline::new(32 * 1024, 4, Arc::clone(&buffer_pool), CompressionAlgo::Lz4);
+    let pipeline = build_pipeline(32 * 1024, 4, Arc::clone(&buffer_pool), CompressionAlgo::Lz4);
 
-    let archive = pipeline.archive_file(file.path(), Vec::new())?;
-    let restored = pipeline.extract_archive(Cursor::new(archive))?;
+    let archive = pipeline
+        .archive_file(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
 
     assert_eq!(restored, data);
 
@@ -75,8 +108,15 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 64));
-    let pipeline = ArchivePipeline::new(8 * 1024, 4, buffer_pool, CompressionAlgo::Deflate);
-    let archive = pipeline.archive_file(file.path(), Vec::new())?;
+    let pipeline = build_pipeline(8 * 1024, 4, buffer_pool, CompressionAlgo::Deflate);
+    let archive = pipeline
+        .archive_file(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
 
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     for (expected, block) in reader.iter_blocks().enumerate() {
@@ -95,8 +135,15 @@ fn pipeline_records_preprocessing_strategy_in_block_headers()
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
-    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
-    let archive = pipeline.archive_file(file.path(), Vec::new())?;
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let archive = pipeline
+        .archive_file(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
 
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, payload) = reader.read_block(0)?;
@@ -114,19 +161,28 @@ fn pipeline_reaches_buffer_pool_steady_state() -> Result<(), Box<dyn std::error:
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(64 * 1024, 128));
-    let pipeline = ArchivePipeline::new(
+    let pipeline = build_pipeline(
         512 * 1024,
         1,
         Arc::clone(&buffer_pool),
         CompressionAlgo::Lzma,
     );
 
-    // Single worker and single block keeps demand deterministic after warm-up.
-    let _archive = pipeline.archive_file(file.path(), Vec::new())?;
+    let _archive = pipeline.archive_file(
+        file.path(),
+        Vec::new(),
+        RunTelemetryOptions::default(),
+        None,
+    )?;
     let created_after_warmup = buffer_pool.metrics().created;
 
     for _ in 0..5 {
-        let _archive = pipeline.archive_file(file.path(), Vec::new())?;
+        let _archive = pipeline.archive_file(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?;
     }
 
     let created_after_steady_state = buffer_pool.metrics().created;
@@ -144,18 +200,31 @@ fn directory_archive_roundtrip_restores_tree() -> Result<(), Box<dyn std::error:
     std::fs::create_dir_all(source.path().join("empty/leaf"))?;
 
     let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 128));
-    let pipeline = ArchivePipeline::new(
+    let pipeline = build_pipeline(
         16 * 1024,
         4,
         Arc::clone(&buffer_pool),
         CompressionAlgo::Deflate,
     );
 
-    let archive = pipeline.archive_directory(source.path(), Vec::new())?;
+    let archive = pipeline
+        .archive_directory(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
 
     let out = tempfile::tempdir()?;
-    pipeline.extract_directory_archive(Cursor::new(archive), out.path())?;
+    let report = pipeline.extract_directory_archive(
+        Cursor::new(archive),
+        out.path(),
+        RunTelemetryOptions::default(),
+        None,
+    )?;
 
+    assert_eq!(report.source_kind, oxide_core::ArchiveSourceKind::Directory);
     assert_eq!(std::fs::read(out.path().join("top.txt"))?, b"top-level");
     assert_eq!(
         std::fs::read(out.path().join("nested/a.bin"))?,
@@ -176,12 +245,25 @@ fn archive_path_supports_directory_inputs() -> Result<(), Box<dyn std::error::Er
     write_directory_file(&source, "sample.txt", b"directory mode")?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
-    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
 
-    let archive = pipeline.archive_path(source.path(), Vec::new())?;
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
     let out = tempfile::tempdir()?;
-    pipeline.extract_directory_archive(Cursor::new(archive), out.path())?;
+    let report = pipeline.extract_directory_archive(
+        Cursor::new(archive),
+        out.path(),
+        RunTelemetryOptions::default(),
+        None,
+    )?;
 
+    assert_eq!(report.source_kind, oxide_core::ArchiveSourceKind::Directory);
     assert_eq!(
         std::fs::read(out.path().join("sample.txt"))?,
         b"directory mode"
@@ -195,9 +277,16 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
     write_directory_file(&source, "sample.txt", b"directory mode")?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
-    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
 
-    let archive = pipeline.archive_path(source.path(), Vec::new())?;
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
     let reader = ArchiveReader::new(Cursor::new(archive))?;
     assert_eq!(reader.global_header().flags & 1, 1);
     Ok(())
@@ -219,9 +308,16 @@ fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode()
     )?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
-    let pipeline = ArchivePipeline::new(32, 2, buffer_pool, CompressionAlgo::Lz4);
+    let pipeline = build_pipeline(32, 2, buffer_pool, CompressionAlgo::Lz4);
 
-    let archive = pipeline.archive_path(source.path(), Vec::new())?;
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
 
     for block in reader.iter_blocks() {
@@ -238,14 +334,26 @@ fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
-    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Deflate);
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Deflate);
 
-    let archive = pipeline.archive_path(file.path(), Vec::new())?;
+    let archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
     let out_root = tempfile::tempdir()?;
     let out_file = out_root.path().join("restored.txt");
-    let kind = pipeline.extract_path(Cursor::new(archive), &out_file)?;
+    let report = pipeline.extract_path(
+        Cursor::new(archive),
+        &out_file,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
 
-    assert_eq!(kind, oxide_core::ArchiveSourceKind::File);
+    assert_eq!(report.source_kind, oxide_core::ArchiveSourceKind::File);
     assert_eq!(std::fs::read(out_file)?, data);
     Ok(())
 }
@@ -256,14 +364,26 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
     write_directory_file(&source, "nested/data.bin", &[9, 8, 7])?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
-    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
 
-    let archive = pipeline.archive_path(source.path(), Vec::new())?;
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
     let out_root = tempfile::tempdir()?;
     let out_dir = out_root.path().join("restored-tree");
-    let kind = pipeline.extract_path(Cursor::new(archive), &out_dir)?;
+    let report = pipeline.extract_path(
+        Cursor::new(archive),
+        &out_dir,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
 
-    assert_eq!(kind, oxide_core::ArchiveSourceKind::Directory);
+    assert_eq!(report.source_kind, oxide_core::ArchiveSourceKind::Directory);
     assert_eq!(
         std::fs::read(out_dir.join("nested/data.bin"))?,
         vec![9, 8, 7]
@@ -272,58 +392,66 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn archive_path_with_reports_progress_and_extensible_stats()
--> Result<(), Box<dyn std::error::Error>> {
+fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(256 * 1024);
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 64));
-    let pipeline = ArchivePipeline::new(16 * 1024, 4, buffer_pool, CompressionAlgo::Deflate);
+    let pipeline = build_pipeline(16 * 1024, 4, buffer_pool, CompressionAlgo::Deflate);
     let mut sink = CollectProgress::default();
-    let options = ArchiveOptions {
-        progress_interval: Duration::from_millis(1),
-        emit_final_progress: true,
-    };
 
-    let outcome = pipeline.archive_path_with(file.path(), Vec::new(), options, &mut sink)?;
+    let run = pipeline.archive_path(
+        file.path(),
+        Vec::new(),
+        RunTelemetryOptions {
+            progress_interval: Duration::from_millis(1),
+            emit_final_progress: true,
+            include_telemetry_snapshot: true,
+        },
+        Some(&mut sink),
+    )?;
     assert!(!sink.snapshots.is_empty());
 
     let final_snapshot = sink.snapshots.last().expect("missing final snapshot");
     assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
 
-    let stats = &outcome.stats;
-    assert_eq!(stats.blocks_total, final_snapshot.blocks_total);
-    assert_eq!(stats.blocks_completed, final_snapshot.blocks_completed);
-    assert_eq!(
-        stats.extension_u64("runtime.completed"),
-        Some(stats.blocks_completed as u64)
-    );
-    assert_eq!(
-        stats.extension_u64("runtime.worker_count"),
-        Some(stats.workers.len() as u64)
-    );
+    let report = &run.report;
+    assert_eq!(report.blocks_total, final_snapshot.blocks_total);
+    assert_eq!(report.blocks_completed, final_snapshot.blocks_completed);
     assert!(matches!(
-        stats.extension("runtime.effective_cores"),
-        Some(StatValue::F64(_))
+        report.extensions.get("runtime.completed"),
+        Some(ReportValue::U64(_))
     ));
     assert!(matches!(
-        stats.extension("pipeline.max_inflight_blocks"),
-        Some(StatValue::U64(_))
+        report.extensions.get("runtime.worker_count"),
+        Some(ReportValue::U64(_))
     ));
     assert!(matches!(
-        stats.extension("pipeline.max_inflight_bytes"),
-        Some(StatValue::U64(_))
+        report.extensions.get("runtime.effective_cores"),
+        Some(ReportValue::F64(_))
     ));
     assert!(matches!(
-        stats.extension("stage.writer_us"),
-        Some(StatValue::U64(_))
+        report.extensions.get("pipeline.max_inflight_blocks"),
+        Some(ReportValue::U64(_))
     ));
     assert!(matches!(
-        stats.extension("archive.output_input_ratio"),
-        Some(StatValue::F64(_))
+        report.extensions.get("pipeline.max_inflight_bytes"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("stage.writer_us"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("archive.output_input_ratio"),
+        Some(ReportValue::F64(_))
     ));
 
-    let restored = pipeline.extract_archive(Cursor::new(outcome.writer))?;
+    let (restored, _) = pipeline.extract_archive(
+        Cursor::new(run.writer),
+        RunTelemetryOptions::default(),
+        None,
+    )?;
     assert_eq!(restored, data);
     Ok(())
 }
@@ -334,16 +462,21 @@ fn archive_options_can_disable_final_progress_emit() -> Result<(), Box<dyn std::
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 32));
-    let pipeline = ArchivePipeline::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
     let mut sink = CollectProgress::default();
-    let options = ArchiveOptions {
-        progress_interval: Duration::from_secs(3600),
-        emit_final_progress: false,
-    };
 
-    let outcome = pipeline.archive_path_with(file.path(), Vec::new(), options, &mut sink)?;
+    let run = pipeline.archive_path(
+        file.path(),
+        Vec::new(),
+        RunTelemetryOptions {
+            progress_interval: Duration::from_secs(3600),
+            emit_final_progress: false,
+            include_telemetry_snapshot: true,
+        },
+        Some(&mut sink),
+    )?;
     assert!(sink.snapshots.is_empty());
-    assert!(outcome.stats.blocks_total > 0);
+    assert!(run.report.blocks_total > 0);
 
     Ok(())
 }
@@ -356,14 +489,19 @@ fn directory_progress_reports_stable_block_total() -> Result<(), Box<dyn std::er
     write_directory_file(&source, "nested/c.txt", b"nested text file\n")?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
-    let pipeline = ArchivePipeline::new(64, 2, buffer_pool, CompressionAlgo::Lz4);
+    let pipeline = build_pipeline(64, 2, buffer_pool, CompressionAlgo::Lz4);
     let mut sink = CollectProgress::default();
-    let options = ArchiveOptions {
-        progress_interval: Duration::from_millis(1),
-        emit_final_progress: true,
-    };
 
-    let outcome = pipeline.archive_path_with(source.path(), Vec::new(), options, &mut sink)?;
+    let run = pipeline.archive_path(
+        source.path(),
+        Vec::new(),
+        RunTelemetryOptions {
+            progress_interval: Duration::from_millis(1),
+            emit_final_progress: true,
+            include_telemetry_snapshot: true,
+        },
+        Some(&mut sink),
+    )?;
     assert!(!sink.snapshots.is_empty());
 
     let expected_total = sink.snapshots[0].blocks_total;
@@ -376,10 +514,52 @@ fn directory_progress_reports_stable_block_total() -> Result<(), Box<dyn std::er
 
     let final_snapshot = sink.snapshots.last().expect("missing final snapshot");
     assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
-    assert_eq!(outcome.stats.blocks_total, expected_total);
+    assert_eq!(run.report.blocks_total, expected_total);
 
-    let reader = ArchiveReader::new(Cursor::new(outcome.writer))?;
+    let reader = ArchiveReader::new(Cursor::new(run.writer))?;
     assert_eq!(reader.block_count(), expected_total);
+
+    Ok(())
+}
+
+#[test]
+fn extract_progress_reports_runtime_worker_snapshots() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(192 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 3, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let mut sink = CollectExtractProgress::default();
+    let (restored, report) = pipeline.extract_archive(
+        Cursor::new(archive),
+        RunTelemetryOptions {
+            progress_interval: Duration::from_millis(1),
+            emit_final_progress: true,
+            include_telemetry_snapshot: true,
+        },
+        Some(&mut sink),
+    )?;
+
+    assert_eq!(restored, data);
+    assert!(report.blocks_total > 0);
+    assert!(!sink.snapshots.is_empty());
+
+    let final_snapshot = sink.snapshots.last().expect("missing extract progress");
+    assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
+    assert!(final_snapshot.runtime.workers.len() >= 3);
+    assert!(final_snapshot.read_avg_bps >= 0.0);
+    assert!(final_snapshot.decode_avg_bps >= 0.0);
+    assert!(final_snapshot.decode_archive_ratio.is_finite());
 
     Ok(())
 }

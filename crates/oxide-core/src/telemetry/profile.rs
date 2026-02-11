@@ -1,6 +1,8 @@
 use std::time::Instant;
 
 #[cfg(feature = "profiling")]
+use crate::telemetry::events::{ProfileEvent, TelemetryEvent, emit_global};
+#[cfg(feature = "profiling")]
 use crate::telemetry::tags;
 #[cfg(feature = "profiling")]
 use std::collections::BTreeSet;
@@ -158,6 +160,15 @@ pub fn event(
         return;
     }
 
+    emit_global(TelemetryEvent::Profile(ProfileEvent {
+        target,
+        op,
+        result,
+        elapsed_us,
+        tags: tag_stack.iter().map(|tag| (*tag).to_string()).collect(),
+        message,
+    }));
+
     match target {
         tags::PROFILE_MMAP => {
             tracing::debug!(target: tags::PROFILE_MMAP, op, result, elapsed_us, tags = ?tag_stack, "{message}");
@@ -173,6 +184,9 @@ pub fn event(
         }
         tags::PROFILE_WORKER => {
             tracing::debug!(target: tags::PROFILE_WORKER, op, result, elapsed_us, tags = ?tag_stack, "{message}");
+        }
+        tags::PROFILE_PIPELINE => {
+            tracing::debug!(target: tags::PROFILE_PIPELINE, op, result, elapsed_us, tags = ?tag_stack, "{message}");
         }
         _ => {
             tracing::debug!(target: "oxide.profile", op, result, elapsed_us, original_target = target, tags = ?tag_stack, "{message}");

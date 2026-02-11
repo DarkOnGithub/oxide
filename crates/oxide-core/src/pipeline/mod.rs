@@ -3,7 +3,4 @@ mod directory;
 mod types;
 
 pub use archive::ArchivePipeline;
-pub use types::{
-    ArchiveOptions, ArchiveOutcome, ArchiveProgressSnapshot, ArchiveRunStats, ArchiveSourceKind,
-    NoopProgress, PipelinePerformanceOptions, ProgressSink, StatValue,
-};
+pub use types::{ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions};
