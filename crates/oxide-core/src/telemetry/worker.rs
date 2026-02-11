@@ -25,10 +25,30 @@ pub struct DefaultWorkerTelemetry;
 
 impl WorkerTelemetry for DefaultWorkerTelemetry {
     fn on_queue_depth(&self, _worker_id: usize, depth: usize) {
+        telemetry::increment_counter(
+            tags::METRIC_WORKER_QUEUE_DEPTH_SAMPLES,
+            1,
+            &[("subsystem", "worker"), ("op", "queue_depth")],
+        );
         telemetry::set_gauge(
             tags::METRIC_WORKER_QUEUE_DEPTH,
             depth as u64,
             &[("subsystem", "worker"), ("op", "queue_depth")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_WORKER_QUEUE_DEPTH_HIST,
+            depth as u64,
+            &[("subsystem", "worker"), ("op", "queue_depth")],
+        );
+
+        #[cfg(feature = "profiling")]
+        profile::event(
+            tags::PROFILE_WORKER,
+            &PROFILE_TAG_STACK_WORKER,
+            "queue_depth",
+            "sample",
+            0,
+            "worker queue depth sampled",
         );
 
         #[cfg(feature = "profiling")]
@@ -44,10 +64,25 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
     }
 
     fn on_task_started(&self, _worker_id: usize, _task_kind: &str) {
+        telemetry::increment_counter(
+            tags::METRIC_WORKER_TASK_START_COUNT,
+            1,
+            &[("subsystem", "worker"), ("op", "task_start")],
+        );
         telemetry::add_gauge(
             tags::METRIC_WORKER_ACTIVE_COUNT,
             1,
             &[("subsystem", "worker"), ("op", "task_start")],
+        );
+
+        #[cfg(feature = "profiling")]
+        profile::event(
+            tags::PROFILE_WORKER,
+            &PROFILE_TAG_STACK_WORKER,
+            "task_start",
+            "ok",
+            0,
+            "worker task started",
         );
 
         #[cfg(feature = "profiling")]
@@ -66,6 +101,15 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
         let elapsed_us = elapsed.as_micros().min(u64::MAX as u128) as u64;
 
         telemetry::increment_counter(
+            tags::METRIC_WORKER_TASK_FINISH_COUNT,
+            1,
+            &[
+                ("subsystem", "worker"),
+                ("op", "task_finish"),
+                ("result", "ok"),
+            ],
+        );
+        telemetry::increment_counter(
             tags::METRIC_WORKER_TASK_COUNT,
             1,
             &[("subsystem", "worker"), ("op", "task"), ("result", "ok")],
@@ -79,6 +123,16 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
             tags::METRIC_WORKER_ACTIVE_COUNT,
             1,
             &[("subsystem", "worker"), ("op", "task_finish")],
+        );
+
+        #[cfg(feature = "profiling")]
+        profile::event(
+            tags::PROFILE_WORKER,
+            &PROFILE_TAG_STACK_WORKER,
+            "task_finish",
+            "ok",
+            elapsed_us,
+            "worker task finished",
         );
 
         #[cfg(feature = "profiling")]
@@ -99,6 +153,15 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
         let elapsed_us = elapsed.as_micros().min(u64::MAX as u128) as u64;
 
         telemetry::increment_counter(
+            tags::METRIC_WORKER_TASK_FAIL_COUNT,
+            1,
+            &[
+                ("subsystem", "worker"),
+                ("op", "task_finish"),
+                ("result", "error"),
+            ],
+        );
+        telemetry::increment_counter(
             tags::METRIC_WORKER_TASK_COUNT,
             1,
             &[("subsystem", "worker"), ("op", "task"), ("result", "error")],
@@ -112,6 +175,16 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
             tags::METRIC_WORKER_ACTIVE_COUNT,
             1,
             &[("subsystem", "worker"), ("op", "task_failed")],
+        );
+
+        #[cfg(feature = "profiling")]
+        profile::event(
+            tags::PROFILE_WORKER,
+            &PROFILE_TAG_STACK_WORKER,
+            "task_finish",
+            "error",
+            elapsed_us,
+            "worker task failed",
         );
 
         #[cfg(feature = "profiling")]
