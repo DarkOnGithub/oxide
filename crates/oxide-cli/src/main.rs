@@ -1,13 +1,16 @@
-use std::fs::{self, File};
+use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use oxide_core::telemetry::tags;
 use oxide_core::{
-    ArchivePipeline, ArchiveProgressSnapshot, ArchiveSourceKind, BufferPool, CompressionAlgo,
-    PipelinePerformanceOptions,
+    ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReport, ArchiveSourceKind,
+    BufferPool, CompressionAlgo, ExtractReport, PipelinePerformanceOptions, ReportValue,
+    RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
 };
 
 #[derive(Parser)]
@@ -194,107 +197,33 @@ fn archive_command(
     performance.directory_stream_read_buffer_size = stream_read_buffer.max(1);
     performance.preserve_directory_format_boundaries = preserve_format_boundaries;
     performance.result_wait_timeout = Duration::from_millis(result_wait_ms.max(1));
-    let pipeline = ArchivePipeline::with_performance(
+    let mut config = ArchivePipelineConfig::new(
         block_size.max(1),
         workers.max(1),
         Arc::clone(&buffer_pool),
         compression,
-        performance,
     );
+    config.performance = performance;
+    let pipeline = ArchivePipeline::new(config);
     let output_file = File::create(&output_path)?;
     let progress_interval = Duration::from_millis(stats_interval_ms.max(50));
-
-    let mut last_input_bytes = 0u64;
-    let mut last_output_bytes = 0u64;
-    let mut last_elapsed = Duration::ZERO;
-    let mut peak_read_bps = 0.0f64;
-    let mut peak_write_bps = 0.0f64;
-    let discovery_started = Instant::now();
-    let mut discovery_reported = false;
-    eprintln!("discovering input and planning blocks...");
-
-    let (_writer, stats) = pipeline.archive_path_with_progress(
-        &input,
-        output_file,
+    let telemetry_options = RunTelemetryOptions {
         progress_interval,
-        |snapshot: ArchiveProgressSnapshot| {
-            if !discovery_reported {
-                discovery_reported = true;
-                eprintln!(
-                    "discovery complete in {}, starting workers...",
-                    format_duration(discovery_started.elapsed())
-                );
-            }
+        emit_final_progress: true,
+        include_telemetry_snapshot: true,
+    };
 
-            let elapsed = snapshot.elapsed;
-            let total = snapshot.input_bytes_total;
-            let done = snapshot.input_bytes_completed.min(total);
-            let written = snapshot.output_bytes_completed;
-            let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
+    let mut live_rates = LiveRateStats::default();
+    let discovery_started = Instant::now();
+    eprintln!("discovering input and planning blocks...");
+    let mut sink = ArchiveCliSink {
+        live_rates: &mut live_rates,
+        discovery_started,
+        discovery_reported: false,
+    };
+    let run = pipeline.archive_path(&input, output_file, telemetry_options, Some(&mut sink))?;
 
-            let read_avg_bps = done as f64 / elapsed_secs;
-            let write_avg_bps = written as f64 / elapsed_secs;
-            let delta_read_bytes = done.saturating_sub(last_input_bytes);
-            let delta_write_bytes = written.saturating_sub(last_output_bytes);
-            let delta_elapsed = elapsed.saturating_sub(last_elapsed);
-            let delta_secs = delta_elapsed.as_secs_f64();
-            let read_instant_bps = if delta_secs > 0.0 {
-                delta_read_bytes as f64 / delta_secs
-            } else {
-                read_avg_bps
-            };
-            let write_instant_bps = if delta_secs > 0.0 {
-                delta_write_bytes as f64 / delta_secs
-            } else {
-                write_avg_bps
-            };
-            peak_read_bps = peak_read_bps.max(read_instant_bps);
-            peak_write_bps = peak_write_bps.max(write_instant_bps);
-
-            let remaining = total.saturating_sub(done);
-            let eta = if read_avg_bps > 0.0 {
-                Duration::from_secs_f64(remaining as f64 / read_avg_bps)
-            } else {
-                Duration::from_secs(0)
-            };
-            let progress = if total > 0 {
-                (done as f64 / total as f64) * 100.0
-            } else {
-                100.0
-            };
-
-            let active_workers = snapshot
-                .runtime
-                .workers
-                .iter()
-                .filter(|worker| worker.tasks_completed > 0 || worker.busy > Duration::ZERO)
-                .count();
-
-            let line = format!(
-                "\r\x1b[2K[{progress:6.2}%] blocks {}/{} | data {} / {} | rd avg {}/s inst {}/s | wr avg {}/s inst {}/s | ETA {} | pending {} | workers {}/{}",
-                snapshot.blocks_completed,
-                snapshot.blocks_total,
-                format_bytes(done),
-                format_bytes(total),
-                format_rate(read_avg_bps),
-                format_rate(read_instant_bps),
-                format_rate(write_avg_bps),
-                format_rate(write_instant_bps),
-                format_duration(eta),
-                snapshot.blocks_pending,
-                active_workers,
-                snapshot.runtime.workers.len(),
-            );
-            eprint!("{line}");
-            let _ = io::stderr().flush();
-
-            last_input_bytes = done;
-            last_output_bytes = written;
-            last_elapsed = elapsed;
-        },
-    )?;
-
-    if !discovery_reported {
+    if !sink.discovery_reported {
         eprintln!(
             "discovery complete in {}, starting workers...",
             format_duration(discovery_started.elapsed())
@@ -302,13 +231,13 @@ fn archive_command(
     }
 
     eprintln!();
-    print_summary(
+    print_archive_report_summary(
         &input,
         &output_path,
         compression,
-        peak_read_bps,
-        peak_write_bps,
-        &stats,
+        &run.report,
+        live_rates.peak_read_bps,
+        live_rates.peak_write_bps,
         &buffer_pool,
     );
 
@@ -318,139 +247,286 @@ fn archive_command(
 fn extract_command(
     input: PathBuf,
     output: Option<PathBuf>,
-    _stats_interval_ms: u64,
+    stats_interval_ms: u64,
     workers: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_path = output.unwrap_or_else(|| default_extract_output_path(&input));
-    let archive_bytes = fs::metadata(&input)?.len();
     let decode_workers = workers.max(1);
     let buffer_pool = Arc::new(BufferPool::new(
         1024 * 1024,
         decode_workers.saturating_mul(8),
     ));
-    let pipeline = ArchivePipeline::with_performance(
+    let mut config = ArchivePipelineConfig::new(
         1024 * 1024,
         decode_workers,
         buffer_pool,
         CompressionAlgo::Lz4,
-        PipelinePerformanceOptions::default(),
     );
+    config.performance = PipelinePerformanceOptions::default();
+    let pipeline = ArchivePipeline::new(config);
 
-    let started_at = Instant::now();
-    let source_kind =
-        pipeline.extract_path_with_workers(File::open(&input)?, &output_path, decode_workers)?;
-    let elapsed = started_at.elapsed();
-    let restored_bytes = measure_restored_bytes(&output_path, source_kind)?;
-    let peak_instant_bps = if elapsed.as_secs_f64() > 0.0 {
-        archive_bytes as f64 / elapsed.as_secs_f64()
-    } else {
-        0.0
+    let telemetry_options = RunTelemetryOptions {
+        progress_interval: Duration::from_millis(stats_interval_ms.max(50)),
+        emit_final_progress: true,
+        include_telemetry_snapshot: true,
     };
-
-    print_extract_summary(
-        &input,
+    let mut sink = ExtractCliSink::default();
+    let report = pipeline.extract_path(
+        File::open(&input)?,
         &output_path,
-        source_kind,
-        archive_bytes,
-        restored_bytes,
-        elapsed,
-        peak_instant_bps,
-    );
+        telemetry_options,
+        Some(&mut sink),
+    )?;
+    if sink.rendered_line {
+        eprintln!();
+    }
+
+    print_extract_report_summary(&input, &output_path, &report);
     Ok(())
 }
 
-fn measure_restored_bytes(
-    output_path: &Path,
-    source_kind: ArchiveSourceKind,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    match source_kind {
-        ArchiveSourceKind::File => Ok(fs::metadata(output_path)?.len()),
-        ArchiveSourceKind::Directory => measure_directory_bytes(output_path),
-    }
+struct ArchiveCliSink<'a> {
+    live_rates: &'a mut LiveRateStats,
+    discovery_started: Instant,
+    discovery_reported: bool,
 }
 
-fn measure_directory_bytes(root: &Path) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut total = 0u64;
-    if !root.exists() {
-        return Ok(0);
-    }
+impl TelemetrySink for ArchiveCliSink<'_> {
+    fn on_event(&mut self, event: TelemetryEvent) {
+        let TelemetryEvent::ArchiveProgress(snapshot) = event else {
+            return;
+        };
 
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        for entry in fs::read_dir(&path)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                stack.push(entry.path());
-            } else if file_type.is_file() {
-                total = total.saturating_add(entry.metadata()?.len());
-            }
+        if !self.discovery_reported {
+            self.discovery_reported = true;
+            eprintln!(
+                "discovery complete in {}, starting workers...",
+                format_duration(self.discovery_started.elapsed())
+            );
         }
-    }
 
-    Ok(total)
+        let total = snapshot.input_bytes_total;
+        let done = snapshot.input_bytes_completed.min(total);
+        let (read_avg_bps, read_instant_bps, write_avg_bps, write_instant_bps) =
+            self.live_rates.update(&snapshot);
+
+        let remaining = total.saturating_sub(done);
+        let eta = if read_avg_bps > 0.0 {
+            Duration::from_secs_f64(remaining as f64 / read_avg_bps)
+        } else {
+            Duration::from_secs(0)
+        };
+        let progress = if total > 0 {
+            (done as f64 / total as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        let active_workers = snapshot
+            .runtime
+            .workers
+            .iter()
+            .filter(|worker| worker.tasks_completed > 0 || worker.busy > Duration::ZERO)
+            .count();
+
+        let line = format!(
+            "\r\x1b[2K[{progress:6.2}%] blocks {}/{} | data {} / {} | rd avg {}/s inst {}/s | wr avg {}/s inst {}/s | ETA {} | pending {} | workers {}/{}",
+            snapshot.blocks_completed,
+            snapshot.blocks_total,
+            format_bytes(done),
+            format_bytes(total),
+            format_rate(read_avg_bps),
+            format_rate(read_instant_bps),
+            format_rate(write_avg_bps),
+            format_rate(write_instant_bps),
+            format_duration(eta),
+            snapshot.blocks_pending,
+            active_workers,
+            snapshot.runtime.workers.len(),
+        );
+        eprint!("{line}");
+        let _ = io::stderr().flush();
+    }
 }
 
-fn print_extract_summary(
-    archive_path: &Path,
-    output_path: &Path,
-    source_kind: ArchiveSourceKind,
-    archive_bytes: u64,
-    restored_bytes: u64,
-    elapsed: Duration,
-    peak_instant_bps: f64,
-) {
-    let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
-    let read_bps = archive_bytes as f64 / elapsed_secs;
-    let restore_bps = restored_bytes as f64 / elapsed_secs;
-    let source_kind = match source_kind {
+#[derive(Default)]
+struct ExtractCliSink {
+    last_elapsed: Duration,
+    last_archive_bytes: u64,
+    rendered_line: bool,
+}
+
+impl TelemetrySink for ExtractCliSink {
+    fn on_event(&mut self, event: TelemetryEvent) {
+        let TelemetryEvent::ExtractProgress(progress) = event else {
+            return;
+        };
+        let elapsed_secs = progress.elapsed.as_secs_f64().max(1e-6);
+        let read_avg_bps = progress.archive_bytes_completed as f64 / elapsed_secs;
+        let delta_bytes = progress
+            .archive_bytes_completed
+            .saturating_sub(self.last_archive_bytes);
+        let delta_elapsed = progress.elapsed.saturating_sub(self.last_elapsed);
+        let delta_secs = delta_elapsed.as_secs_f64();
+        let read_instant_bps = if delta_secs > 0.0 {
+            delta_bytes as f64 / delta_secs
+        } else {
+            read_avg_bps
+        };
+
+        self.last_elapsed = progress.elapsed;
+        self.last_archive_bytes = progress.archive_bytes_completed;
+        let percent = if progress.blocks_total > 0 {
+            (progress.blocks_completed as f64 / progress.blocks_total as f64) * 100.0
+        } else {
+            100.0
+        };
+        let line = format!(
+            "\r\x1b[2K[extract {percent:6.2}%] blocks {}/{} | archive read {} | decoded {} | rd avg {}/s inst {}/s",
+            progress.blocks_completed,
+            progress.blocks_total,
+            format_bytes(progress.archive_bytes_completed),
+            format_bytes(progress.decoded_bytes_completed),
+            format_rate(read_avg_bps),
+            format_rate(read_instant_bps),
+        );
+        eprint!("{line}");
+        let _ = io::stderr().flush();
+        self.rendered_line = true;
+    }
+}
+
+#[derive(Debug, Default)]
+struct LiveRateStats {
+    last_input_bytes: u64,
+    last_output_bytes: u64,
+    last_elapsed: Duration,
+    peak_read_bps: f64,
+    peak_write_bps: f64,
+}
+
+impl LiveRateStats {
+    fn update(&mut self, snapshot: &ArchiveProgressEvent) -> (f64, f64, f64, f64) {
+        let elapsed = snapshot.elapsed;
+        let done = snapshot
+            .input_bytes_completed
+            .min(snapshot.input_bytes_total);
+        let written = snapshot.output_bytes_completed;
+        let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
+
+        let read_avg_bps = done as f64 / elapsed_secs;
+        let write_avg_bps = written as f64 / elapsed_secs;
+        let delta_read_bytes = done.saturating_sub(self.last_input_bytes);
+        let delta_write_bytes = written.saturating_sub(self.last_output_bytes);
+        let delta_elapsed = elapsed.saturating_sub(self.last_elapsed);
+        let delta_secs = delta_elapsed.as_secs_f64();
+        let read_instant_bps = if delta_secs > 0.0 {
+            delta_read_bytes as f64 / delta_secs
+        } else {
+            read_avg_bps
+        };
+        let write_instant_bps = if delta_secs > 0.0 {
+            delta_write_bytes as f64 / delta_secs
+        } else {
+            write_avg_bps
+        };
+
+        self.last_input_bytes = done;
+        self.last_output_bytes = written;
+        self.last_elapsed = elapsed;
+        self.peak_read_bps = self.peak_read_bps.max(read_instant_bps);
+        self.peak_write_bps = self.peak_write_bps.max(write_instant_bps);
+
+        (
+            read_avg_bps,
+            read_instant_bps,
+            write_avg_bps,
+            write_instant_bps,
+        )
+    }
+}
+
+fn print_extract_report_summary(archive_path: &Path, output_path: &Path, report: &ExtractReport) {
+    let source_kind = match report.source_kind {
         ArchiveSourceKind::File => "file",
         ArchiveSourceKind::Directory => "directory",
-    };
-    let restored_ratio = if archive_bytes > 0 {
-        restored_bytes as f64 / archive_bytes as f64
-    } else {
-        1.0
     };
 
     println!("extract complete");
     println!("  archive: {}", archive_path.display());
     println!("  output: {} ({source_kind})", output_path.display());
-    println!("  elapsed: {}", format_duration(elapsed));
-    println!("  archive bytes read: {}", format_bytes(archive_bytes));
-    println!("  restored bytes: {}", format_bytes(restored_bytes));
-    println!("  restored/archive ratio: {restored_ratio:.3}x");
-    println!("  read throughput: {}/s", format_rate(read_bps));
+    println!("  elapsed: {}", format_duration(report.elapsed));
     println!(
-        "  read throughput peak: {}/s",
-        format_rate(peak_instant_bps)
+        "  archive bytes read: {}",
+        format_bytes(report.archive_bytes_total)
     );
-    println!("  restore throughput: {}/s", format_rate(restore_bps));
+    println!(
+        "  decoded bytes: {}",
+        format_bytes(report.decoded_bytes_total)
+    );
+    println!(
+        "  output bytes: {}",
+        format_bytes(report.output_bytes_total)
+    );
+    println!(
+        "  output/archive ratio: {:.3}x",
+        report.output_archive_ratio
+    );
+    println!(
+        "  read throughput avg: {}/s",
+        format_rate(report.read_avg_bps)
+    );
+    println!(
+        "  decode throughput avg: {}/s",
+        format_rate(report.decode_avg_bps)
+    );
+    println!(
+        "  output throughput avg: {}/s",
+        format_rate(report.output_avg_bps)
+    );
+    println!("  blocks: {}", report.blocks_total);
+
+    print_worker_runtime(&report.workers);
+    print_thread_stage_summary(
+        &report.main_thread,
+        &[
+            ("archive_read", "archive read"),
+            ("decode_submit", "decode submit"),
+            ("decode_wait", "decode wait"),
+            ("merge", "merge"),
+            ("directory_decode", "directory decode"),
+            ("output_write", "output write"),
+        ],
+    );
+
+    if let Some(effective_cores) = extension_f64(&report.extensions, "runtime.effective_cores") {
+        println!("  effective decode cores: {effective_cores:.2}");
+    }
+    if let Some(decode_busy_us) = extension_u64(&report.extensions, "runtime.decode_busy_us") {
+        println!(
+            "  total decode busy time: {}",
+            format_duration(Duration::from_micros(decode_busy_us))
+        );
+    }
+
+    print_telemetry_summary(report.telemetry.as_ref());
 }
 
-fn print_summary(
+fn print_archive_report_summary(
     input: &Path,
     output: &Path,
     compression: CompressionAlgo,
+    report: &ArchiveReport,
     peak_read_bps: f64,
     peak_write_bps: f64,
-    stats: &oxide_core::ArchiveRunStats,
     buffer_pool: &BufferPool,
 ) {
-    let elapsed_secs = stats.elapsed.as_secs_f64().max(1e-6);
-    let read_avg_bps = stats.input_bytes_total as f64 / elapsed_secs;
-    let write_avg_bps = stats.output_bytes_total as f64 / elapsed_secs;
-    let out_ratio = if stats.input_bytes_total > 0 {
-        stats.output_bytes_total as f64 / stats.input_bytes_total as f64
-    } else {
-        1.0
-    };
-    let avg_block = if stats.blocks_total > 0 {
-        stats.input_bytes_total / stats.blocks_total as u64
+    let avg_block = if report.blocks_total > 0 {
+        report.input_bytes_total / report.blocks_total as u64
     } else {
         0
     };
-    let source_kind = match stats.source_kind {
+    let source_kind = match report.source_kind {
         ArchiveSourceKind::File => "file",
         ArchiveSourceKind::Directory => "directory",
     };
@@ -459,36 +535,93 @@ fn print_summary(
     println!("  source: {} ({source_kind})", input.display());
     println!("  output: {}", output.display());
     println!("  compression metadata: {:?}", compression);
-    println!("  elapsed: {}", format_duration(stats.elapsed));
-    println!("  input bytes: {}", format_bytes(stats.input_bytes_total));
-    println!("  output bytes: {}", format_bytes(stats.output_bytes_total));
-    println!("  expansion ratio: {out_ratio:.3}x");
-    println!("  throughput avg: {}/s", format_rate(read_avg_bps));
-    println!("  throughput peak: {}/s", format_rate(peak_read_bps));
-    println!("  disk read avg: {}/s", format_rate(read_avg_bps));
-    println!("  disk read peak: {}/s", format_rate(peak_read_bps));
-    println!("  disk write avg: {}/s", format_rate(write_avg_bps));
-    println!("  disk write peak: {}/s", format_rate(peak_write_bps));
+    println!("  elapsed: {}", format_duration(report.elapsed));
+    println!("  input bytes: {}", format_bytes(report.input_bytes_total));
+    println!(
+        "  output bytes: {}",
+        format_bytes(report.output_bytes_total)
+    );
+    println!("  expansion ratio: {:.3}x", report.output_input_ratio);
+    println!(
+        "  read throughput avg: {}/s",
+        format_rate(report.read_avg_bps)
+    );
+    println!(
+        "  read throughput peak (live): {}/s",
+        format_rate(peak_read_bps)
+    );
+    println!(
+        "  write throughput avg: {}/s",
+        format_rate(report.write_avg_bps)
+    );
+    println!(
+        "  write throughput peak (live): {}/s",
+        format_rate(peak_write_bps)
+    );
     println!(
         "  blocks: {} total (avg block {})",
-        stats.blocks_total,
+        report.blocks_total,
         format_bytes(avg_block),
     );
 
-    let worker_count = stats.workers.len();
-    let total_tasks: usize = stats
-        .workers
-        .iter()
-        .map(|worker| worker.tasks_completed)
-        .sum();
-    let max_tasks = stats
-        .workers
+    print_worker_runtime(&report.workers);
+    if let Some(effective_cores) = extension_f64(&report.extensions, "runtime.effective_cores") {
+        println!("  effective compression cores: {effective_cores:.2}");
+    }
+    if let Some(compress_busy_us) = extension_u64(&report.extensions, "runtime.compress_busy_us") {
+        println!(
+            "  total compression busy time: {}",
+            format_duration(Duration::from_micros(compress_busy_us))
+        );
+    }
+    if let Some(max_inflight_blocks) =
+        extension_u64(&report.extensions, "pipeline.max_inflight_blocks")
+    {
+        println!("  max in-flight blocks: {max_inflight_blocks}");
+    }
+    if let Some(max_inflight_bytes) =
+        extension_u64(&report.extensions, "pipeline.max_inflight_bytes")
+    {
+        println!(
+            "  max in-flight bytes: {}",
+            format_bytes(max_inflight_bytes)
+        );
+    }
+    if let Some(pending_write_peak) =
+        extension_u64(&report.extensions, "pipeline.pending_write_peak")
+    {
+        println!("  reorder pending peak: {pending_write_peak}");
+    }
+
+    print_thread_stage_summary(
+        &report.main_thread,
+        &[
+            ("discovery", "discovery"),
+            ("format_probe", "probe"),
+            ("producer_read", "read"),
+            ("submit_wait", "submit wait"),
+            ("result_wait", "result wait"),
+            ("writer", "writer"),
+        ],
+    );
+
+    let pool = buffer_pool.metrics();
+    println!(
+        "  buffer pool: created {} | recycled {} | dropped {}",
+        pool.created, pool.recycled, pool.dropped
+    );
+    print_telemetry_summary(report.telemetry.as_ref());
+}
+
+fn print_worker_runtime(workers: &[WorkerReport]) {
+    let worker_count = workers.len();
+    let total_tasks: usize = workers.iter().map(|worker| worker.tasks_completed).sum();
+    let max_tasks = workers
         .iter()
         .map(|worker| worker.tasks_completed)
         .max()
         .unwrap_or(0);
-    let min_tasks = stats
-        .workers
+    let min_tasks = workers
         .iter()
         .map(|worker| worker.tasks_completed)
         .min()
@@ -498,7 +631,7 @@ fn print_summary(
         "  scheduler: {worker_count} workers | task balance min/max {min_tasks}/{max_tasks} | total tasks {total_tasks}"
     );
     println!("  worker runtime:");
-    for worker in &stats.workers {
+    for worker in workers {
         println!(
             "    w{:02} tasks {:>6} | uptime {:>8} | busy {:>8} | idle {:>8} | util {:>6.2}%",
             worker.worker_id,
@@ -509,58 +642,59 @@ fn print_summary(
             worker.utilization * 100.0,
         );
     }
+}
 
-    if let Some(effective_cores) = stats.extension_f64("runtime.effective_cores") {
-        println!("  effective compression cores: {effective_cores:.2}");
+fn print_thread_stage_summary(thread: &ThreadReport, order: &[(&str, &str)]) {
+    let mut pieces = Vec::new();
+    for (stage_key, label) in order {
+        let value_us = thread.stage_us.get(*stage_key).copied().unwrap_or(0);
+        if value_us > 0 {
+            pieces.push(format!("{label} {:.2}ms", value_us as f64 / 1000.0));
+        }
     }
-    if let Some(compress_busy_us) = stats.extension_u64("runtime.compress_busy_us") {
-        println!(
-            "  total compression busy time: {}",
-            format_duration(Duration::from_micros(compress_busy_us))
-        );
+    if !pieces.is_empty() {
+        println!("  stage timings: {}", pieces.join(" | "));
     }
-    if let Some(max_inflight_blocks) = stats.extension_u64("pipeline.max_inflight_blocks") {
-        println!("  max in-flight blocks: {max_inflight_blocks}");
-    }
-    if let Some(max_inflight_bytes) = stats.extension_u64("pipeline.max_inflight_bytes") {
-        println!(
-            "  max in-flight bytes: {}",
-            format_bytes(max_inflight_bytes)
-        );
-    }
-    if let Some(pending_write_peak) = stats.extension_u64("pipeline.pending_write_peak") {
-        println!("  reorder pending peak: {pending_write_peak}");
-    }
+}
 
-    let discovery_us = stats.extension_u64("stage.discovery_us").unwrap_or(0);
-    let format_probe_us = stats.extension_u64("stage.format_probe_us").unwrap_or(0);
-    let producer_read_us = stats.extension_u64("stage.producer_read_us").unwrap_or(0);
-    let submit_wait_us = stats.extension_u64("stage.submit_wait_us").unwrap_or(0);
-    let result_wait_us = stats.extension_u64("stage.result_wait_us").unwrap_or(0);
-    let writer_us = stats.extension_u64("stage.writer_us").unwrap_or(0);
-    if discovery_us > 0
-        || format_probe_us > 0
-        || producer_read_us > 0
-        || submit_wait_us > 0
-        || result_wait_us > 0
-        || writer_us > 0
+fn print_telemetry_summary(snapshot: Option<&oxide_core::telemetry::TelemetrySnapshot>) {
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+    if snapshot.counters.is_empty() && snapshot.gauges.is_empty() && snapshot.histograms.is_empty()
     {
-        println!(
-            "  stage timings: discovery {:.2}ms | probe {:.2}ms | read {:.2}ms | submit wait {:.2}ms | result wait {:.2}ms | writer {:.2}ms",
-            discovery_us as f64 / 1000.0,
-            format_probe_us as f64 / 1000.0,
-            producer_read_us as f64 / 1000.0,
-            submit_wait_us as f64 / 1000.0,
-            result_wait_us as f64 / 1000.0,
-            writer_us as f64 / 1000.0,
-        );
+        return;
     }
 
-    let pool = buffer_pool.metrics();
     println!(
-        "  buffer pool: created {} | recycled {} | dropped {}",
-        pool.created, pool.recycled, pool.dropped
+        "  telemetry: counters {} | gauges {} | histograms {}",
+        snapshot.counters.len(),
+        snapshot.gauges.len(),
+        snapshot.histograms.len(),
     );
+    if let Some(task_count) = snapshot.counter(tags::METRIC_WORKER_TASK_COUNT) {
+        println!("  telemetry worker tasks: {task_count}");
+    }
+    if let Some(queue_depth) = snapshot.gauge(tags::METRIC_WORKER_QUEUE_DEPTH) {
+        println!("  telemetry queue depth: {queue_depth}");
+    }
+    if let Some(active_workers) = snapshot.gauge(tags::METRIC_WORKER_ACTIVE_COUNT) {
+        println!("  telemetry active workers: {active_workers}");
+    }
+}
+
+fn extension_u64(extensions: &BTreeMap<String, ReportValue>, key: &str) -> Option<u64> {
+    match extensions.get(key) {
+        Some(ReportValue::U64(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn extension_f64(extensions: &BTreeMap<String, ReportValue>, key: &str) -> Option<f64> {
+    match extensions.get(key) {
+        Some(ReportValue::F64(value)) => Some(*value),
+        _ => None,
+    }
 }
 
 fn default_output_path(input: &Path) -> PathBuf {
