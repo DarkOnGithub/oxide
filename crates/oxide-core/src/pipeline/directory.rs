@@ -176,6 +176,14 @@ pub(super) fn source_kind_flags(source_kind: ArchiveSourceKind) -> u32 {
     }
 }
 
+pub(super) fn source_kind_from_flags(flags: u32) -> ArchiveSourceKind {
+    if flags & SOURCE_KIND_DIRECTORY_FLAG != 0 {
+        ArchiveSourceKind::Directory
+    } else {
+        ArchiveSourceKind::File
+    }
+}
+
 pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery> {
     if !root.is_dir() {
         return Err(crate::OxideError::InvalidFormat(
