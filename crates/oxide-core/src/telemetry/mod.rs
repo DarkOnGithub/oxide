@@ -2,12 +2,22 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod events;
 pub mod memory;
 pub mod profile;
+pub mod report;
 pub mod tags;
 pub mod worker;
 
+pub use events::{
+    ArchiveProgressEvent, ExtractProgressEvent, GlobalTelemetrySink, ProfileEvent, TelemetryEvent,
+    TelemetrySink,
+};
 pub use memory::ProcessMemorySample;
+pub use report::{
+    ArchiveReport, ArchiveRun, ExtractReport, ReportExport, ReportValue, RunReport,
+    RunTelemetryOptions, ThreadReport, WorkerReport,
+};
 
 /// Histogram summary captured in telemetry snapshots.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
