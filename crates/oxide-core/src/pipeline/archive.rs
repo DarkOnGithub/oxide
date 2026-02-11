@@ -15,7 +15,7 @@ use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerPoolHandle, WorkerRunti
 use crate::format::{
     ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, BlockHeader, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
 };
-use crate::io::InputScanner;
+use crate::io::{InputScanner, MmapInput};
 use crate::telemetry::{
     self, ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent, ExtractReport,
     ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
@@ -33,6 +33,7 @@ use super::types::{
 
 const SUBMISSION_DRAIN_BUDGET: usize = 128;
 const DIRECTORY_FORMAT_PROBE_LIMIT: usize = 64 * 1024;
+const DIRECTORY_PREFETCH_WINDOW: usize = 8;
 const MIN_INFLIGHT_BLOCKS: usize = 64;
 const MAX_INFLIGHT_BLOCKS: usize = 4096;
 const PROFILE_TAG_STACK_PIPELINE: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_PIPELINE];
@@ -89,6 +90,27 @@ struct ExtractStageTimings {
 #[derive(Debug, Clone, Copy, Default)]
 struct DirectoryProducerOutcome {
     producer_read: Duration,
+}
+
+#[derive(Debug)]
+struct DirectoryWriterOutcome<W> {
+    writer: W,
+    output_bytes_written: u64,
+    pending_write_peak: usize,
+    writer_time: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct PrefetchRequest {
+    index: usize,
+    file: directory::DirectoryFileSpec,
+}
+
+#[derive(Debug)]
+struct PrefetchResult {
+    index: usize,
+    data: Vec<u8>,
+    read_elapsed: Duration,
 }
 
 #[derive(Debug)]
@@ -284,7 +306,7 @@ impl ArchivePipeline {
     ) -> Result<ArchiveRun<W>>
     where
         P: AsRef<Path>,
-        W: Write,
+        W: Write + Send + 'static,
     {
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
@@ -311,7 +333,7 @@ impl ArchivePipeline {
     ) -> Result<ArchiveRun<W>>
     where
         P: AsRef<Path>,
-        W: Write,
+        W: Write + Send + 'static,
     {
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
@@ -347,7 +369,7 @@ impl ArchivePipeline {
         sink: &mut dyn TelemetrySink,
     ) -> Result<ArchiveRun<W>>
     where
-        W: Write,
+        W: Write + Send + 'static,
     {
         self.archive_directory_streaming_with(dir_path, writer, options, sink)
     }
@@ -905,7 +927,10 @@ impl ArchivePipeline {
         writer: W,
         options: &RunTelemetryOptions,
         sink: &mut dyn TelemetrySink,
-    ) -> Result<ArchiveRun<W>> {
+    ) -> Result<ArchiveRun<W>>
+    where
+        W: Write + Send + 'static,
+    {
         let mut stage_timings = StageTimings::default();
 
         let discovery_started = Instant::now();
@@ -951,6 +976,74 @@ impl ArchivePipeline {
             )
         });
 
+        let writer_queue_capacity = self
+            .performance
+            .writer_result_queue_blocks
+            .max(1)
+            .min(max_inflight_blocks.max(1));
+        let (writer_tx, writer_rx) = bounded::<CompressedBlock>(writer_queue_capacity);
+        let writer_output_bytes = Arc::new(AtomicU64::new(GLOBAL_HEADER_SIZE as u64));
+        let writer_output_bytes_shared = Arc::clone(&writer_output_bytes);
+        let writer_buffer_pool = Arc::clone(&self.buffer_pool);
+        let writer_handle = thread::spawn(move || -> Result<DirectoryWriterOutcome<W>> {
+            let mut archive_writer = ArchiveWriter::new(writer, writer_buffer_pool);
+            archive_writer.write_global_header_with_flags(
+                block_count,
+                directory::source_kind_flags(ArchiveSourceKind::Directory),
+            )?;
+
+            let mut output_bytes_written = GLOBAL_HEADER_SIZE as u64;
+            let mut pending_sizes = BTreeMap::<usize, usize>::new();
+            let mut next_written_id = 0usize;
+            let mut pending_write_peak = 0usize;
+            let mut writer_time = Duration::ZERO;
+
+            while let Ok(block) = writer_rx.recv() {
+                let block_id = block.id;
+                let block_len = block.data.len();
+                if pending_sizes.insert(block_id, block_len).is_some() {
+                    return Err(crate::OxideError::InvalidFormat(
+                        "duplicate block id received by directory writer",
+                    ));
+                }
+
+                let write_started = Instant::now();
+                let written = archive_writer.push_block(block)?;
+                writer_time += write_started.elapsed();
+
+                for _ in 0..written {
+                    let len = pending_sizes.remove(&next_written_id).ok_or(
+                        crate::OxideError::InvalidFormat(
+                            "directory writer pending state drift detected",
+                        ),
+                    )?;
+                    output_bytes_written = output_bytes_written
+                        .saturating_add(BLOCK_HEADER_SIZE as u64)
+                        .saturating_add(len as u64);
+                    next_written_id += 1;
+                }
+                pending_write_peak = pending_write_peak.max(archive_writer.pending_blocks());
+                writer_output_bytes_shared.store(output_bytes_written, AtomicOrdering::Release);
+            }
+
+            if !pending_sizes.is_empty() {
+                return Err(crate::OxideError::InvalidFormat(
+                    "directory writer closed with pending blocks",
+                ));
+            }
+
+            let writer = archive_writer.write_footer()?;
+            output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
+            writer_output_bytes_shared.store(output_bytes_written, AtomicOrdering::Release);
+
+            Ok(DirectoryWriterOutcome {
+                writer,
+                output_bytes_written,
+                pending_write_peak,
+                writer_time,
+            })
+        });
+
         let started_at = Instant::now();
         let mut last_emit_at = Instant::now();
         let emit_every = options.progress_interval.max(Duration::from_millis(100));
@@ -958,21 +1051,13 @@ impl ArchivePipeline {
         let mut received_count = 0usize;
         let mut submitted_count = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
-        let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
-        let mut next_write_id = 0usize;
         let mut output_bytes_written = GLOBAL_HEADER_SIZE as u64;
         let mut raw_passthrough_blocks = 0u64;
-        let mut pending_write_peak = 0usize;
+        let mut writer_queue_peak = 0usize;
         let result_wait_timeout = self
             .performance
             .result_wait_timeout
             .max(Duration::from_millis(1));
-
-        let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.buffer_pool));
-        archive_writer.write_global_header_with_flags(
-            block_count,
-            directory::source_kind_flags(ArchiveSourceKind::Directory),
-        )?;
 
         let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
         let producer_root = discovery.root.clone();
@@ -982,6 +1067,8 @@ impl ArchivePipeline {
         let producer_block_size = block_size.selected_block_size;
         let preserve_boundaries = self.performance.preserve_directory_format_boundaries;
         let stream_read_buffer_size = self.performance.directory_stream_read_buffer_size.max(1);
+        let producer_threads = self.performance.producer_threads.clamp(1, 2);
+        let mmap_threshold = self.performance.directory_mmap_threshold_bytes.max(1);
 
         let producer_handle = thread::spawn(move || -> Result<DirectoryProducerOutcome> {
             let mut submitter = DirectoryBatchSubmitter::new(
@@ -1025,11 +1112,68 @@ impl ArchivePipeline {
                 })?;
             }
 
+            let mut prefetch_request_tx = None;
+            let mut prefetch_result_rx = None;
+            let mut prefetch_handle = None;
+            if producer_threads > 1 {
+                let (prefetch_tx, prefetch_rx) =
+                    bounded::<PrefetchRequest>(DIRECTORY_PREFETCH_WINDOW);
+                let (result_tx, result_rx) = bounded::<PrefetchResult>(DIRECTORY_PREFETCH_WINDOW);
+                let handle = thread::spawn(move || -> Result<()> {
+                    while let Ok(request) = prefetch_rx.recv() {
+                        let read_started = Instant::now();
+                        let data = fs::read(&request.file.full_path)?;
+                        let read_elapsed = read_started.elapsed();
+                        result_tx
+                            .send(PrefetchResult {
+                                index: request.index,
+                                data,
+                                read_elapsed,
+                            })
+                            .map_err(|_| {
+                                crate::OxideError::CompressionError(
+                                    "directory prefetch result queue closed".to_string(),
+                                )
+                            })?;
+                    }
+                    Ok(())
+                });
+                prefetch_request_tx = Some(prefetch_tx);
+                prefetch_result_rx = Some(result_rx);
+                prefetch_handle = Some(handle);
+            }
+
+            let mut prefetched = BTreeMap::<usize, PrefetchResult>::new();
+            let mut next_prefetch = 0usize;
             let mut read_buffer = vec![0u8; stream_read_buffer_size];
-            for (file, file_format) in producer_files
+            for (file_index, (file, file_format)) in producer_files
                 .iter()
                 .zip(producer_file_formats.iter().copied())
+                .enumerate()
             {
+                if let Some(prefetch_tx) = prefetch_request_tx.as_ref() {
+                    while next_prefetch < producer_files.len()
+                        && next_prefetch <= file_index.saturating_add(DIRECTORY_PREFETCH_WINDOW)
+                    {
+                        let candidate = &producer_files[next_prefetch];
+                        let candidate_size = usize::try_from(candidate.size).unwrap_or(usize::MAX);
+                        if candidate_size > 0 && candidate_size <= mmap_threshold {
+                            prefetch_tx
+                                .send(PrefetchRequest {
+                                    index: next_prefetch,
+                                    file: candidate.clone(),
+                                })
+                                .map_err(|_| {
+                                    crate::OxideError::CompressionError(
+                                        "directory prefetch queue closed before completion"
+                                            .to_string(),
+                                    )
+                                })?;
+                        }
+                        next_prefetch += 1;
+                    }
+                }
+
                 let mut encoded = Vec::with_capacity(1 + 4 + file.rel_path.len() + 8);
                 encoded.push(1);
                 directory::encode_path(&mut encoded, &file.rel_path)?;
@@ -1038,18 +1182,93 @@ impl ArchivePipeline {
                     submit_batch(batch)
                 })?;
 
-                let mut file_reader = fs::File::open(&file.full_path)?;
-                loop {
+                let file_size = usize::try_from(file.size).unwrap_or(usize::MAX);
+                if prefetch_request_tx.is_some() && file_size > 0 && file_size <= mmap_threshold {
+                    let prefetched_file = if let Some(result) = prefetched.remove(&file_index) {
+                        result
+                    } else {
+                        let result_rx = prefetch_result_rx
+                            .as_ref()
+                            .expect("prefetch result receiver missing");
+                        loop {
+                            let result = result_rx.recv().map_err(|_| {
+                                crate::OxideError::CompressionError(
+                                    "directory prefetch worker stopped before completion"
+                                        .to_string(),
+                                )
+                            })?;
+                            if result.index == file_index {
+                                break result;
+                            }
+                            prefetched.insert(result.index, result);
+                        }
+                    };
+                    producer_read += prefetched_file.read_elapsed;
+                    submitter.push_bytes_with_hint(
+                        &prefetched_file.data,
+                        file_format,
+                        |batch| submit_batch(batch),
+                    )?;
+                } else if file_size >= mmap_threshold {
                     let read_started = Instant::now();
-                    let read = file_reader.read(&mut read_buffer)?;
-                    producer_read += read_started.elapsed();
-                    if read == 0 {
-                        break;
+                    let mmap = MmapInput::open(&file.full_path)?;
+                    let mut offset = 0usize;
+                    let len = mmap.len();
+                    while offset < len {
+                        let end = offset.saturating_add(stream_read_buffer_size).min(len);
+                        let bytes = mmap.mapped_slice(offset, end)?;
+                        submitter.push_bytes_with_hint(bytes.as_slice(), file_format, |batch| {
+                            submit_batch(batch)
+                        })?;
+                        offset = end;
                     }
+                    producer_read += read_started.elapsed();
+                } else {
+                    let mut file_reader = fs::File::open(&file.full_path)?;
+                    loop {
+                        let read_started = Instant::now();
+                        let read = file_reader.read(&mut read_buffer)?;
+                        producer_read += read_started.elapsed();
+                        if read == 0 {
+                            break;
+                        }
 
-                    submitter.push_bytes_with_hint(&read_buffer[..read], file_format, |batch| {
-                        submit_batch(batch)
-                    })?;
+                        submitter.push_bytes_with_hint(
+                            &read_buffer[..read],
+                            file_format,
+                            |batch| submit_batch(batch),
+                        )?;
+                    }
+                }
+
+                if let Some(result_rx) = prefetch_result_rx.as_ref() {
+                    loop {
+                        match result_rx.try_recv() {
+                            Ok(result) => {
+                                prefetched.insert(result.index, result);
+                            }
+                            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+                        }
+                    }
+                }
+            }
+
+            drop(prefetch_request_tx);
+            if let Some(prefetch_handle) = prefetch_handle {
+                match prefetch_handle.join() {
+                    Ok(outcome) => outcome?,
+                    Err(payload) => {
+                        let details = if let Some(message) = payload.downcast_ref::<&str>() {
+                            (*message).to_string()
+                        } else if let Some(message) = payload.downcast_ref::<String>() {
+                            message.clone()
+                        } else {
+                            "unknown panic payload".to_string()
+                        };
+                        return Err(crate::OxideError::CompressionError(format!(
+                            "directory prefetch thread panicked: {details}"
+                        )));
+                    }
                 }
             }
 
@@ -1079,23 +1298,23 @@ impl ArchivePipeline {
                 }
             }
 
-            let drained = Self::drain_results_to_writer(
-                &handle,
-                &mut archive_writer,
-                &mut pending_write,
-                &mut next_write_id,
-                &mut output_bytes_written,
-                &mut completed_bytes,
-                &mut first_error,
-                &mut raw_passthrough_blocks,
-                &mut received_count,
-                &mut pending_write_peak,
-                &mut stage_timings.writer,
-                SUBMISSION_DRAIN_BUDGET,
-            );
-            if drained > 0 {
-                progressed = true;
+            let mut drained = 0usize;
+            while drained < SUBMISSION_DRAIN_BUDGET {
+                let Some(result) = handle.recv_timeout(Duration::from_millis(0)) else {
+                    break;
+                };
+                Self::record_result_to_writer_queue(
+                    result,
+                    &writer_tx,
+                    &mut completed_bytes,
+                    &mut first_error,
+                    &mut raw_passthrough_blocks,
+                    &mut writer_queue_peak,
+                );
+                received_count += 1;
+                drained += 1;
             }
+            progressed |= drained > 0;
 
             if !producer_done
                 && submitted_count.saturating_sub(received_count) < max_inflight_blocks
@@ -1146,20 +1365,17 @@ impl ArchivePipeline {
                 let inflight_full =
                     submitted_count.saturating_sub(received_count) >= max_inflight_blocks;
                 let wait_started = Instant::now();
-                Self::recv_result_to_writer(
-                    &handle,
-                    result_wait_timeout,
-                    &mut archive_writer,
-                    &mut pending_write,
-                    &mut next_write_id,
-                    &mut output_bytes_written,
-                    &mut completed_bytes,
-                    &mut first_error,
-                    &mut raw_passthrough_blocks,
-                    &mut received_count,
-                    &mut pending_write_peak,
-                    &mut stage_timings.writer,
-                );
+                if let Some(result) = handle.recv_timeout(result_wait_timeout) {
+                    Self::record_result_to_writer_queue(
+                        result,
+                        &writer_tx,
+                        &mut completed_bytes,
+                        &mut first_error,
+                        &mut raw_passthrough_blocks,
+                        &mut writer_queue_peak,
+                    );
+                    received_count += 1;
+                }
                 let waited = wait_started.elapsed();
                 stage_timings.result_wait += waited;
                 if inflight_full {
@@ -1167,6 +1383,7 @@ impl ArchivePipeline {
                 }
             }
 
+            output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
             Self::emit_archive_progress_if_due(
                 &handle,
                 ArchiveSourceKind::Directory,
@@ -1223,21 +1440,19 @@ impl ArchivePipeline {
 
         while received_count < submitted_count {
             let wait_started = Instant::now();
-            Self::recv_result_to_writer(
-                &handle,
-                result_wait_timeout,
-                &mut archive_writer,
-                &mut pending_write,
-                &mut next_write_id,
-                &mut output_bytes_written,
-                &mut completed_bytes,
-                &mut first_error,
-                &mut raw_passthrough_blocks,
-                &mut received_count,
-                &mut pending_write_peak,
-                &mut stage_timings.writer,
-            );
+            if let Some(result) = handle.recv_timeout(result_wait_timeout) {
+                Self::record_result_to_writer_queue(
+                    result,
+                    &writer_tx,
+                    &mut completed_bytes,
+                    &mut first_error,
+                    &mut raw_passthrough_blocks,
+                    &mut writer_queue_peak,
+                );
+                received_count += 1;
+            }
             stage_timings.result_wait += wait_started.elapsed();
+            output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
             Self::emit_archive_progress_if_due(
                 &handle,
                 ArchiveSourceKind::Directory,
@@ -1257,17 +1472,38 @@ impl ArchivePipeline {
         if let Err(join_error) = handle.join() {
             return Err(join_error);
         }
+
+        drop(writer_tx);
+        let writer_outcome = match writer_handle.join() {
+            Ok(outcome) => outcome,
+            Err(payload) => {
+                let details = if let Some(message) = payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "unknown panic payload".to_string()
+                };
+                Err(crate::OxideError::CompressionError(format!(
+                    "directory writer thread panicked: {details}"
+                )))
+            }
+        };
+
+        let writer_outcome = match writer_outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                return Err(first_error.expect("first error must be set"));
+            }
+        };
+        stage_timings.writer += writer_outcome.writer_time;
+        output_bytes_written = writer_outcome.output_bytes_written;
+        let pending_write_peak = writer_outcome.pending_write_peak;
+
         if let Some(error) = first_error {
             return Err(error);
         }
-        if next_write_id != submitted_count || !pending_write.is_empty() {
-            return Err(crate::OxideError::InvalidFormat(
-                "directory writer has pending blocks after completion",
-            ));
-        }
-
-        let writer = archive_writer.write_footer()?;
-        output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
         let extensions = Self::build_stats_extensions(
             input_bytes_total,
             output_bytes_written,
@@ -1278,6 +1514,7 @@ impl ArchivePipeline {
             max_inflight_blocks,
             max_inflight_bytes,
             pending_write_peak,
+            writer_queue_peak,
             stage_timings,
         );
 
@@ -1294,7 +1531,10 @@ impl ArchivePipeline {
         );
         Self::record_archive_run_telemetry(report.elapsed, stage_timings);
         sink.on_event(TelemetryEvent::ArchiveCompleted(report.clone()));
-        Ok(ArchiveRun { writer, report })
+        Ok(ArchiveRun {
+            writer: writer_outcome.writer,
+            report,
+        })
     }
 
     fn emit_archive_progress_if_due(
@@ -1518,6 +1758,37 @@ impl ArchivePipeline {
         bounded.min(total_blocks.max(1))
     }
 
+    fn record_result_to_writer_queue(
+        result: Result<CompressedBlock>,
+        writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
+        completed_bytes: &mut u64,
+        first_error: &mut Option<crate::OxideError>,
+        raw_passthrough_blocks: &mut u64,
+        writer_queue_peak: &mut usize,
+    ) {
+        match result {
+            Ok(block) => {
+                *completed_bytes = (*completed_bytes).saturating_add(block.original_len);
+                if block.raw_passthrough {
+                    *raw_passthrough_blocks = raw_passthrough_blocks.saturating_add(1);
+                }
+                if first_error.is_some() {
+                    return;
+                }
+                if writer_tx.send(block).is_err() {
+                    first_error.get_or_insert(crate::OxideError::CompressionError(
+                        "directory writer queue closed before completion".to_string(),
+                    ));
+                    return;
+                }
+                *writer_queue_peak = (*writer_queue_peak).max(writer_tx.len());
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+
     fn drain_results_to_writer<W: Write>(
         handle: &WorkerPoolHandle,
         archive_writer: &mut ArchiveWriter<W>,
@@ -1651,6 +1922,7 @@ impl ArchivePipeline {
         max_inflight_blocks: usize,
         max_inflight_bytes: usize,
         pending_write_peak: usize,
+        writer_queue_peak: usize,
         stage_timings: StageTimings,
     ) -> BTreeMap<String, StatValue> {
         let mut extensions = BTreeMap::new();
@@ -1723,6 +1995,10 @@ impl ArchivePipeline {
         extensions.insert(
             "pipeline.pending_write_peak".to_string(),
             StatValue::U64(pending_write_peak as u64),
+        );
+        extensions.insert(
+            "pipeline.writer_queue_peak".to_string(),
+            StatValue::U64(writer_queue_peak as u64),
         );
         extensions.insert(
             "stage.discovery_us".to_string(),
@@ -2007,6 +2283,7 @@ impl ArchivePipeline {
             max_inflight_blocks,
             max_inflight_bytes,
             pending_write_peak,
+            0,
             stage_timings,
         );
         let report = Self::build_archive_report(
