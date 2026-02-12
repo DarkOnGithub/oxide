@@ -1,5 +1,7 @@
 use core::cmp::min;
 use core::fmt;
+use core::mem::size_of;
+use core::ptr;
 
 use crate::{OxideError, Result};
 
@@ -13,9 +15,11 @@ const MIN_MATCH: usize = 2;
 const MAX_MATCH: usize = 273;
 const HASH_LOG: u32 = 16;
 const HASH_SIZE: usize = 1 << HASH_LOG;
-const MAX_CHAIN: usize = 96;
+const MAX_CHAIN: usize = 48;
 const LITERAL_CONTEXT_BITS: usize = 3;
 const LITERAL_CONTEXTS: usize = 1 << LITERAL_CONTEXT_BITS;
+const LOOKAHEAD_THRESHOLD: usize = 24;
+const GOOD_MATCH_BREAK: usize = 96;
 
 const BIT_MODEL_TOTAL: u16 = 1 << 11;
 const BIT_MODEL_INIT: u16 = BIT_MODEL_TOTAL / 2;
@@ -251,7 +255,7 @@ fn tokenize(input: &[u8]) -> Vec<Token> {
 
         if let Some(choice) = best {
             let mut inserted_pos = false;
-            if pos + 1 < input.len() {
+            if choice.len <= LOOKAHEAD_THRESHOLD && pos + 1 < input.len() {
                 insert_position(input, pos, &mut head, &mut prev);
                 inserted_pos = true;
                 let next = best_choice(input, pos + 1, &head, &prev, &reps);
@@ -381,11 +385,27 @@ fn find_best_new_match(
         if dist > WINDOW_SIZE {
             break;
         }
+        if input[cand] != input[pos] || input[cand + 1] != input[pos + 1] {
+            candidate = prev[cand];
+            depth += 1;
+            continue;
+        }
+        if best.len >= MIN_MATCH {
+            let probe = best.len.min(max_len - 1);
+            if input[cand + probe] != input[pos + probe] {
+                candidate = prev[cand];
+                depth += 1;
+                continue;
+            }
+        }
 
         let len = match_len(input, pos, cand, max_len);
         if len > best.len || (len == best.len && dist < best.dist) {
             best = Match { len, dist };
             if len == max_len {
+                break;
+            }
+            if len >= GOOD_MATCH_BREAK {
                 break;
             }
         }
@@ -404,6 +424,35 @@ fn find_best_new_match(
 #[inline]
 fn match_len(input: &[u8], left: usize, right: usize, max_len: usize) -> usize {
     let mut i = 0usize;
+    let word = size_of::<usize>();
+    let left_ptr = unsafe {
+        // SAFETY: callers guarantee `left` is valid for `max_len`.
+        input.as_ptr().add(left)
+    };
+    let right_ptr = unsafe {
+        // SAFETY: callers guarantee `right` is valid for `max_len`.
+        input.as_ptr().add(right)
+    };
+
+    while i + word <= max_len {
+        let lhs = unsafe {
+            // SAFETY: both ranges have at least `word` bytes remaining.
+            ptr::read_unaligned(left_ptr.add(i) as *const usize)
+        };
+        let rhs = unsafe {
+            // SAFETY: both ranges have at least `word` bytes remaining.
+            ptr::read_unaligned(right_ptr.add(i) as *const usize)
+        };
+        if lhs == rhs {
+            i += word;
+            continue;
+        }
+        for j in 0..word {
+            if input[left + i + j] != input[right + i + j] {
+                return i + j;
+            }
+        }
+    }
     while i < max_len && input[left + i] == input[right + i] {
         i += 1;
     }
