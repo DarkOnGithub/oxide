@@ -363,7 +363,7 @@ impl TelemetrySink for ArchiveCliSink<'_> {
             .count();
 
         let line = format!(
-            "\r\x1b[2K[{progress:6.2}%] blocks {}/{} | data {} / {} | rd avg {}/s inst {}/s | wr avg {}/s inst {}/s | ETA {} | pending {} | workers {}/{}",
+            "\r\x1b[2K[{progress:6.2}%] blocks {}/{} | data {} / {} | rd avg {}/s inst {}/s | wr avg {}/s inst {}/s | prep {}/s | comp {}/s | prep+comp {}/s | ETA {} | pending {} | workers {}/{}",
             snapshot.blocks_completed,
             snapshot.blocks_total,
             format_bytes(done),
@@ -372,6 +372,9 @@ impl TelemetrySink for ArchiveCliSink<'_> {
             format_rate(read_instant_bps),
             format_rate(write_avg_bps),
             format_rate(write_instant_bps),
+            format_rate(snapshot.preprocessing_avg_bps),
+            format_rate(snapshot.compression_avg_bps),
+            format_rate(snapshot.preprocessing_compression_avg_bps),
             format_duration(eta),
             snapshot.blocks_pending,
             active_workers,
@@ -591,6 +594,31 @@ fn print_archive_report_summary(
         "  write throughput peak (live): {}/s",
         format_rate(peak_write_bps)
     );
+    if let Some(preprocessing_avg_bps) =
+        extension_f64(&report.extensions, "throughput.preprocessing_avg_bps")
+    {
+        println!(
+            "  preprocessing throughput avg: {}/s",
+            format_rate(preprocessing_avg_bps)
+        );
+    }
+    if let Some(compression_avg_bps) =
+        extension_f64(&report.extensions, "throughput.compression_avg_bps")
+    {
+        println!(
+            "  compression throughput avg: {}/s",
+            format_rate(compression_avg_bps)
+        );
+    }
+    if let Some(preprocessing_compression_avg_bps) = extension_f64(
+        &report.extensions,
+        "throughput.preprocessing_compression_avg_bps",
+    ) {
+        println!(
+            "  preprocessing+compression throughput avg: {}/s",
+            format_rate(preprocessing_compression_avg_bps)
+        );
+    }
     println!(
         "  blocks: {} total (avg block {})",
         report.blocks_total,
@@ -605,6 +633,22 @@ fn print_archive_report_summary(
         println!(
             "  total compression busy time: {}",
             format_duration(Duration::from_micros(compress_busy_us))
+        );
+    }
+    if let Some(preprocessing_busy_us) =
+        extension_u64(&report.extensions, "runtime.preprocessing_busy_us")
+    {
+        println!(
+            "  preprocessing busy time: {}",
+            format_duration(Duration::from_micros(preprocessing_busy_us))
+        );
+    }
+    if let Some(compression_busy_us) =
+        extension_u64(&report.extensions, "runtime.compression_busy_us")
+    {
+        println!(
+            "  compression stage busy time: {}",
+            format_duration(Duration::from_micros(compression_busy_us))
         );
     }
     if let Some(max_inflight_blocks) =
