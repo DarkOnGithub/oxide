@@ -118,6 +118,9 @@ struct WorkerPoolState {
     worker_busy_us: Vec<AtomicU64>,
 }
 
+const IDLE_WAIT_MIN: Duration = Duration::from_micros(50);
+const IDLE_WAIT_MAX: Duration = Duration::from_micros(500);
+
 impl WorkerPoolState {
     fn new(
         queue: Arc<WorkStealingQueue<Batch>>,
@@ -199,6 +202,7 @@ impl WorkerPoolHandle {
     pub fn shutdown(&self) {
         self.state.accepting.store(false, Ordering::Release);
         self.state.shutdown_requested.store(true, Ordering::Release);
+        self.state.queue.notify_all_waiters();
     }
 
     /// Total submitted task count.
@@ -365,9 +369,11 @@ fn run_worker_loop<F>(
     let worker_started_us = state.started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
     state.worker_started_offsets_us[worker.id()]
         .store(worker_started_us.saturating_add(1), Ordering::Release);
+    let mut idle_wait = IDLE_WAIT_MIN;
 
     loop {
         if let Some(batch) = worker.steal() {
+            idle_wait = IDLE_WAIT_MIN;
             state
                 .telemetry
                 .on_queue_depth(worker.id(), worker.queue_depth());
@@ -421,7 +427,8 @@ fn run_worker_loop<F>(
             break;
         }
 
-        thread::sleep(Duration::from_millis(1));
+        worker.wait_for_work(idle_wait);
+        idle_wait = (idle_wait.saturating_mul(2)).min(IDLE_WAIT_MAX);
     }
 
     let worker_stopped_us = state.started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;

@@ -44,6 +44,12 @@ pub struct PipelinePerformanceOptions {
     pub preserve_directory_format_boundaries: bool,
     /// Timeout used when waiting for worker results.
     pub result_wait_timeout: Duration,
+    /// Number of directory producer threads (currently supports 1..=2).
+    pub producer_threads: usize,
+    /// File-size threshold above which directory input uses mmap fast-path.
+    pub directory_mmap_threshold_bytes: usize,
+    /// Capacity of the writer result queue (in blocks).
+    pub writer_result_queue_blocks: usize,
 }
 
 impl Default for PipelinePerformanceOptions {
@@ -59,6 +65,9 @@ impl Default for PipelinePerformanceOptions {
             directory_stream_read_buffer_size: 16 * 1024 * 1024,
             preserve_directory_format_boundaries: false,
             result_wait_timeout: Duration::from_millis(5),
+            producer_threads: 1,
+            directory_mmap_threshold_bytes: 8 * 1024 * 1024,
+            writer_result_queue_blocks: 1024,
         }
     }
 }

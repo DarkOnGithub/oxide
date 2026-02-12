@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker as DequeWorker};
 
@@ -9,6 +10,8 @@ pub struct WorkStealingQueue<T> {
     local_workers: Vec<Mutex<Option<DequeWorker<T>>>>,
     stealers: Vec<Stealer<T>>,
     pending: AtomicUsize,
+    wait_mutex: Mutex<()>,
+    wait_condvar: Condvar,
 }
 
 impl<T> WorkStealingQueue<T> {
@@ -30,6 +33,8 @@ impl<T> WorkStealingQueue<T> {
             local_workers,
             stealers,
             pending: AtomicUsize::new(0),
+            wait_mutex: Mutex::new(()),
+            wait_condvar: Condvar::new(),
         }
     }
 
@@ -52,6 +57,29 @@ impl<T> WorkStealingQueue<T> {
     pub fn submit(&self, item: T) {
         self.global.push(item);
         self.pending.fetch_add(1, Ordering::AcqRel);
+        self.wait_condvar.notify_one();
+    }
+
+    /// Waits for new work to become available, or times out.
+    pub fn wait_for_work(&self, timeout: Duration) {
+        if self.pending() > 0 {
+            return;
+        }
+
+        let guard = self.wait_mutex.lock().expect("wait mutex poisoned");
+        if self.pending() > 0 {
+            return;
+        }
+
+        let _ = self
+            .wait_condvar
+            .wait_timeout(guard, timeout)
+            .expect("wait mutex poisoned");
+    }
+
+    /// Wakes all workers that may be waiting for new work.
+    pub fn notify_all_waiters(&self) {
+        self.wait_condvar.notify_all();
     }
 
     /// Creates a worker handle for the given worker id.
@@ -107,6 +135,7 @@ impl<T> WorkStealingWorker<T> {
     pub fn push_local(&self, item: T) {
         self.local.push(item);
         self.queue.pending.fetch_add(1, Ordering::AcqRel);
+        self.queue.wait_condvar.notify_one();
     }
 
     /// Approximate local queue depth.
@@ -134,6 +163,11 @@ impl<T> WorkStealingWorker<T> {
         let item = self.steal_from_others()?;
         self.queue.decrement_pending();
         Some(item)
+    }
+
+    /// Waits for work to become available for this worker.
+    pub fn wait_for_work(&self, timeout: Duration) {
+        self.queue.wait_for_work(timeout);
     }
 
     fn steal_from_global(&self) -> Option<T> {
