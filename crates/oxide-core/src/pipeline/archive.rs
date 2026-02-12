@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, bounded};
 
 use crate::buffer::BufferPool;
 use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerPoolHandle, WorkerRuntimeSnapshot};
@@ -64,7 +64,7 @@ struct BlockSizeDecision {
 struct BlockSizeScore {
     block_size: usize,
     throughput_bps: f64,
-    compressed_bytes: usize,
+    output_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -644,6 +644,10 @@ impl ArchivePipeline {
         let mut stage_timings = ExtractStageTimings::default();
         let mut archive_bytes_total = GLOBAL_HEADER_SIZE as u64 + FOOTER_SIZE as u64;
         let mut submitted = 0usize;
+        let mut received = 0usize;
+        let mut first_error: Option<crate::OxideError> = None;
+        let mut decoded_bytes_completed = 0u64;
+        let mut decoded_blocks = vec![None; block_capacity];
         let mut last_emit_at = Instant::now();
         let emit_every = options.progress_interval.max(Duration::from_millis(100));
         for entry in archive.iter_blocks() {
@@ -654,6 +658,31 @@ impl ArchivePipeline {
             archive_bytes_total = archive_bytes_total
                 .saturating_add(BLOCK_HEADER_SIZE as u64)
                 .saturating_add(block_data.len() as u64);
+
+            while submitted.saturating_sub(received) >= queue_capacity {
+                Self::receive_decode_result(
+                    &result_rx,
+                    &mut stage_timings,
+                    &mut decoded_blocks,
+                    &runtime_state,
+                    &mut decoded_bytes_completed,
+                    &mut received,
+                    &mut first_error,
+                )?;
+                Self::emit_extract_progress_if_due(
+                    source_kind,
+                    started_at,
+                    archive_bytes_total,
+                    decoded_bytes_completed,
+                    block_capacity as u32,
+                    received as u32,
+                    runtime_state.snapshot(),
+                    emit_every,
+                    &mut last_emit_at,
+                    false,
+                    sink,
+                );
+            }
 
             let submit_started = Instant::now();
             task_tx
@@ -670,20 +699,19 @@ impl ArchivePipeline {
             stage_timings.decode_submit += submit_started.elapsed();
             submitted += 1;
             runtime_state.record_submission();
-
-            if last_emit_at.elapsed() >= emit_every {
-                Self::emit_extract_progress(
-                    source_kind,
-                    started_at,
-                    archive_bytes_total,
-                    0,
-                    block_capacity as u32,
-                    submitted as u32,
-                    runtime_state.snapshot(),
-                    sink,
-                );
-                last_emit_at = Instant::now();
-            }
+            Self::emit_extract_progress_if_due(
+                source_kind,
+                started_at,
+                archive_bytes_total,
+                decoded_bytes_completed,
+                block_capacity as u32,
+                received as u32,
+                runtime_state.snapshot(),
+                emit_every,
+                &mut last_emit_at,
+                false,
+                sink,
+            );
         }
         drop(task_tx);
 
@@ -693,56 +721,29 @@ impl ArchivePipeline {
             ));
         }
 
-        let mut decoded_blocks = vec![None; submitted];
-        let mut received = 0usize;
-        let mut first_error: Option<crate::OxideError> = None;
-        let mut decoded_bytes_completed = 0u64;
         while received < submitted {
-            let wait_started = Instant::now();
-            let (index, block) = result_rx.recv().map_err(|_| {
-                crate::OxideError::CompressionError(
-                    "decode result channel closed before completion".to_string(),
-                )
-            })?;
-            stage_timings.decode_wait += wait_started.elapsed();
-            if index >= decoded_blocks.len() {
-                return Err(crate::OxideError::InvalidFormat(
-                    "decode result index out of bounds",
-                ));
-            }
-            match block {
-                Ok(bytes) => {
-                    if decoded_blocks[index].is_some() {
-                        return Err(crate::OxideError::InvalidFormat(
-                            "duplicate decode result index",
-                        ));
-                    }
-                    decoded_bytes_completed =
-                        decoded_bytes_completed.saturating_add(bytes.len() as u64);
-                    decoded_blocks[index] = Some(bytes);
-                }
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
-            }
-            received += 1;
-            runtime_state.record_completion();
-
-            if last_emit_at.elapsed() >= emit_every {
-                Self::emit_extract_progress(
-                    source_kind,
-                    started_at,
-                    archive_bytes_total,
-                    decoded_bytes_completed,
-                    block_capacity as u32,
-                    received as u32,
-                    runtime_state.snapshot(),
-                    sink,
-                );
-                last_emit_at = Instant::now();
-            }
+            Self::receive_decode_result(
+                &result_rx,
+                &mut stage_timings,
+                &mut decoded_blocks,
+                &runtime_state,
+                &mut decoded_bytes_completed,
+                &mut received,
+                &mut first_error,
+            )?;
+            Self::emit_extract_progress_if_due(
+                source_kind,
+                started_at,
+                archive_bytes_total,
+                decoded_bytes_completed,
+                block_capacity as u32,
+                received as u32,
+                runtime_state.snapshot(),
+                emit_every,
+                &mut last_emit_at,
+                false,
+                sink,
+            );
         }
 
         let workers = Self::join_decode_workers(worker_handles)?;
@@ -781,6 +782,48 @@ impl ArchivePipeline {
             workers,
             stage_timings,
         })
+    }
+
+    fn receive_decode_result(
+        result_rx: &Receiver<(usize, Result<Vec<u8>>)>,
+        stage_timings: &mut ExtractStageTimings,
+        decoded_blocks: &mut [Option<Vec<u8>>],
+        runtime_state: &DecodeRuntimeState,
+        decoded_bytes_completed: &mut u64,
+        received: &mut usize,
+        first_error: &mut Option<crate::OxideError>,
+    ) -> Result<()> {
+        let wait_started = Instant::now();
+        let (index, block) = result_rx.recv().map_err(|_| {
+            crate::OxideError::CompressionError(
+                "decode result channel closed before completion".to_string(),
+            )
+        })?;
+        stage_timings.decode_wait += wait_started.elapsed();
+        if index >= decoded_blocks.len() {
+            return Err(crate::OxideError::InvalidFormat(
+                "decode result index out of bounds",
+            ));
+        }
+        match block {
+            Ok(bytes) => {
+                if decoded_blocks[index].is_some() {
+                    return Err(crate::OxideError::InvalidFormat(
+                        "duplicate decode result index",
+                    ));
+                }
+                *decoded_bytes_completed = decoded_bytes_completed.saturating_add(bytes.len() as u64);
+                decoded_blocks[index] = Some(bytes);
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    *first_error = Some(error);
+                }
+            }
+        }
+        *received += 1;
+        runtime_state.record_completion();
+        Ok(())
     }
 
     fn join_decode_workers(
@@ -1586,6 +1629,35 @@ impl ArchivePipeline {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn emit_extract_progress_if_due(
+        source_kind: ArchiveSourceKind,
+        started_at: Instant,
+        archive_bytes_completed: u64,
+        decoded_bytes_completed: u64,
+        blocks_total: u32,
+        blocks_completed: u32,
+        runtime: PoolRuntimeSnapshot,
+        emit_every: Duration,
+        last_emit_at: &mut Instant,
+        force: bool,
+        sink: &mut dyn TelemetrySink,
+    ) {
+        if force || last_emit_at.elapsed() >= emit_every {
+            Self::emit_extract_progress(
+                source_kind,
+                started_at,
+                archive_bytes_completed,
+                decoded_bytes_completed,
+                blocks_total,
+                blocks_completed,
+                runtime,
+                sink,
+            );
+            *last_emit_at = Instant::now();
+        }
+    }
+
     fn emit_extract_progress(
         source_kind: ArchiveSourceKind,
         started_at: Instant,
@@ -2314,12 +2386,8 @@ impl ArchivePipeline {
         let pre_proc = PreProcessingStrategy::None;
         let source = batch.data();
         let compressed = crate::compression::apply_compression(source, compression)?;
-        let raw_passthrough = raw_fallback_enabled && compressed.len() >= source.len();
-        let output = if raw_passthrough {
-            source
-        } else {
-            compressed.as_slice()
-        };
+        let (output, raw_passthrough) =
+            Self::select_stored_payload(source, compressed.as_slice(), raw_fallback_enabled);
 
         let mut scratch = pool.acquire();
         scratch.extend_from_slice(output);
@@ -2335,6 +2403,17 @@ impl ArchivePipeline {
             CompressionMeta::new(compression, compression_preset, raw_passthrough),
             batch.len() as u64,
         ))
+    }
+
+    #[inline]
+    fn select_stored_payload<'a>(
+        source: &'a [u8],
+        compressed: &'a [u8],
+        raw_fallback_enabled: bool,
+    ) -> (&'a [u8], bool) {
+        let raw_passthrough = raw_fallback_enabled && compressed.len() >= source.len();
+        let payload = if raw_passthrough { source } else { compressed };
+        (payload, raw_passthrough)
     }
 
     fn choose_block_size_for_file(
@@ -2405,7 +2484,7 @@ impl ArchivePipeline {
                 .throughput_bps
                 .partial_cmp(&left.throughput_bps)
                 .unwrap_or(Ordering::Equal)
-                .then_with(|| left.compressed_bytes.cmp(&right.compressed_bytes))
+                .then_with(|| left.output_bytes.cmp(&right.output_bytes))
                 .then_with(|| left.block_size.cmp(&right.block_size))
         });
 
@@ -2423,17 +2502,22 @@ impl ArchivePipeline {
 
     fn score_block_size(&self, sample: &[u8], block_size: usize) -> Result<BlockSizeScore> {
         let started = Instant::now();
-        let mut compressed_bytes = 0usize;
+        let mut output_bytes = 0usize;
         let chunk_size = block_size.max(1);
         for chunk in sample.chunks(chunk_size) {
             let compressed = crate::compression::apply_compression(chunk, self.compression_algo)?;
-            compressed_bytes = compressed_bytes.saturating_add(compressed.len());
+            let (stored_payload, _raw_passthrough) = Self::select_stored_payload(
+                chunk,
+                compressed.as_slice(),
+                self.performance.raw_fallback_enabled,
+            );
+            output_bytes = output_bytes.saturating_add(stored_payload.len());
         }
         let elapsed = started.elapsed().as_secs_f64().max(1e-9);
         Ok(BlockSizeScore {
             block_size: chunk_size,
             throughput_bps: sample.len() as f64 / elapsed,
-            compressed_bytes,
+            output_bytes,
         })
     }
 
@@ -2493,6 +2577,27 @@ impl ArchivePipeline {
 mod tests {
     use super::*;
 
+    fn pseudo_random_bytes(len: usize) -> Vec<u8> {
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            out.push((state >> 56) as u8);
+        }
+        out
+    }
+
+    fn build_pipeline_for_score(raw_fallback_enabled: bool) -> ArchivePipeline {
+        let mut config = ArchivePipelineConfig::new(
+            8 * 1024,
+            1,
+            Arc::new(BufferPool::new(16 * 1024, 16)),
+            CompressionAlgo::Lz4,
+        );
+        config.performance.raw_fallback_enabled = raw_fallback_enabled;
+        ArchivePipeline::new(config)
+    }
+
     #[test]
     fn inflight_window_is_limited_by_byte_budget() {
         let mut performance = PipelinePerformanceOptions::default();
@@ -2513,5 +2618,38 @@ mod tests {
         let inflight = ArchivePipeline::max_inflight_blocks(7, 16, 256 * 1024, &performance);
 
         assert_eq!(inflight, 7);
+    }
+
+    #[test]
+    fn select_stored_payload_uses_raw_when_compression_is_not_smaller() {
+        let source = [1u8, 2, 3, 4];
+        let compressed_equal = [9u8, 9, 9, 9];
+        let compressed_larger = [9u8, 9, 9, 9, 9];
+
+        let (stored_equal, raw_equal) =
+            ArchivePipeline::select_stored_payload(&source, &compressed_equal, true);
+        assert!(raw_equal);
+        assert_eq!(stored_equal, source.as_slice());
+
+        let (stored_larger, raw_larger) =
+            ArchivePipeline::select_stored_payload(&source, &compressed_larger, true);
+        assert!(raw_larger);
+        assert_eq!(stored_larger, source.as_slice());
+    }
+
+    #[test]
+    fn score_block_size_respects_raw_fallback_setting() {
+        let sample = pseudo_random_bytes(64 * 1024);
+
+        let score_with_fallback = build_pipeline_for_score(true)
+            .score_block_size(&sample, 8 * 1024)
+            .expect("score with fallback");
+        let score_without_fallback = build_pipeline_for_score(false)
+            .score_block_size(&sample, 8 * 1024)
+            .expect("score without fallback");
+
+        assert!(score_without_fallback.output_bytes > sample.len());
+        assert!(score_with_fallback.output_bytes <= sample.len());
+        assert!(score_with_fallback.output_bytes <= score_without_fallback.output_bytes);
     }
 }
