@@ -784,15 +784,19 @@ fn build_live_metric_cards(
                 format_rate(app.archive_live.write_inst_bps)
             )),
             Line::from(format!(
-                "prep avg  {}/s",
+                "prep core {}/s",
                 format_rate(app.archive_live.preprocessing_avg_bps)
             )),
             Line::from(format!(
-                "comp avg  {}/s",
+                "comp core {}/s",
                 format_rate(app.archive_live.compression_avg_bps)
             )),
             Line::from(format!(
-                "prep+comp {}/s",
+                "comp wall {}/s",
+                format_rate(app.archive_live.compression_wall_avg_bps)
+            )),
+            Line::from(format!(
+                "prep+comp core {}/s",
                 format_rate(app.archive_live.preprocessing_compression_avg_bps)
             )),
         ];

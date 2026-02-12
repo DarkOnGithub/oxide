@@ -473,6 +473,9 @@ fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn st
     assert!(final_snapshot.preprocessing_avg_bps >= 0.0);
     assert!(final_snapshot.compression_avg_bps >= 0.0);
     assert!(final_snapshot.preprocessing_compression_avg_bps >= 0.0);
+    assert!(final_snapshot.preprocessing_wall_avg_bps >= 0.0);
+    assert!(final_snapshot.compression_wall_avg_bps >= 0.0);
+    assert!(final_snapshot.preprocessing_compression_wall_avg_bps >= 0.0);
 
     let report = &run.report;
     assert_eq!(report.blocks_total, final_snapshot.blocks_total);
@@ -513,6 +516,22 @@ fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn st
         report
             .extensions
             .get("throughput.preprocessing_compression_avg_bps"),
+        Some(ReportValue::F64(_))
+    ));
+    assert!(matches!(
+        report
+            .extensions
+            .get("throughput.preprocessing_wall_avg_bps"),
+        Some(ReportValue::F64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("throughput.compression_wall_avg_bps"),
+        Some(ReportValue::F64(_))
+    ));
+    assert!(matches!(
+        report
+            .extensions
+            .get("throughput.preprocessing_compression_wall_avg_bps"),
         Some(ReportValue::F64(_))
     ));
     assert!(matches!(
