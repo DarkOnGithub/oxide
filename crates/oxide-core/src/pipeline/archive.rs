@@ -78,6 +78,73 @@ struct StageTimings {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+struct ProcessingThroughputSnapshot {
+    preprocessing_input_bytes: u64,
+    compression_input_bytes: u64,
+    preprocessing_elapsed: Duration,
+    compression_elapsed: Duration,
+}
+
+impl ProcessingThroughputSnapshot {
+    fn preprocessing_avg_bps(self) -> f64 {
+        throughput_bps(self.preprocessing_input_bytes, self.preprocessing_elapsed)
+    }
+
+    fn compression_avg_bps(self) -> f64 {
+        throughput_bps(self.compression_input_bytes, self.compression_elapsed)
+    }
+
+    fn preprocessing_compression_avg_bps(self) -> f64 {
+        throughput_bps(
+            self.preprocessing_input_bytes,
+            self.preprocessing_elapsed + self.compression_elapsed,
+        )
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProcessingThroughputTotals {
+    preprocessing_input_bytes: AtomicU64,
+    compression_input_bytes: AtomicU64,
+    preprocessing_elapsed_us: AtomicU64,
+    compression_elapsed_us: AtomicU64,
+}
+
+impl ProcessingThroughputTotals {
+    fn record(
+        &self,
+        preprocessing_input_bytes: u64,
+        preprocessing_elapsed: Duration,
+        compression_input_bytes: u64,
+        compression_elapsed: Duration,
+    ) {
+        self.preprocessing_input_bytes
+            .fetch_add(preprocessing_input_bytes, AtomicOrdering::AcqRel);
+        self.compression_input_bytes
+            .fetch_add(compression_input_bytes, AtomicOrdering::AcqRel);
+        self.preprocessing_elapsed_us.fetch_add(
+            duration_to_us(preprocessing_elapsed),
+            AtomicOrdering::AcqRel,
+        );
+        self.compression_elapsed_us
+            .fetch_add(duration_to_us(compression_elapsed), AtomicOrdering::AcqRel);
+    }
+
+    fn snapshot(&self) -> ProcessingThroughputSnapshot {
+        ProcessingThroughputSnapshot {
+            preprocessing_input_bytes: self.preprocessing_input_bytes.load(AtomicOrdering::Acquire),
+            compression_input_bytes: self.compression_input_bytes.load(AtomicOrdering::Acquire),
+            preprocessing_elapsed: Duration::from_micros(
+                self.preprocessing_elapsed_us.load(AtomicOrdering::Acquire),
+            ),
+            compression_elapsed: Duration::from_micros(
+                self.compression_elapsed_us.load(AtomicOrdering::Acquire),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 struct ExtractStageTimings {
     archive_read: Duration,
     decode_submit: Duration,
@@ -248,6 +315,16 @@ impl DecodeRuntimeState {
 #[inline]
 fn duration_to_us(duration: Duration) -> u64 {
     duration.as_micros().min(u64::MAX as u128) as u64
+}
+
+#[inline]
+fn throughput_bps(bytes: u64, elapsed: Duration) -> f64 {
+    let secs = elapsed.as_secs_f64();
+    if bytes == 0 || secs <= 0.0 || !secs.is_finite() {
+        0.0
+    } else {
+        bytes as f64 / secs
+    }
 }
 
 struct NoopTelemetrySink;
@@ -812,7 +889,8 @@ impl ArchivePipeline {
                         "duplicate decode result index",
                     ));
                 }
-                *decoded_bytes_completed = decoded_bytes_completed.saturating_add(bytes.len() as u64);
+                *decoded_bytes_completed =
+                    decoded_bytes_completed.saturating_add(bytes.len() as u64);
                 decoded_blocks[index] = Some(bytes);
             }
             Err(error) => {
@@ -1007,8 +1085,10 @@ impl ArchivePipeline {
             Arc::clone(&self.buffer_pool),
             self.compression_algo,
         );
+        let processing_totals = Arc::new(ProcessingThroughputTotals::default());
         let compression_preset = self.performance.compression_preset;
         let raw_fallback_enabled = self.performance.raw_fallback_enabled;
+        let worker_processing_totals = Arc::clone(&processing_totals);
         let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression| {
             Self::process_batch(
                 batch,
@@ -1016,6 +1096,7 @@ impl ArchivePipeline {
                 compression,
                 compression_preset,
                 raw_fallback_enabled,
+                worker_processing_totals.as_ref(),
             )
         });
 
@@ -1398,6 +1479,7 @@ impl ArchivePipeline {
                         emit_every,
                         &mut last_emit_at,
                         true,
+                        processing_totals.as_ref(),
                         sink,
                     );
                 }
@@ -1438,6 +1520,7 @@ impl ArchivePipeline {
                 emit_every,
                 &mut last_emit_at,
                 false,
+                processing_totals.as_ref(),
                 sink,
             );
         }
@@ -1507,6 +1590,7 @@ impl ArchivePipeline {
                 emit_every,
                 &mut last_emit_at,
                 options.emit_final_progress && received_count == submitted_count,
+                processing_totals.as_ref(),
                 sink,
             );
         }
@@ -1547,6 +1631,7 @@ impl ArchivePipeline {
         if let Some(error) = first_error {
             return Err(error);
         }
+        let processing_snapshot = processing_totals.snapshot();
         let extensions = Self::build_stats_extensions(
             input_bytes_total,
             output_bytes_written,
@@ -1559,6 +1644,7 @@ impl ArchivePipeline {
             pending_write_peak,
             writer_queue_peak,
             stage_timings,
+            processing_snapshot,
         );
 
         let report = Self::build_archive_report(
@@ -1591,10 +1677,12 @@ impl ArchivePipeline {
         emit_every: Duration,
         last_emit_at: &mut Instant,
         force: bool,
+        processing_totals: &ProcessingThroughputTotals,
         sink: &mut dyn TelemetrySink,
     ) {
         if force || last_emit_at.elapsed() >= emit_every {
             let runtime = handle.runtime_snapshot();
+            let processing = processing_totals.snapshot();
             let elapsed = started_at.elapsed();
             let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
             let input_done = input_bytes_completed.min(input_bytes_total);
@@ -1618,6 +1706,9 @@ impl ArchivePipeline {
                 output_bytes_completed,
                 read_avg_bps,
                 write_avg_bps,
+                preprocessing_avg_bps: processing.preprocessing_avg_bps(),
+                compression_avg_bps: processing.compression_avg_bps(),
+                preprocessing_compression_avg_bps: processing.preprocessing_compression_avg_bps(),
                 output_input_ratio,
                 compression_ratio,
                 blocks_total,
@@ -1996,6 +2087,7 @@ impl ArchivePipeline {
         pending_write_peak: usize,
         writer_queue_peak: usize,
         stage_timings: StageTimings,
+        processing_snapshot: ProcessingThroughputSnapshot,
     ) -> BTreeMap<String, StatValue> {
         let mut extensions = BTreeMap::new();
         let compress_busy_us = runtime
@@ -2004,6 +2096,12 @@ impl ArchivePipeline {
             .map(|worker| worker.busy.as_micros())
             .sum::<u128>()
             .min(u64::MAX as u128) as u64;
+        let preprocessing_busy_us = duration_to_us(processing_snapshot.preprocessing_elapsed);
+        let compression_busy_us = duration_to_us(processing_snapshot.compression_elapsed);
+        let preprocessing_avg_bps = processing_snapshot.preprocessing_avg_bps();
+        let compression_avg_bps = processing_snapshot.compression_avg_bps();
+        let preprocessing_compression_avg_bps =
+            processing_snapshot.preprocessing_compression_avg_bps();
         let elapsed_us = runtime.elapsed.as_micros().max(1).min(u64::MAX as u128) as u64;
         let effective_cores = compress_busy_us as f64 / elapsed_us as f64;
 
@@ -2029,8 +2127,36 @@ impl ArchivePipeline {
             StatValue::U64(compress_busy_us),
         );
         extensions.insert(
+            "runtime.preprocessing_busy_us".to_string(),
+            StatValue::U64(preprocessing_busy_us),
+        );
+        extensions.insert(
+            "runtime.compression_busy_us".to_string(),
+            StatValue::U64(compression_busy_us),
+        );
+        extensions.insert(
+            "runtime.preprocessing_input_bytes".to_string(),
+            StatValue::U64(processing_snapshot.preprocessing_input_bytes),
+        );
+        extensions.insert(
+            "runtime.compression_input_bytes".to_string(),
+            StatValue::U64(processing_snapshot.compression_input_bytes),
+        );
+        extensions.insert(
             "runtime.effective_cores".to_string(),
             StatValue::F64(effective_cores),
+        );
+        extensions.insert(
+            "throughput.preprocessing_avg_bps".to_string(),
+            StatValue::F64(preprocessing_avg_bps),
+        );
+        extensions.insert(
+            "throughput.compression_avg_bps".to_string(),
+            StatValue::F64(compression_avg_bps),
+        );
+        extensions.insert(
+            "throughput.preprocessing_compression_avg_bps".to_string(),
+            StatValue::F64(preprocessing_compression_avg_bps),
         );
         extensions.insert(
             "tuning.block_size".to_string(),
@@ -2210,9 +2336,11 @@ impl ArchivePipeline {
             Arc::clone(&self.buffer_pool),
             self.compression_algo,
         );
+        let processing_totals = Arc::new(ProcessingThroughputTotals::default());
 
         let compression_preset = self.performance.compression_preset;
         let raw_fallback_enabled = self.performance.raw_fallback_enabled;
+        let worker_processing_totals = Arc::clone(&processing_totals);
         let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression| {
             Self::process_batch(
                 batch,
@@ -2220,6 +2348,7 @@ impl ArchivePipeline {
                 compression,
                 compression_preset,
                 raw_fallback_enabled,
+                worker_processing_totals.as_ref(),
             )
         });
 
@@ -2291,6 +2420,7 @@ impl ArchivePipeline {
                         emit_every,
                         &mut last_emit_at,
                         true,
+                        processing_totals.as_ref(),
                         sink,
                     );
                 }
@@ -2326,6 +2456,7 @@ impl ArchivePipeline {
                 emit_every,
                 &mut last_emit_at,
                 false,
+                processing_totals.as_ref(),
                 sink,
             );
         }
@@ -2345,6 +2476,7 @@ impl ArchivePipeline {
 
         let writer = archive_writer.write_footer()?;
         output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
+        let processing_snapshot = processing_totals.snapshot();
         let extensions = Self::build_stats_extensions(
             input_bytes_total,
             output_bytes_written,
@@ -2357,6 +2489,7 @@ impl ArchivePipeline {
             pending_write_peak,
             0,
             stage_timings,
+            processing_snapshot,
         );
         let report = Self::build_archive_report(
             source_kind,
@@ -2380,14 +2513,40 @@ impl ArchivePipeline {
         compression: CompressionAlgo,
         compression_preset: CompressionPreset,
         raw_fallback_enabled: bool,
+        processing_totals: &ProcessingThroughputTotals,
     ) -> Result<CompressedBlock> {
         // High-performance mode currently bypasses preprocessing. Transform stages can be
         // re-enabled later without changing on-disk block metadata shape.
         let pre_proc = PreProcessingStrategy::None;
         let source = batch.data();
-        let compressed = crate::compression::apply_compression(source, compression)?;
-        let (output, raw_passthrough) =
-            Self::select_stored_payload(source, compressed.as_slice(), raw_fallback_enabled);
+        let (preprocessed, preprocessing_elapsed) =
+            if matches!(pre_proc, PreProcessingStrategy::None) {
+                (None, Duration::ZERO)
+            } else {
+                let preprocessing_started = Instant::now();
+                (
+                    Some(crate::preprocessing::apply_preprocessing(
+                        source, &pre_proc,
+                    )?),
+                    preprocessing_started.elapsed(),
+                )
+            };
+        let compression_input = preprocessed.as_deref().unwrap_or(source);
+
+        let compression_started = Instant::now();
+        let compressed = crate::compression::apply_compression(compression_input, compression)?;
+        let compression_elapsed = compression_started.elapsed();
+        processing_totals.record(
+            source.len() as u64,
+            preprocessing_elapsed,
+            compression_input.len() as u64,
+            compression_elapsed,
+        );
+        let (output, raw_passthrough) = Self::select_stored_payload(
+            compression_input,
+            compressed.as_slice(),
+            raw_fallback_enabled,
+        );
 
         let mut scratch = pool.acquire();
         scratch.extend_from_slice(output);
