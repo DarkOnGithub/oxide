@@ -470,6 +470,9 @@ fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn st
 
     let final_snapshot = sink.snapshots.last().expect("missing final snapshot");
     assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
+    assert!(final_snapshot.preprocessing_avg_bps >= 0.0);
+    assert!(final_snapshot.compression_avg_bps >= 0.0);
+    assert!(final_snapshot.preprocessing_compression_avg_bps >= 0.0);
 
     let report = &run.report;
     assert_eq!(report.blocks_total, final_snapshot.blocks_total);
@@ -497,6 +500,20 @@ fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn st
     assert!(matches!(
         report.extensions.get("stage.writer_us"),
         Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("throughput.preprocessing_avg_bps"),
+        Some(ReportValue::F64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("throughput.compression_avg_bps"),
+        Some(ReportValue::F64(_))
+    ));
+    assert!(matches!(
+        report
+            .extensions
+            .get("throughput.preprocessing_compression_avg_bps"),
+        Some(ReportValue::F64(_))
     ));
     assert!(matches!(
         report.extensions.get("archive.output_input_ratio"),
