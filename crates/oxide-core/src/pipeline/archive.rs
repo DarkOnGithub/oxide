@@ -64,7 +64,7 @@ struct BlockSizeDecision {
 struct BlockSizeScore {
     block_size: usize,
     throughput_bps: f64,
-    compressed_bytes: usize,
+    output_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2386,12 +2386,8 @@ impl ArchivePipeline {
         let pre_proc = PreProcessingStrategy::None;
         let source = batch.data();
         let compressed = crate::compression::apply_compression(source, compression)?;
-        let raw_passthrough = raw_fallback_enabled && compressed.len() >= source.len();
-        let output = if raw_passthrough {
-            source
-        } else {
-            compressed.as_slice()
-        };
+        let (output, raw_passthrough) =
+            Self::select_stored_payload(source, compressed.as_slice(), raw_fallback_enabled);
 
         let mut scratch = pool.acquire();
         scratch.extend_from_slice(output);
@@ -2407,6 +2403,17 @@ impl ArchivePipeline {
             CompressionMeta::new(compression, compression_preset, raw_passthrough),
             batch.len() as u64,
         ))
+    }
+
+    #[inline]
+    fn select_stored_payload<'a>(
+        source: &'a [u8],
+        compressed: &'a [u8],
+        raw_fallback_enabled: bool,
+    ) -> (&'a [u8], bool) {
+        let raw_passthrough = raw_fallback_enabled && compressed.len() >= source.len();
+        let payload = if raw_passthrough { source } else { compressed };
+        (payload, raw_passthrough)
     }
 
     fn choose_block_size_for_file(
@@ -2477,7 +2484,7 @@ impl ArchivePipeline {
                 .throughput_bps
                 .partial_cmp(&left.throughput_bps)
                 .unwrap_or(Ordering::Equal)
-                .then_with(|| left.compressed_bytes.cmp(&right.compressed_bytes))
+                .then_with(|| left.output_bytes.cmp(&right.output_bytes))
                 .then_with(|| left.block_size.cmp(&right.block_size))
         });
 
@@ -2495,17 +2502,22 @@ impl ArchivePipeline {
 
     fn score_block_size(&self, sample: &[u8], block_size: usize) -> Result<BlockSizeScore> {
         let started = Instant::now();
-        let mut compressed_bytes = 0usize;
+        let mut output_bytes = 0usize;
         let chunk_size = block_size.max(1);
         for chunk in sample.chunks(chunk_size) {
             let compressed = crate::compression::apply_compression(chunk, self.compression_algo)?;
-            compressed_bytes = compressed_bytes.saturating_add(compressed.len());
+            let (stored_payload, _raw_passthrough) = Self::select_stored_payload(
+                chunk,
+                compressed.as_slice(),
+                self.performance.raw_fallback_enabled,
+            );
+            output_bytes = output_bytes.saturating_add(stored_payload.len());
         }
         let elapsed = started.elapsed().as_secs_f64().max(1e-9);
         Ok(BlockSizeScore {
             block_size: chunk_size,
             throughput_bps: sample.len() as f64 / elapsed,
-            compressed_bytes,
+            output_bytes,
         })
     }
 
@@ -2565,6 +2577,27 @@ impl ArchivePipeline {
 mod tests {
     use super::*;
 
+    fn pseudo_random_bytes(len: usize) -> Vec<u8> {
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            out.push((state >> 56) as u8);
+        }
+        out
+    }
+
+    fn build_pipeline_for_score(raw_fallback_enabled: bool) -> ArchivePipeline {
+        let mut config = ArchivePipelineConfig::new(
+            8 * 1024,
+            1,
+            Arc::new(BufferPool::new(16 * 1024, 16)),
+            CompressionAlgo::Lz4,
+        );
+        config.performance.raw_fallback_enabled = raw_fallback_enabled;
+        ArchivePipeline::new(config)
+    }
+
     #[test]
     fn inflight_window_is_limited_by_byte_budget() {
         let mut performance = PipelinePerformanceOptions::default();
@@ -2585,5 +2618,38 @@ mod tests {
         let inflight = ArchivePipeline::max_inflight_blocks(7, 16, 256 * 1024, &performance);
 
         assert_eq!(inflight, 7);
+    }
+
+    #[test]
+    fn select_stored_payload_uses_raw_when_compression_is_not_smaller() {
+        let source = [1u8, 2, 3, 4];
+        let compressed_equal = [9u8, 9, 9, 9];
+        let compressed_larger = [9u8, 9, 9, 9, 9];
+
+        let (stored_equal, raw_equal) =
+            ArchivePipeline::select_stored_payload(&source, &compressed_equal, true);
+        assert!(raw_equal);
+        assert_eq!(stored_equal, source.as_slice());
+
+        let (stored_larger, raw_larger) =
+            ArchivePipeline::select_stored_payload(&source, &compressed_larger, true);
+        assert!(raw_larger);
+        assert_eq!(stored_larger, source.as_slice());
+    }
+
+    #[test]
+    fn score_block_size_respects_raw_fallback_setting() {
+        let sample = pseudo_random_bytes(64 * 1024);
+
+        let score_with_fallback = build_pipeline_for_score(true)
+            .score_block_size(&sample, 8 * 1024)
+            .expect("score with fallback");
+        let score_without_fallback = build_pipeline_for_score(false)
+            .score_block_size(&sample, 8 * 1024)
+            .expect("score without fallback");
+
+        assert!(score_without_fallback.output_bytes > sample.len());
+        assert!(score_with_fallback.output_bytes <= sample.len());
+        assert!(score_with_fallback.output_bytes <= score_without_fallback.output_bytes);
     }
 }
