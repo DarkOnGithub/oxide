@@ -100,6 +100,18 @@ impl ProcessingThroughputSnapshot {
             self.preprocessing_elapsed + self.compression_elapsed,
         )
     }
+
+    fn preprocessing_wall_avg_bps(self, elapsed: Duration) -> f64 {
+        throughput_bps(self.preprocessing_input_bytes, elapsed)
+    }
+
+    fn compression_wall_avg_bps(self, elapsed: Duration) -> f64 {
+        throughput_bps(self.compression_input_bytes, elapsed)
+    }
+
+    fn preprocessing_compression_wall_avg_bps(self, elapsed: Duration) -> f64 {
+        throughput_bps(self.preprocessing_input_bytes, elapsed)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1709,6 +1721,10 @@ impl ArchivePipeline {
                 preprocessing_avg_bps: processing.preprocessing_avg_bps(),
                 compression_avg_bps: processing.compression_avg_bps(),
                 preprocessing_compression_avg_bps: processing.preprocessing_compression_avg_bps(),
+                preprocessing_wall_avg_bps: processing.preprocessing_wall_avg_bps(elapsed),
+                compression_wall_avg_bps: processing.compression_wall_avg_bps(elapsed),
+                preprocessing_compression_wall_avg_bps: processing
+                    .preprocessing_compression_wall_avg_bps(elapsed),
                 output_input_ratio,
                 compression_ratio,
                 blocks_total,
@@ -2102,6 +2118,12 @@ impl ArchivePipeline {
         let compression_avg_bps = processing_snapshot.compression_avg_bps();
         let preprocessing_compression_avg_bps =
             processing_snapshot.preprocessing_compression_avg_bps();
+        let preprocessing_wall_avg_bps =
+            processing_snapshot.preprocessing_wall_avg_bps(runtime.elapsed);
+        let compression_wall_avg_bps =
+            processing_snapshot.compression_wall_avg_bps(runtime.elapsed);
+        let preprocessing_compression_wall_avg_bps =
+            processing_snapshot.preprocessing_compression_wall_avg_bps(runtime.elapsed);
         let elapsed_us = runtime.elapsed.as_micros().max(1).min(u64::MAX as u128) as u64;
         let effective_cores = compress_busy_us as f64 / elapsed_us as f64;
 
@@ -2157,6 +2179,18 @@ impl ArchivePipeline {
         extensions.insert(
             "throughput.preprocessing_compression_avg_bps".to_string(),
             StatValue::F64(preprocessing_compression_avg_bps),
+        );
+        extensions.insert(
+            "throughput.preprocessing_wall_avg_bps".to_string(),
+            StatValue::F64(preprocessing_wall_avg_bps),
+        );
+        extensions.insert(
+            "throughput.compression_wall_avg_bps".to_string(),
+            StatValue::F64(compression_wall_avg_bps),
+        );
+        extensions.insert(
+            "throughput.preprocessing_compression_wall_avg_bps".to_string(),
+            StatValue::F64(preprocessing_compression_wall_avg_bps),
         );
         extensions.insert(
             "tuning.block_size".to_string(),
