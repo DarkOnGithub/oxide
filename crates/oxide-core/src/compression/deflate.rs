@@ -1,5 +1,7 @@
 use core::cmp::min;
 use core::fmt;
+use core::mem::size_of;
+use core::ptr;
 
 use crate::{OxideError, Result};
 
@@ -8,7 +10,8 @@ const MIN_MATCH: usize = 3;
 const MAX_MATCH: usize = 258;
 const HASH_LOG: u32 = 15;
 const HASH_SIZE: usize = 1 << HASH_LOG;
-const MAX_CHAIN: usize = 24;
+const MAX_CHAIN: usize = 16;
+const LAZY_MATCH_THRESHOLD: usize = 12;
 
 const MATCH_SYMBOL: usize = 256;
 const END_SYMBOL: usize = 257;
@@ -40,7 +43,6 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
             Token::End => frequencies[END_SYMBOL] += 1,
         }
     }
-
     let lengths = build_code_lengths(&frequencies, 15);
     let codes = build_canonical_codes(&lengths);
 
@@ -103,8 +105,7 @@ fn decode_stream(input: &[u8], expected_size: usize) -> core::result::Result<Vec
         ));
     }
 
-    let codes = build_canonical_codes(&lengths);
-    let decode_tree = DecodeTree::from_codes(&codes, &lengths)?;
+    let decode_tree = DecodeTree::from_code_lengths(&lengths)?;
     let mut reader = BitReader::new(&input[table_bytes..]);
     let mut output = Vec::with_capacity(expected_size);
 
@@ -183,7 +184,7 @@ fn tokenize_lz77(input: &[u8]) -> Vec<Token> {
         };
 
         if let Some(mat) = best {
-            let next_better = if pos + 1 + MIN_MATCH <= input.len() {
+            let next_better = if mat.len < LAZY_MATCH_THRESHOLD && pos + 1 + MIN_MATCH <= input.len() {
                 find_best_match(input, pos + 1, &head, &prev)
                     .map(|next| next.len > mat.len + 1)
                     .unwrap_or(false)
@@ -245,11 +246,21 @@ fn find_best_match(input: &[u8], pos: usize, head: &[i32], prev: &[i32]) -> Opti
         if dist > WINDOW_SIZE {
             break;
         }
-
-        let mut len = 0usize;
-        while len < max_len && input[cand + len] == input[pos + len] {
-            len += 1;
+        if input[cand] != input[pos] || input[cand + 1] != input[pos + 1] {
+            candidate = prev[cand];
+            depth += 1;
+            continue;
         }
+        if best.len >= MIN_MATCH {
+            let probe = best.len.min(max_len - 1);
+            if input[cand + probe] != input[pos + probe] {
+                candidate = prev[cand];
+                depth += 1;
+                continue;
+            }
+        }
+
+        let len = match_len_fast(input, pos, cand, max_len);
 
         if len >= MIN_MATCH && (len > best.len || (len == best.len && dist < best.dist)) {
             best = Match { len, dist };
@@ -267,6 +278,45 @@ fn find_best_match(input: &[u8], pos: usize, head: &[i32], prev: &[i32]) -> Opti
     } else {
         None
     }
+}
+
+#[inline]
+fn match_len_fast(input: &[u8], left: usize, right: usize, max_len: usize) -> usize {
+    let mut len = 0usize;
+    let word = size_of::<usize>();
+    let left_ptr = unsafe {
+        // SAFETY: `left` is validated by callers to be in-bounds.
+        input.as_ptr().add(left)
+    };
+    let right_ptr = unsafe {
+        // SAFETY: `right` is validated by callers to be in-bounds.
+        input.as_ptr().add(right)
+    };
+
+    while len + word <= max_len {
+        let lhs = unsafe {
+            // SAFETY: both pointers have at least `word` readable bytes here.
+            ptr::read_unaligned(left_ptr.add(len) as *const usize)
+        };
+        let rhs = unsafe {
+            // SAFETY: both pointers have at least `word` readable bytes here.
+            ptr::read_unaligned(right_ptr.add(len) as *const usize)
+        };
+        if lhs == rhs {
+            len += word;
+            continue;
+        }
+        for i in 0..word {
+            if input[left + len + i] != input[right + len + i] {
+                return len + i;
+            }
+        }
+    }
+
+    while len < max_len && input[left + len] == input[right + len] {
+        len += 1;
+    }
+    len
 }
 
 #[inline]
@@ -484,6 +534,23 @@ impl DecodeTree {
             tree.insert(symbol, codes[symbol], len)?;
         }
         Ok(tree)
+    }
+
+    fn from_code_lengths(lengths: &[u8]) -> core::result::Result<Self, DecodeError> {
+        if lengths.iter().all(|&len| len == 9) {
+            return Ok(Self::fixed_9bit());
+        }
+        let codes = build_canonical_codes(lengths);
+        Self::from_codes(&codes, lengths)
+    }
+
+    fn fixed_9bit() -> Self {
+        let mut tree = DecodeTree::new();
+        for symbol in 0..SYMBOLS {
+            tree.insert(symbol, symbol as u32, 9)
+                .expect("fixed table is valid");
+        }
+        tree
     }
 
     fn insert(
