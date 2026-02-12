@@ -37,11 +37,11 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Target block size (supports suffixes K/M/G, e.g. 64K, 1M).
-        #[arg(long, default_value = "1M", value_parser = parse_size)]
+        #[arg(long, default_value = "2M", value_parser = parse_size)]
         block_size: usize,
 
-        /// Number of worker threads (defaults to CPU count).
-        #[arg(long, default_value_t = num_cpus::get())]
+        /// Number of compression worker threads (0 = auto from physical cores).
+        #[arg(long, default_value_t = 0)]
         workers: usize,
 
         /// Compression mode metadata to store.
@@ -65,19 +65,31 @@ enum Commands {
         stats_interval_ms: u64,
 
         /// Maximum in-flight payload bytes queued through workers.
-        #[arg(long, default_value = "512M", value_parser = parse_size)]
+        #[arg(long, default_value = "2G", value_parser = parse_size)]
         inflight_bytes: usize,
 
         /// Read buffer size for streaming directory input.
-        #[arg(long, default_value = "16M", value_parser = parse_size)]
+        #[arg(long, default_value = "64M", value_parser = parse_size)]
         stream_read_buffer: usize,
+
+        /// Number of directory producer threads (currently supports 1..=2).
+        #[arg(long, default_value_t = 1)]
+        producer_threads: usize,
+
+        /// File-size threshold above which directory input uses mmap fast-path.
+        #[arg(long, default_value = "8M", value_parser = parse_size)]
+        directory_mmap_threshold: usize,
+
+        /// Capacity of the writer result queue (in blocks).
+        #[arg(long, default_value_t = 1024)]
+        writer_queue_blocks: usize,
 
         /// Keep file-type boundaries as hard block boundaries in directory mode.
         #[arg(long, default_value_t = false)]
         preserve_format_boundaries: bool,
 
         /// Timeout in milliseconds while waiting for worker results.
-        #[arg(long, default_value_t = 5)]
+        #[arg(long, default_value_t = 1)]
         result_wait_ms: u64,
     },
     /// Extract an .oxz archive to a file or directory.
@@ -142,6 +154,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             stats_interval_ms,
             inflight_bytes,
             stream_read_buffer,
+            producer_threads,
+            directory_mmap_threshold,
+            writer_queue_blocks,
             preserve_format_boundaries,
             result_wait_ms,
         } => archive_command(
@@ -156,6 +171,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             stats_interval_ms,
             inflight_bytes,
             stream_read_buffer,
+            producer_threads,
+            directory_mmap_threshold,
+            writer_queue_blocks,
             preserve_format_boundaries,
             result_wait_ms,
         )?,
@@ -182,6 +200,9 @@ fn archive_command(
     stats_interval_ms: u64,
     inflight_bytes: usize,
     stream_read_buffer: usize,
+    producer_threads: usize,
+    directory_mmap_threshold: usize,
+    writer_queue_blocks: usize,
     preserve_format_boundaries: bool,
     result_wait_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -192,14 +213,26 @@ fn archive_command(
 
     let buffer_pool = Arc::new(BufferPool::new(pool_capacity.max(1), pool_buffers.max(1)));
     let mut performance = PipelinePerformanceOptions::default();
+    let producer_threads = producer_threads.clamp(1, 2);
+    let physical_cores = num_cpus::get_physical().max(1);
+    let reserved_threads = producer_threads.saturating_add(1);
+    let auto_workers = physical_cores.saturating_sub(reserved_threads).max(1);
+    let compression_workers = if workers == 0 {
+        auto_workers
+    } else {
+        workers.max(1)
+    };
     performance.autotune_enabled = autotune;
     performance.max_inflight_bytes = inflight_bytes.max(1);
     performance.directory_stream_read_buffer_size = stream_read_buffer.max(1);
+    performance.producer_threads = producer_threads;
+    performance.directory_mmap_threshold_bytes = directory_mmap_threshold.max(1);
+    performance.writer_result_queue_blocks = writer_queue_blocks.max(1);
     performance.preserve_directory_format_boundaries = preserve_format_boundaries;
     performance.result_wait_timeout = Duration::from_millis(result_wait_ms.max(1));
     let mut config = ArchivePipelineConfig::new(
         block_size.max(1),
-        workers.max(1),
+        compression_workers,
         Arc::clone(&buffer_pool),
         compression,
     );
