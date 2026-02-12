@@ -27,6 +27,16 @@ fn build_text_fixture(bytes: usize) -> Vec<u8> {
     data
 }
 
+fn build_incompressible_fixture(bytes: usize) -> Vec<u8> {
+    let mut state = 0xCAFEBABE_DEADBEEFu64;
+    let mut data = Vec::with_capacity(bytes);
+    for _ in 0..bytes {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        data.push((state >> 56) as u8);
+    }
+    data
+}
+
 fn write_directory_file(
     root: &TempDir,
     rel_path: &str,
@@ -99,6 +109,52 @@ fn pipeline_roundtrip_reconstructs_original_bytes() -> Result<(), Box<dyn std::e
 
     let metrics = buffer_pool.metrics();
     assert!(metrics.created > 0);
+    Ok(())
+}
+
+#[test]
+fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller()
+-> Result<(), Box<dyn std::error::Error>> {
+    let data = build_incompressible_fixture(256 * 1024);
+    let file = write_fixture(&data)?;
+
+    let mut config = ArchivePipelineConfig::new(
+        8 * 1024,
+        3,
+        Arc::new(BufferPool::new(16 * 1024, 64)),
+        CompressionAlgo::Lz4,
+    );
+    config.performance.raw_fallback_enabled = true;
+    let pipeline = ArchivePipeline::new(config);
+
+    let run = pipeline.archive_path(
+        file.path(),
+        Vec::new(),
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+    assert!(matches!(
+        run.report.extensions.get("compression.raw_passthrough_blocks"),
+        Some(ReportValue::U64(count)) if *count > 0
+    ));
+
+    let archive = run.writer;
+    let mut reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+    let mut raw_blocks = 0usize;
+    for block in reader.iter_blocks() {
+        let (header, payload) = block?;
+        let compression = header.compression_meta()?;
+        if compression.raw_passthrough {
+            raw_blocks += 1;
+            assert_eq!(header.compressed_size, header.original_size);
+            assert_eq!(payload.len(), header.original_size as usize);
+        }
+    }
+    assert!(raw_blocks > 0);
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, data);
     Ok(())
 }
 

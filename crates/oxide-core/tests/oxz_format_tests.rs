@@ -100,6 +100,30 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn block_header_round_trip_preserves_raw_passthrough() -> Result<(), Box<dyn std::error::Error>> {
+    let header = BlockHeader::new_with_compression_meta(
+        9,
+        4096,
+        4096,
+        PreProcessingStrategy::None,
+        CompressionMeta::new(CompressionAlgo::Lz4, CompressionPreset::Fast, true),
+        0x0102_0304,
+    );
+
+    let mut encoded = Vec::new();
+    header.write(&mut encoded)?;
+    assert_eq!(encoded.len(), BLOCK_HEADER_SIZE);
+
+    let decoded = BlockHeader::read(&mut Cursor::new(encoded))?;
+    let meta = decoded.compression_meta()?;
+    assert_eq!(decoded, header);
+    assert_eq!(meta.algo, CompressionAlgo::Lz4);
+    assert_eq!(meta.preset, CompressionPreset::Fast);
+    assert!(meta.raw_passthrough);
+    Ok(())
+}
+
+#[test]
 fn compression_meta_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let meta = CompressionMeta::new(CompressionAlgo::Lz4, CompressionPreset::Fast, true);
     let encoded = meta.to_flags();
