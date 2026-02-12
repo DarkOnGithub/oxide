@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, bounded};
 
 use crate::buffer::BufferPool;
 use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerPoolHandle, WorkerRuntimeSnapshot};
@@ -644,6 +644,10 @@ impl ArchivePipeline {
         let mut stage_timings = ExtractStageTimings::default();
         let mut archive_bytes_total = GLOBAL_HEADER_SIZE as u64 + FOOTER_SIZE as u64;
         let mut submitted = 0usize;
+        let mut received = 0usize;
+        let mut first_error: Option<crate::OxideError> = None;
+        let mut decoded_bytes_completed = 0u64;
+        let mut decoded_blocks = vec![None; block_capacity];
         let mut last_emit_at = Instant::now();
         let emit_every = options.progress_interval.max(Duration::from_millis(100));
         for entry in archive.iter_blocks() {
@@ -654,6 +658,31 @@ impl ArchivePipeline {
             archive_bytes_total = archive_bytes_total
                 .saturating_add(BLOCK_HEADER_SIZE as u64)
                 .saturating_add(block_data.len() as u64);
+
+            while submitted.saturating_sub(received) >= queue_capacity {
+                Self::receive_decode_result(
+                    &result_rx,
+                    &mut stage_timings,
+                    &mut decoded_blocks,
+                    &runtime_state,
+                    &mut decoded_bytes_completed,
+                    &mut received,
+                    &mut first_error,
+                )?;
+                Self::emit_extract_progress_if_due(
+                    source_kind,
+                    started_at,
+                    archive_bytes_total,
+                    decoded_bytes_completed,
+                    block_capacity as u32,
+                    received as u32,
+                    runtime_state.snapshot(),
+                    emit_every,
+                    &mut last_emit_at,
+                    false,
+                    sink,
+                );
+            }
 
             let submit_started = Instant::now();
             task_tx
@@ -670,20 +699,19 @@ impl ArchivePipeline {
             stage_timings.decode_submit += submit_started.elapsed();
             submitted += 1;
             runtime_state.record_submission();
-
-            if last_emit_at.elapsed() >= emit_every {
-                Self::emit_extract_progress(
-                    source_kind,
-                    started_at,
-                    archive_bytes_total,
-                    0,
-                    block_capacity as u32,
-                    submitted as u32,
-                    runtime_state.snapshot(),
-                    sink,
-                );
-                last_emit_at = Instant::now();
-            }
+            Self::emit_extract_progress_if_due(
+                source_kind,
+                started_at,
+                archive_bytes_total,
+                decoded_bytes_completed,
+                block_capacity as u32,
+                received as u32,
+                runtime_state.snapshot(),
+                emit_every,
+                &mut last_emit_at,
+                false,
+                sink,
+            );
         }
         drop(task_tx);
 
@@ -693,56 +721,29 @@ impl ArchivePipeline {
             ));
         }
 
-        let mut decoded_blocks = vec![None; submitted];
-        let mut received = 0usize;
-        let mut first_error: Option<crate::OxideError> = None;
-        let mut decoded_bytes_completed = 0u64;
         while received < submitted {
-            let wait_started = Instant::now();
-            let (index, block) = result_rx.recv().map_err(|_| {
-                crate::OxideError::CompressionError(
-                    "decode result channel closed before completion".to_string(),
-                )
-            })?;
-            stage_timings.decode_wait += wait_started.elapsed();
-            if index >= decoded_blocks.len() {
-                return Err(crate::OxideError::InvalidFormat(
-                    "decode result index out of bounds",
-                ));
-            }
-            match block {
-                Ok(bytes) => {
-                    if decoded_blocks[index].is_some() {
-                        return Err(crate::OxideError::InvalidFormat(
-                            "duplicate decode result index",
-                        ));
-                    }
-                    decoded_bytes_completed =
-                        decoded_bytes_completed.saturating_add(bytes.len() as u64);
-                    decoded_blocks[index] = Some(bytes);
-                }
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
-            }
-            received += 1;
-            runtime_state.record_completion();
-
-            if last_emit_at.elapsed() >= emit_every {
-                Self::emit_extract_progress(
-                    source_kind,
-                    started_at,
-                    archive_bytes_total,
-                    decoded_bytes_completed,
-                    block_capacity as u32,
-                    received as u32,
-                    runtime_state.snapshot(),
-                    sink,
-                );
-                last_emit_at = Instant::now();
-            }
+            Self::receive_decode_result(
+                &result_rx,
+                &mut stage_timings,
+                &mut decoded_blocks,
+                &runtime_state,
+                &mut decoded_bytes_completed,
+                &mut received,
+                &mut first_error,
+            )?;
+            Self::emit_extract_progress_if_due(
+                source_kind,
+                started_at,
+                archive_bytes_total,
+                decoded_bytes_completed,
+                block_capacity as u32,
+                received as u32,
+                runtime_state.snapshot(),
+                emit_every,
+                &mut last_emit_at,
+                false,
+                sink,
+            );
         }
 
         let workers = Self::join_decode_workers(worker_handles)?;
@@ -781,6 +782,48 @@ impl ArchivePipeline {
             workers,
             stage_timings,
         })
+    }
+
+    fn receive_decode_result(
+        result_rx: &Receiver<(usize, Result<Vec<u8>>)>,
+        stage_timings: &mut ExtractStageTimings,
+        decoded_blocks: &mut [Option<Vec<u8>>],
+        runtime_state: &DecodeRuntimeState,
+        decoded_bytes_completed: &mut u64,
+        received: &mut usize,
+        first_error: &mut Option<crate::OxideError>,
+    ) -> Result<()> {
+        let wait_started = Instant::now();
+        let (index, block) = result_rx.recv().map_err(|_| {
+            crate::OxideError::CompressionError(
+                "decode result channel closed before completion".to_string(),
+            )
+        })?;
+        stage_timings.decode_wait += wait_started.elapsed();
+        if index >= decoded_blocks.len() {
+            return Err(crate::OxideError::InvalidFormat(
+                "decode result index out of bounds",
+            ));
+        }
+        match block {
+            Ok(bytes) => {
+                if decoded_blocks[index].is_some() {
+                    return Err(crate::OxideError::InvalidFormat(
+                        "duplicate decode result index",
+                    ));
+                }
+                *decoded_bytes_completed = decoded_bytes_completed.saturating_add(bytes.len() as u64);
+                decoded_blocks[index] = Some(bytes);
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    *first_error = Some(error);
+                }
+            }
+        }
+        *received += 1;
+        runtime_state.record_completion();
+        Ok(())
     }
 
     fn join_decode_workers(
@@ -1582,6 +1625,35 @@ impl ArchivePipeline {
                 blocks_pending: runtime.pending as u32,
                 runtime,
             }));
+            *last_emit_at = Instant::now();
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_extract_progress_if_due(
+        source_kind: ArchiveSourceKind,
+        started_at: Instant,
+        archive_bytes_completed: u64,
+        decoded_bytes_completed: u64,
+        blocks_total: u32,
+        blocks_completed: u32,
+        runtime: PoolRuntimeSnapshot,
+        emit_every: Duration,
+        last_emit_at: &mut Instant,
+        force: bool,
+        sink: &mut dyn TelemetrySink,
+    ) {
+        if force || last_emit_at.elapsed() >= emit_every {
+            Self::emit_extract_progress(
+                source_kind,
+                started_at,
+                archive_bytes_completed,
+                decoded_bytes_completed,
+                blocks_total,
+                blocks_completed,
+                runtime,
+                sink,
+            );
             *last_emit_at = Instant::now();
         }
     }
