@@ -783,6 +783,22 @@ fn build_live_metric_cards(
                 "write inst {}/s",
                 format_rate(app.archive_live.write_inst_bps)
             )),
+            Line::from(format!(
+                "prep core {}/s",
+                format_rate(app.archive_live.preprocessing_avg_bps)
+            )),
+            Line::from(format!(
+                "comp core {}/s",
+                format_rate(app.archive_live.compression_avg_bps)
+            )),
+            Line::from(format!(
+                "comp wall {}/s",
+                format_rate(app.archive_live.compression_wall_avg_bps)
+            )),
+            Line::from(format!(
+                "prep+comp core {}/s",
+                format_rate(app.archive_live.preprocessing_compression_avg_bps)
+            )),
         ];
         let volume = vec![
             Line::from(format!(
