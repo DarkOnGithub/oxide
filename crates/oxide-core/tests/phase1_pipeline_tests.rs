@@ -563,3 +563,49 @@ fn extract_progress_reports_runtime_worker_snapshots() -> Result<(), Box<dyn std
 
     Ok(())
 }
+
+#[test]
+fn extract_archive_handles_queue_pressure_without_deadlock()
+-> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(192 * 1024);
+    let file = write_fixture(&data)?;
+
+    let workers = 1usize;
+    let buffer_pool = Arc::new(BufferPool::new(4 * 1024, 128));
+    let pipeline = build_pipeline(1024, workers, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let mut sink = CollectExtractProgress::default();
+    let (restored, report) = pipeline.extract_archive(
+        Cursor::new(archive),
+        RunTelemetryOptions {
+            progress_interval: Duration::from_millis(1),
+            emit_final_progress: true,
+            include_telemetry_snapshot: true,
+        },
+        Some(&mut sink),
+    )?;
+
+    assert_eq!(restored, data);
+    assert!(report.blocks_total > (workers as u32 * 9));
+    assert!(!sink.snapshots.is_empty());
+
+    let mut last_completed = 0u32;
+    for snapshot in &sink.snapshots {
+        assert!(snapshot.blocks_completed >= last_completed);
+        last_completed = snapshot.blocks_completed;
+    }
+
+    let final_snapshot = sink.snapshots.last().expect("missing extract progress");
+    assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
+
+    Ok(())
+}
