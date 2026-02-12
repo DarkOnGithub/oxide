@@ -494,6 +494,9 @@ pub struct ArchiveLiveRates {
     pub preprocessing_avg_bps: f64,
     pub compression_avg_bps: f64,
     pub preprocessing_compression_avg_bps: f64,
+    pub preprocessing_wall_avg_bps: f64,
+    pub compression_wall_avg_bps: f64,
+    pub preprocessing_compression_wall_avg_bps: f64,
     pub peak_read_bps: f64,
     pub peak_write_bps: f64,
     pub output_input_ratio: f64,
@@ -514,6 +517,9 @@ impl ArchiveLiveRates {
         self.preprocessing_avg_bps = event.preprocessing_avg_bps;
         self.compression_avg_bps = event.compression_avg_bps;
         self.preprocessing_compression_avg_bps = event.preprocessing_compression_avg_bps;
+        self.preprocessing_wall_avg_bps = event.preprocessing_wall_avg_bps;
+        self.compression_wall_avg_bps = event.compression_wall_avg_bps;
+        self.preprocessing_compression_wall_avg_bps = event.preprocessing_compression_wall_avg_bps;
         self.read_inst_bps = if delta_secs > 0.0 {
             delta_read as f64 / delta_secs
         } else {

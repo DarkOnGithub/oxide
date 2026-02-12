@@ -363,12 +363,13 @@ impl TelemetrySink for ArchiveCliSink<'_> {
             .count();
 
         let line = format!(
-            "\r\x1b[2K{progress:5.1}% {}/{} rd {} wr {} cmp/core {} eta {} p{} w{}/{}",
+            "\r\x1b[2K{progress:5.1}% {}/{} rd {} wr {} cmp/core {} cmp/wall {} eta {} p{} w{}/{}",
             snapshot.blocks_completed,
             snapshot.blocks_total,
             format_live_rate(read_instant_bps),
             format_live_rate(write_instant_bps),
             format_live_rate(snapshot.compression_avg_bps),
+            format_live_rate(snapshot.compression_wall_avg_bps),
             format_duration(eta),
             snapshot.blocks_pending,
             active_workers,
@@ -592,16 +593,32 @@ fn print_archive_report_summary(
         extension_f64(&report.extensions, "throughput.preprocessing_avg_bps")
     {
         println!(
-            "  preprocessing throughput avg: {}/s",
+            "  preprocessing throughput avg (core-normalized): {}/s",
             format_rate(preprocessing_avg_bps)
+        );
+    }
+    if let Some(preprocessing_wall_avg_bps) =
+        extension_f64(&report.extensions, "throughput.preprocessing_wall_avg_bps")
+    {
+        println!(
+            "  preprocessing throughput avg (wall-clock): {}/s",
+            format_rate(preprocessing_wall_avg_bps)
         );
     }
     if let Some(compression_avg_bps) =
         extension_f64(&report.extensions, "throughput.compression_avg_bps")
     {
         println!(
-            "  compression throughput avg: {}/s",
+            "  compression throughput avg (core-normalized): {}/s",
             format_rate(compression_avg_bps)
+        );
+    }
+    if let Some(compression_wall_avg_bps) =
+        extension_f64(&report.extensions, "throughput.compression_wall_avg_bps")
+    {
+        println!(
+            "  compression throughput avg (wall-clock): {}/s",
+            format_rate(compression_wall_avg_bps)
         );
     }
     if let Some(preprocessing_compression_avg_bps) = extension_f64(
@@ -609,8 +626,17 @@ fn print_archive_report_summary(
         "throughput.preprocessing_compression_avg_bps",
     ) {
         println!(
-            "  preprocessing+compression throughput avg: {}/s",
+            "  preprocessing+compression throughput avg (core-normalized): {}/s",
             format_rate(preprocessing_compression_avg_bps)
+        );
+    }
+    if let Some(preprocessing_compression_wall_avg_bps) = extension_f64(
+        &report.extensions,
+        "throughput.preprocessing_compression_wall_avg_bps",
+    ) {
+        println!(
+            "  preprocessing+compression throughput avg (wall-clock): {}/s",
+            format_rate(preprocessing_compression_wall_avg_bps)
         );
     }
     println!(
