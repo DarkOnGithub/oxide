@@ -1,5 +1,5 @@
-mod archive;
-mod directory;
+pub mod archive;
+pub mod directory;
 mod types;
 
 pub use archive::ArchivePipeline;
