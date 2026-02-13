@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use bytes::Bytes;
 use memmap2::Mmap;
@@ -8,6 +9,11 @@ use std::sync::Arc;
 use crate::error::OxideError;
 
 pub type Result<T> = std::result::Result<T, OxideError>;
+
+/// Converts a [`Duration`] to microseconds as a u64, capping at [`u64::MAX`].
+pub fn duration_to_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u64::MAX as u128) as u64
+}
 
 /// A batch of data extracted from a file for processing.
 ///
@@ -22,12 +28,20 @@ pub struct Batch {
 }
 
 /// A batch of data extracted from a file for processing.
+///
+/// This enum supports both owned byte buffers and memory-mapped file regions,
+/// allowing the pipeline to minimize copies for large files.
 #[derive(Debug, Clone)]
 pub enum BatchData {
+    /// Owned byte buffer.
     Owned(Bytes),
+    /// Memory-mapped file region.
     Mapped {
+        /// The underlying memory map.
         map: Arc<Mmap>,
+        /// Start offset within the map.
         start: usize,
+        /// End offset within the map.
         end: usize,
     },
 }
@@ -94,10 +108,12 @@ impl Batch {
         }
     }
 
+    /// Returns the length of the batch data.
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
+    /// Returns true if the batch data is empty.
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
@@ -120,6 +136,7 @@ impl From<Batch> for Bytes {
 }
 
 impl BatchData {
+    /// Returns the length of the data.
     pub fn len(&self) -> usize {
         match self {
             Self::Owned(data) => data.len(),
@@ -131,10 +148,12 @@ impl BatchData {
         }
     }
 
+    /// Returns true if the data is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Returns a reference to the data as a byte slice.
     pub fn as_slice(&self) -> &[u8] {
         match self {
             Self::Owned(data) => &data[..],
@@ -162,10 +181,15 @@ impl From<BatchData> for Bytes {
 }
 
 /// Compression preset used by a codec.
+///
+/// Presets allow balancing between compression speed and ratio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompressionPreset {
+    /// High-speed compression with lower ratio.
     Fast,
+    /// Balanced compression speed and ratio.
     Default,
+    /// High-ratio compression with lower speed.
     High,
 }
 
@@ -193,14 +217,20 @@ impl CompressionPreset {
 }
 
 /// Compression metadata carried per block.
+///
+/// Encapsulates the algorithm, preset, and whether raw passthrough was used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionMeta {
+    /// Algorithm used for compression.
     pub algo: CompressionAlgo,
+    /// Preset used for compression.
     pub preset: CompressionPreset,
+    /// Whether the data is stored in raw format (e.g., if compression failed to reduce size).
     pub raw_passthrough: bool,
 }
 
 impl CompressionMeta {
+    /// Creates a new compression metadata object.
     pub fn new(algo: CompressionAlgo, preset: CompressionPreset, raw_passthrough: bool) -> Self {
         Self {
             algo,
@@ -249,12 +279,19 @@ impl CompressionMeta {
 /// integrity checksum.
 #[derive(Debug, Clone)]
 pub struct CompressedBlock {
+    /// Unique identifier for this block.
     pub id: usize,
+    /// The compressed (or raw) data bytes.
     pub data: Vec<u8>,
+    /// Preprocessing strategy applied before compression.
     pub pre_proc: PreProcessingStrategy,
+    /// Compression algorithm used.
     pub compression: CompressionAlgo,
+    /// Preset used for compression.
     pub compression_preset: CompressionPreset,
+    /// Whether the data is stored raw.
     pub raw_passthrough: bool,
+    /// Original uncompressed length.
     pub original_len: u64,
     /// CRC32 checksum of the compressed data
     pub crc32: u32,

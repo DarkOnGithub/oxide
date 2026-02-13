@@ -4,6 +4,10 @@ use crate::{OxideError, Result};
 
 use super::DEFAULT_REORDER_PENDING_LIMIT;
 
+/// A buffer that reorders items submitted out-of-order into a sequential stream.
+///
+/// Items are stored in a `BTreeMap` until the next expected sequential ID is pushed,
+/// at which point all contiguous items starting from that ID are released.
 #[derive(Debug)]
 pub struct ReorderBuffer<T> {
     next_id: usize,
@@ -18,10 +22,12 @@ impl<T> Default for ReorderBuffer<T> {
 }
 
 impl<T> ReorderBuffer<T> {
+    /// Creates a new reorder buffer with the default capacity.
     pub fn new() -> Self {
         Self::with_limit(DEFAULT_REORDER_PENDING_LIMIT)
     }
 
+    /// Creates a new reorder buffer with a specific capacity.
     pub fn with_limit(max_pending: usize) -> Self {
         Self {
             next_id: 0,
@@ -30,6 +36,14 @@ impl<T> ReorderBuffer<T> {
         }
     }
 
+    /// Pushes an item into the buffer.
+    ///
+    /// If the `id` matches the next expected ID, it and any subsequent
+    /// contiguous ready items are returned in a vector.
+    ///
+    /// # Errors
+    /// Returns an error if the `id` has already been processed or if the
+    /// buffer's capacity is exceeded.
     pub fn push(&mut self, id: usize, item: T) -> Result<Vec<T>> {
         if id < self.next_id {
             return Err(OxideError::InvalidBlockId {
@@ -60,14 +74,17 @@ impl<T> ReorderBuffer<T> {
         Ok(ready)
     }
 
+    /// Returns the next expected ID.
     pub fn next_expected(&self) -> usize {
         self.next_id
     }
 
+    /// Returns the number of items currently pending.
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
 
+    /// Returns the maximum number of pending items allowed.
     pub fn max_pending(&self) -> usize {
         self.max_pending
     }
