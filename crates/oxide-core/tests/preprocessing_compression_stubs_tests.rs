@@ -66,19 +66,21 @@ fn compression_router_apply_is_codec_specific() {
     assert_ne!(lz4, input, "lz4 should transform bytes");
 
     let lzma = apply_compression(&input, CompressionAlgo::Lzma).expect("lzma apply should succeed");
-    assert_eq!(lzma, input, "lzma stub should remain pass-through");
+    assert_ne!(lzma, input, "lzma should transform bytes");
 
     let deflate =
         apply_compression(&input, CompressionAlgo::Deflate).expect("deflate apply should succeed");
-    assert_eq!(deflate, input, "deflate stub should remain pass-through");
+    assert_ne!(deflate, input, "deflate should transform bytes");
 }
 
 #[test]
-fn compression_router_reverse_returns_original_for_stub_algorithms() {
+fn compression_router_reverse_fails_on_non_codec_payloads() {
     let input = fixture();
-    for algo in [CompressionAlgo::Lzma, CompressionAlgo::Deflate] {
-        let output = reverse_compression(&input, algo).expect("reverse should succeed");
-        assert_eq!(output, input, "algorithm should be pass-through: {algo:?}");
+    for algo in [CompressionAlgo::Lz4, CompressionAlgo::Lzma, CompressionAlgo::Deflate] {
+        assert!(
+            reverse_compression(&input, algo).is_err(),
+            "reverse should fail for non-{algo:?} payload"
+        );
     }
 }
 
