@@ -79,6 +79,7 @@ pub fn enable_all_tags() {
     lock_write().enabled = None;
 }
 
+/// No-op version of enable_all_tags when profiling is disabled.
 #[cfg(not(feature = "profiling"))]
 pub fn enable_all_tags() {}
 
@@ -112,10 +113,11 @@ pub fn set_enabled_tags(tags: &[&str]) {
     };
 }
 
+/// No-op version of set_enabled_tags when profiling is disabled.
 #[cfg(not(feature = "profiling"))]
 pub fn set_enabled_tags(_tags: &[&str]) {}
 
-/// Reloads enabled tags from `OXIDE_PROFILE_TAGS`.
+/// Reloads enabled tags from the `OXIDE_PROFILE_TAGS` environment variable.
 #[cfg(feature = "profiling")]
 pub fn reload_enabled_tags_from_env() {
     let parsed = std::env::var(PROFILE_TAGS_ENV)
@@ -125,6 +127,7 @@ pub fn reload_enabled_tags_from_env() {
     lock_write().enabled = parsed;
 }
 
+/// No-op version of reload_enabled_tags_from_env when profiling is disabled.
 #[cfg(not(feature = "profiling"))]
 pub fn reload_enabled_tags_from_env() {}
 
@@ -141,11 +144,15 @@ pub fn is_tag_stack_enabled(tag_stack: &[&str]) -> bool {
     }
 }
 
+/// Returns false when profiling is disabled.
 #[cfg(not(feature = "profiling"))]
 pub fn is_tag_stack_enabled(_tag_stack: &[&str]) -> bool {
     false
 }
 
+/// Emits a profiling event if at least one tag in the stack is enabled.
+///
+/// Dispatches to the global telemetry sink and logs via `tracing`.
 #[cfg(feature = "profiling")]
 #[inline]
 pub fn event(
@@ -194,6 +201,7 @@ pub fn event(
     }
 }
 
+/// No-op version of event when profiling is disabled.
 #[cfg(not(feature = "profiling"))]
 #[inline]
 pub fn event(

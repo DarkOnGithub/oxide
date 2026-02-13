@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+/// Core error type for all Oxide operations.
 #[derive(Debug, Error)]
 pub enum OxideError {
     /// I/O operation failed

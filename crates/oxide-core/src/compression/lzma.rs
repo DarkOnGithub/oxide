@@ -37,6 +37,10 @@ enum Token {
     End,
 }
 
+/// Compresses data using an LZMA-like range encoding algorithm.
+///
+/// The output includes a 4-byte size prefix, a magic header "OLZ1",
+/// properties byte, dictionary size, and the compressed payload.
 pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() > u32::MAX as usize {
         return Err(OxideError::CompressionError(
@@ -116,6 +120,9 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Decompresses data using the LZMA-like range encoding algorithm.
+///
+/// Expects the format produced by [`apply`].
 pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() < 4 {
         return Err(OxideError::DecompressionError(

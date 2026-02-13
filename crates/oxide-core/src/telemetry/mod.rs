@@ -22,36 +22,49 @@ pub use report::{
 /// Histogram summary captured in telemetry snapshots.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct HistogramSnapshot {
+    /// Total number of samples recorded.
     pub count: u64,
+    /// Sum of all sample values.
     pub total: u64,
+    /// Minimum sample value observed.
     pub min: u64,
+    /// Maximum sample value observed.
     pub max: u64,
+    /// Arithmetic mean of all sample values.
     pub mean: f64,
 }
 
 /// In-memory view of collected telemetry metrics.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
+    /// Map of counter names to their current values.
     pub counters: BTreeMap<String, u64>,
+    /// Map of gauge names to their current values.
     pub gauges: BTreeMap<String, u64>,
+    /// Map of histogram names to their summarized snapshots.
     pub histograms: BTreeMap<String, HistogramSnapshot>,
 }
 
 impl TelemetrySnapshot {
+    /// Returns the value of a counter if it exists.
     pub fn counter(&self, name: &str) -> Option<u64> {
         self.counters.get(name).copied()
     }
 
+    /// Returns the value of a gauge if it exists.
     pub fn gauge(&self, name: &str) -> Option<u64> {
         self.gauges.get(name).copied()
     }
 
+    /// Returns the snapshot of a histogram if it exists.
     pub fn histogram(&self, name: &str) -> Option<HistogramSnapshot> {
         self.histograms.get(name).copied()
     }
 }
 
 /// Increments a named counter by `value`.
+///
+/// Labels are currently unused in the internal registry but preserved for API compatibility.
 #[inline]
 pub fn increment_counter(name: &'static str, value: u64, _labels: &[(&str, &str)]) {
     #[cfg(feature = "telemetry")]

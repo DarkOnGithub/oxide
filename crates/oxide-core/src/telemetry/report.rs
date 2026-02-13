@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::WorkerRuntimeSnapshot;
 use crate::pipeline::ArchiveSourceKind;
 use crate::telemetry::{self, TelemetrySnapshot};
+use crate::types::duration_to_us;
 
 /// Unified runtime telemetry options for archive/extract operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,26 +32,39 @@ impl Default for RunTelemetryOptions {
 /// Extensible scalar value used by report exports.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReportValue {
+    /// Unsigned 64-bit integer.
     U64(u64),
+    /// 64-bit floating point number.
     F64(f64),
+    /// Time duration.
     Duration(Duration),
+    /// Boolean flag.
     Bool(bool),
+    /// UTF-8 string.
     Text(String),
 }
 
 /// Worker-level metrics used in exported reports.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkerReport {
+    /// Unique identifier for the worker.
     pub worker_id: usize,
+    /// Total number of tasks completed by this worker.
     pub tasks_completed: usize,
+    /// Total time the worker thread was alive.
     pub uptime: Duration,
+    /// Total time the worker was actively processing tasks.
     pub busy: Duration,
+    /// Total time the worker was idle.
     pub idle: Duration,
+    /// Ratio of busy time to uptime.
     pub utilization: f64,
+    /// Extensible metrics for this specific worker.
     pub extensions: BTreeMap<String, ReportValue>,
 }
 
 impl WorkerReport {
+    /// Creates a report from a runtime snapshot.
     pub fn from_runtime(runtime: &WorkerRuntimeSnapshot) -> Self {
         Self {
             worker_id: runtime.worker_id,
@@ -67,12 +81,16 @@ impl WorkerReport {
 /// Main-thread stage timings and optional extra values.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ThreadReport {
+    /// Name of the thread (e.g., "main").
     pub name: String,
+    /// Microseconds spent in various stages of the pipeline.
     pub stage_us: BTreeMap<String, u64>,
+    /// Extensible metrics for this thread.
     pub extensions: BTreeMap<String, ReportValue>,
 }
 
 impl ThreadReport {
+    /// Creates a new thread report with the given name.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -85,22 +103,36 @@ impl ThreadReport {
 /// Detailed archive report built from a completed run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArchiveReport {
+    /// Type of source archived.
     pub source_kind: ArchiveSourceKind,
+    /// Total wall-clock time for the operation.
     pub elapsed: Duration,
+    /// Total size of all input files.
     pub input_bytes_total: u64,
+    /// Total size of the produced OXZ archive.
     pub output_bytes_total: u64,
+    /// Total number of blocks processed.
     pub blocks_total: u32,
+    /// Number of blocks successfully completed.
     pub blocks_completed: u32,
+    /// Average read throughput in bytes per second.
     pub read_avg_bps: f64,
+    /// Average write throughput in bytes per second.
     pub write_avg_bps: f64,
+    /// Ratio of output size to input size.
     pub output_input_ratio: f64,
+    /// Reports for each individual worker.
     pub workers: Vec<WorkerReport>,
+    /// Timing report for the main pipeline thread.
     pub main_thread: ThreadReport,
+    /// Extensible statistics for the entire run.
     pub extensions: BTreeMap<String, ReportValue>,
+    /// Optional point-in-time snapshot of internal telemetry.
     pub telemetry: Option<TelemetrySnapshot>,
 }
 
 impl ArchiveReport {
+    /// Optionally attaches a telemetry snapshot to the report.
     pub fn with_telemetry_snapshot(mut self, include_telemetry_snapshot: bool) -> Self {
         self.telemetry = if include_telemetry_snapshot {
             Some(telemetry::snapshot())
@@ -114,30 +146,47 @@ impl ArchiveReport {
 /// Wrapper for archive operations that return writer + report.
 #[derive(Debug)]
 pub struct ArchiveRun<W> {
+    /// The underlying writer containing the archive data.
     pub writer: W,
+    /// Summary report for the archive operation.
     pub report: ArchiveReport,
 }
 
 /// Detailed extract report including worker and main-thread timing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExtractReport {
+    /// Type of source extracted.
     pub source_kind: ArchiveSourceKind,
+    /// Total wall-clock time for the operation.
     pub elapsed: Duration,
+    /// Total size of the input archive.
     pub archive_bytes_total: u64,
+    /// Total size of all blocks after decompression.
     pub decoded_bytes_total: u64,
+    /// Total size of all files written to disk.
     pub output_bytes_total: u64,
+    /// Total number of blocks in the archive.
     pub blocks_total: u32,
+    /// Average read throughput in bytes per second.
     pub read_avg_bps: f64,
+    /// Average decode throughput in bytes per second.
     pub decode_avg_bps: f64,
+    /// Average write throughput in bytes per second.
     pub output_avg_bps: f64,
+    /// Ratio of output size to archive size.
     pub output_archive_ratio: f64,
+    /// Reports for each individual worker.
     pub workers: Vec<WorkerReport>,
+    /// Timing report for the main pipeline thread.
     pub main_thread: ThreadReport,
+    /// Extensible statistics for the extraction.
     pub extensions: BTreeMap<String, ReportValue>,
+    /// Optional point-in-time snapshot of internal telemetry.
     pub telemetry: Option<TelemetrySnapshot>,
 }
 
 impl ExtractReport {
+    /// Creates a new extract report from raw measurements.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_kind: ArchiveSourceKind,
@@ -185,10 +234,12 @@ impl ExtractReport {
     }
 }
 
-/// Unified run report.
+/// Unified run report enum.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RunReport {
+    /// Result of an archive operation.
     Archive(ArchiveReport),
+    /// Result of an extract operation.
     Extract(ExtractReport),
 }
 
@@ -318,10 +369,6 @@ impl ReportExport for RunReport {
             RunReport::Extract(report) => report.to_flat_map(),
         }
     }
-}
-
-fn duration_to_us(duration: Duration) -> u64 {
-    duration.as_micros().min(u64::MAX as u128) as u64
 }
 
 fn source_kind_label(source_kind: ArchiveSourceKind) -> &'static str {

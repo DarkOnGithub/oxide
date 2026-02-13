@@ -27,6 +27,10 @@ enum Token {
     End,
 }
 
+/// Compresses data using a custom Deflate-like algorithm.
+///
+/// The output stream includes a 4-byte little-endian size prefix, 
+/// a magic header "ODF1", and a version byte before the bitstream.
 pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() > u32::MAX as usize {
         return Err(OxideError::CompressionError(
@@ -73,6 +77,9 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Decompresses data using the custom Deflate-like algorithm.
+///
+/// Expects the format produced by [`apply`].
 pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() < 4 {
         return Err(OxideError::DecompressionError(

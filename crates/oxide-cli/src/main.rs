@@ -132,6 +132,7 @@ impl From<CompressionArg> for CompressionAlgo {
 }
 
 fn main() {
+    tracing_subscriber::fmt::init();
     if let Err(error) = run() {
         eprintln!("error: {error}");
         std::process::exit(1);

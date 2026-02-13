@@ -14,27 +14,40 @@ pub(super) const DIRECTORY_BUNDLE_MAGIC: [u8; 4] = *b"OXDB";
 pub(super) const DIRECTORY_BUNDLE_VERSION: u16 = 1;
 pub(super) const SOURCE_KIND_DIRECTORY_FLAG: u32 = 1 << 0;
 
+/// Represents an entry in a directory bundle.
 #[derive(Debug)]
 pub(super) enum DirectoryBundleEntry {
+    /// A directory entry with its relative path.
     Directory { rel_path: String },
+    /// A file entry with its relative path and complete data.
     File { rel_path: String, data: Vec<u8> },
 }
 
+/// Metadata for a discovered file in a directory tree.
 #[derive(Debug, Clone)]
 pub(super) struct DirectoryFileSpec {
+    /// Path relative to the archive root.
     pub(super) rel_path: String,
+    /// Absolute path on the host filesystem.
     pub(super) full_path: PathBuf,
+    /// File size in bytes.
     pub(super) size: u64,
 }
 
+/// Result of a directory discovery operation.
 #[derive(Debug, Clone)]
 pub(super) struct DirectoryDiscovery {
+    /// Root directory path.
     pub(super) root: PathBuf,
+    /// List of discovered directories (relative paths).
     pub(super) directories: Vec<String>,
+    /// List of discovered files.
     pub(super) files: Vec<DirectoryFileSpec>,
+    /// Total estimated size of the directory bundle.
     pub(super) input_bytes_total: u64,
 }
 
+/// Utility for grouping file data into batches while respecting format boundaries.
 #[derive(Debug, Clone)]
 pub(super) struct DirectoryBatchSubmitter {
     source_path: PathBuf,
