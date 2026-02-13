@@ -13,6 +13,10 @@ const HASH_SEED: u32 = 2_654_435_761;
 const MAX_OFFSET: usize = u16::MAX as usize;
 const SKIP_STRENGTH: usize = 6;
 
+/// Compresses data using the LZ4 algorithm.
+///
+/// Returns a byte vector starting with a 4-byte little-endian original size
+/// followed by the LZ4 block.
 pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() > u32::MAX as usize {
         return Err(OxideError::CompressionError(
@@ -26,6 +30,9 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+/// Decompresses data using the LZ4 algorithm.
+///
+/// Expects a 4-byte little-endian size prefix followed by the LZ4 block.
 pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() < 4 {
         return Err(OxideError::DecompressionError(

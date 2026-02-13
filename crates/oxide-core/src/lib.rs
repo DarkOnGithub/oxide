@@ -1,3 +1,17 @@
+//! # Oxide Core
+//!
+//! `oxide-core` is the engine behind the Oxide archival system. It provides
+//! high-performance parallel processing for data compression and archival
+//! using the OXZ format.
+//!
+//! ## Key Components
+//!
+//! - **Pipeline**: Orchestrates the scanning, processing, and writing of archives.
+//! - **Compression**: Implementation of various compression algorithms (LZ4, LZMA, Deflate).
+//! - **Preprocessing**: Format-aware data transformations to improve compression ratios.
+//! - **IO**: Efficient I/O operations, including memory-mapped files and smart scanners.
+//! - **Telemetry**: Comprehensive instrumentation for monitoring and profiling.
+
 pub mod buffer;
 pub mod compression;
 pub mod core;

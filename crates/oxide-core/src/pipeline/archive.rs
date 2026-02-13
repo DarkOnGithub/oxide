@@ -23,7 +23,7 @@ use crate::telemetry::{
 };
 use crate::types::{
     Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
-    PreProcessingStrategy, Result,
+    PreProcessingStrategy, Result, duration_to_us,
 };
 
 use super::directory::{self, DirectoryBatchSubmitter};
@@ -325,11 +325,6 @@ impl DecodeRuntimeState {
 }
 
 #[inline]
-fn duration_to_us(duration: Duration) -> u64 {
-    duration.as_micros().min(u64::MAX as u128) as u64
-}
-
-#[inline]
 fn throughput_bps(bytes: u64, elapsed: Duration) -> f64 {
     let secs = elapsed.as_secs_f64();
     if bytes == 0 || secs <= 0.0 || !secs.is_finite() {
@@ -345,8 +340,6 @@ impl TelemetrySink for NoopTelemetrySink {
     fn on_event(&mut self, _event: TelemetryEvent) {}
 }
 
-/// End-to-end Phase 1 pipeline that wires scanner, workers, and OXZ I/O.
-///
 /// This pipeline performs pass-through processing for block payloads while preserving
 /// the metadata and ordering guarantees needed by the archive format.
 pub struct ArchivePipeline {
@@ -380,9 +373,11 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write,
     {
+        let path = path.as_ref();
+        tracing::info!(path = %path.display(), "starting file archival");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
-        self.archive_file_path_with(path.as_ref(), writer, &options, sink)
+        self.archive_file_path_with(path, writer, &options, sink)
     }
 
     /// Archives either a single file or a directory tree.
@@ -397,9 +392,10 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write + Send + 'static,
     {
+        let path = path.as_ref();
+        tracing::info!(path = %path.display(), "starting path archival");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
-        let path = path.as_ref();
         let metadata = fs::metadata(path)?;
         if metadata.is_file() {
             self.archive_file_path_with(path, writer, &options, sink)
@@ -424,9 +420,11 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write + Send + 'static,
     {
+        let path = dir_path.as_ref();
+        tracing::info!(path = %path.display(), "starting directory archival");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
-        self.archive_directory_path_with(dir_path.as_ref(), writer, &options, sink)
+        self.archive_directory_path_with(path, writer, &options, sink)
     }
 
     fn archive_file_path_with<W>(
@@ -471,6 +469,7 @@ impl ArchivePipeline {
         options: RunTelemetryOptions,
         sink: Option<&mut dyn TelemetrySink>,
     ) -> Result<(Vec<u8>, ExtractReport)> {
+        tracing::info!("starting archive extraction");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
@@ -514,6 +513,7 @@ impl ArchivePipeline {
         R: Read + std::io::Seek,
         P: AsRef<Path>,
     {
+        tracing::info!(output_dir = %output_dir.as_ref().display(), "starting directory archive extraction");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
@@ -579,6 +579,7 @@ impl ArchivePipeline {
         R: Read + std::io::Seek,
         P: AsRef<Path>,
     {
+        tracing::info!(output_path = %output_path.as_ref().display(), "starting path extraction");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
