@@ -1,12 +1,19 @@
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crc32fast::Hasher;
 
+use crate::telemetry::{self, profile, tags};
+use crate::types::duration_to_us;
 use crate::{BufferPool, CompressedBlock, OxideError, Result};
 
 use super::{BlockHeader, DEFAULT_REORDER_PENDING_LIMIT, Footer, GlobalHeader, ReorderBuffer};
 
+/// Writes OXZ archives by appending blocks and finalizing with a footer.
+///
+/// Includes an internal [`ReorderBuffer`] to handle out-of-order block submissions
+/// from parallel workers.
 #[derive(Debug)]
 pub struct ArchiveWriter<W: Write> {
     writer: W,
@@ -18,10 +25,12 @@ pub struct ArchiveWriter<W: Write> {
 }
 
 impl<W: Write> ArchiveWriter<W> {
+    /// Creates a new archive writer with the default reorder limit.
     pub fn new(writer: W, buffer_pool: Arc<BufferPool>) -> Self {
         Self::with_reorder_limit(writer, buffer_pool, DEFAULT_REORDER_PENDING_LIMIT)
     }
 
+    /// Creates a new archive writer with a custom reorder limit.
     pub fn with_reorder_limit(writer: W, buffer_pool: Arc<BufferPool>, max_pending: usize) -> Self {
         Self {
             writer,
@@ -33,10 +42,12 @@ impl<W: Write> ArchiveWriter<W> {
         }
     }
 
+    /// Writes the global header to the archive.
     pub fn write_global_header(&mut self, block_count: u32) -> Result<()> {
         self.write_global_header_with_flags(block_count, 0)
     }
 
+    /// Writes the global header with specific flags.
     pub fn write_global_header_with_flags(&mut self, block_count: u32, flags: u32) -> Result<()> {
         if self.expected_block_count.is_some() {
             return Err(OxideError::InvalidFormat("global header already written"));
@@ -50,6 +61,9 @@ impl<W: Write> ArchiveWriter<W> {
         Ok(())
     }
 
+    /// Writes a single block to the archive.
+    ///
+    /// Requires blocks to be written in strict sequential order by ID.
     pub fn write_block(&mut self, block: &CompressedBlock) -> Result<()> {
         self.ensure_header_written()?;
 
@@ -65,12 +79,19 @@ impl<W: Write> ArchiveWriter<W> {
         self.write_block_unchecked(block)
     }
 
+    /// Writes a block and recycles its data buffer back to the pool.
     pub fn write_owned_block(&mut self, block: CompressedBlock) -> Result<()> {
         self.write_block(&block)?;
         self.recycle_block_data(block.data);
         Ok(())
     }
 
+    /// Pushes a block into the reorder buffer.
+    ///
+    /// If the block completes a contiguous sequence starting from the next
+    /// expected ID, it and all subsequent ready blocks are written to the archive.
+    ///
+    /// Returns the number of blocks actually written to the underlying writer.
     pub fn push_block(&mut self, block: CompressedBlock) -> Result<usize> {
         self.ensure_header_written()?;
 
@@ -84,14 +105,20 @@ impl<W: Write> ArchiveWriter<W> {
         Ok(written)
     }
 
+    /// Returns the number of blocks already written to the archive.
     pub fn blocks_written(&self) -> u32 {
         self.blocks_written
     }
 
+    /// Returns the number of blocks currently pending in the reorder buffer.
     pub fn pending_blocks(&self) -> usize {
         self.reorder.pending_len()
     }
 
+    /// Finalizes the archive by writing the footer.
+    ///
+    /// Fails if there are still pending blocks in the reorder buffer or if
+    /// the written block count does not match the expected count.
     pub fn write_footer(mut self) -> Result<W> {
         self.ensure_header_written()?;
 
@@ -113,6 +140,7 @@ impl<W: Write> ArchiveWriter<W> {
         Ok(self.writer)
     }
 
+    /// Consumes the writer and returns the underlying inner writer.
     pub fn into_inner(self) -> W {
         self.writer
     }
@@ -127,6 +155,7 @@ impl<W: Write> ArchiveWriter<W> {
     }
 
     fn write_block_unchecked(&mut self, block: &CompressedBlock) -> Result<()> {
+        let start = Instant::now();
         let expected = self.expected_block_count.unwrap_or(0);
         if self.blocks_written >= expected {
             return Err(OxideError::InvalidFormat("archive block count exceeded"));
@@ -139,6 +168,27 @@ impl<W: Write> ArchiveWriter<W> {
         self.global_crc32.update(&header_bytes);
         self.global_crc32.update(&block.data);
         self.blocks_written += 1;
+
+        let elapsed_us = duration_to_us(start.elapsed());
+        telemetry::increment_counter(
+            tags::METRIC_OXZ_WRITE_BLOCK_COUNT,
+            1,
+            &[("subsystem", "oxz"), ("op", "write_block")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_OXZ_WRITE_BLOCK_LATENCY_US,
+            elapsed_us,
+            &[("subsystem", "oxz"), ("op", "write_block")],
+        );
+        profile::event(
+            tags::PROFILE_OXZ,
+            &[tags::TAG_OXZ],
+            "write_block",
+            "ok",
+            elapsed_us,
+            "oxz block written successfully",
+        );
+
         Ok(())
     }
 

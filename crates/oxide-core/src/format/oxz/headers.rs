@@ -9,20 +9,30 @@ use super::{
     BLOCK_HEADER_SIZE, FOOTER_SIZE, GLOBAL_HEADER_SIZE, OXZ_END_MAGIC, OXZ_MAGIC, OXZ_VERSION,
 };
 
+/// Global header for an OXZ archive.
+///
+/// Contains magic bytes, version information, flags, and total block count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlobalHeader {
+    /// Magic bytes "OXZ\0".
     pub magic: [u8; 4],
+    /// Format version.
     pub version: u16,
+    /// Reserved for future use.
     pub reserved: u16,
+    /// Archive-level flags.
     pub flags: u32,
+    /// Total number of blocks in the archive.
     pub block_count: u32,
 }
 
 impl GlobalHeader {
+    /// Creates a new global header with the given block count.
     pub fn new(block_count: u32) -> Self {
         Self::with_flags(block_count, 0)
     }
 
+    /// Creates a new global header with the given block count and flags.
     pub fn with_flags(block_count: u32, flags: u32) -> Self {
         Self {
             magic: OXZ_MAGIC,
@@ -33,17 +43,20 @@ impl GlobalHeader {
         }
     }
 
+    /// Writes the header to a writer.
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_all(&self.to_bytes())?;
         Ok(())
     }
 
+    /// Reads a header from a reader.
     pub fn read<R: Read>(reader: &mut R) -> Result<Self> {
         let mut bytes = [0u8; GLOBAL_HEADER_SIZE];
         reader.read_exact(&mut bytes)?;
         Self::from_bytes(bytes)
     }
 
+    /// Serializes the header to bytes.
     pub fn to_bytes(&self) -> [u8; GLOBAL_HEADER_SIZE] {
         let mut bytes = [0u8; GLOBAL_HEADER_SIZE];
         bytes[..4].copy_from_slice(&self.magic);
@@ -83,18 +96,29 @@ impl GlobalHeader {
     }
 }
 
+/// Header for a single data block in an OXZ archive.
+///
+/// Stores metadata needed to decompress and verify the block payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockHeader {
+    /// Sequential block identifier.
     pub block_id: u64,
+    /// Uncompressed size of the block data.
     pub original_size: u32,
+    /// Compressed size of the block data (stored after this header).
     pub compressed_size: u32,
+    /// Flags indicating the preprocessing strategy.
     pub strategy_flags: u8,
+    /// Flags indicating the compression algorithm and preset.
     pub compression_flags: u8,
+    /// Reserved for future use.
     pub reserved: u16,
+    /// CRC32 checksum of the compressed payload.
     pub crc32: u32,
 }
 
 impl BlockHeader {
+    /// Creates a new block header.
     pub fn new(
         block_id: u64,
         original_size: u32,
@@ -113,6 +137,7 @@ impl BlockHeader {
         )
     }
 
+    /// Creates a new block header with explicit compression metadata.
     pub fn new_with_compression_meta(
         block_id: u64,
         original_size: u32,
@@ -132,6 +157,7 @@ impl BlockHeader {
         }
     }
 
+    /// Creates a block header from a [`CompressedBlock`].
     pub fn from_block(block: &CompressedBlock) -> Result<Self> {
         let block_id = u64::try_from(block.id)
             .map_err(|_| OxideError::InvalidFormat("block id exceeds u64 range"))?;
@@ -150,29 +176,35 @@ impl BlockHeader {
         ))
     }
 
+    /// Writes the header to a writer.
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_all(&self.to_bytes())?;
         Ok(())
     }
 
+    /// Reads a header from a reader.
     pub fn read<R: Read>(reader: &mut R) -> Result<Self> {
         let mut bytes = [0u8; BLOCK_HEADER_SIZE];
         reader.read_exact(&mut bytes)?;
         Self::from_bytes(bytes)
     }
 
+    /// Decodes the preprocessing strategy from flags.
     pub fn strategy(&self) -> Result<PreProcessingStrategy> {
         PreProcessingStrategy::from_flags(self.strategy_flags)
     }
 
+    /// Decodes the compression algorithm from flags.
     pub fn compression(&self) -> Result<CompressionAlgo> {
         Ok(self.compression_meta()?.algo)
     }
 
+    /// Decodes the full compression metadata from flags.
     pub fn compression_meta(&self) -> Result<CompressionMeta> {
         CompressionMeta::from_flags(self.compression_flags)
     }
 
+    /// Serializes the header to bytes.
     pub fn to_bytes(&self) -> [u8; BLOCK_HEADER_SIZE] {
         let mut bytes = [0u8; BLOCK_HEADER_SIZE];
         bytes[..8].copy_from_slice(&self.block_id.to_le_bytes());
@@ -213,13 +245,20 @@ impl BlockHeader {
     }
 }
 
+/// Footer for an OXZ archive.
+///
+/// Contains end magic bytes and a global CRC32 checksum for the entire archive
+/// (excluding the footer itself).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Footer {
+    /// End magic bytes "END\0".
     pub end_magic: [u8; 4],
+    /// CRC32 checksum of all preceding archive data.
     pub global_crc32: u32,
 }
 
 impl Footer {
+    /// Creates a new footer with the given global CRC32.
     pub fn new(global_crc32: u32) -> Self {
         Self {
             end_magic: OXZ_END_MAGIC,
@@ -227,17 +266,20 @@ impl Footer {
         }
     }
 
+    /// Writes the footer to a writer.
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_all(&self.to_bytes())?;
         Ok(())
     }
 
+    /// Reads a footer from a reader.
     pub fn read<R: Read>(reader: &mut R) -> Result<Self> {
         let mut bytes = [0u8; FOOTER_SIZE];
         reader.read_exact(&mut bytes)?;
         Self::from_bytes(bytes)
     }
 
+    /// Serializes the footer to bytes.
     pub fn to_bytes(&self) -> [u8; FOOTER_SIZE] {
         let mut bytes = [0u8; FOOTER_SIZE];
         bytes[..4].copy_from_slice(&self.end_magic);

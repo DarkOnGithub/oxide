@@ -1,12 +1,18 @@
 use std::cmp::min;
 use std::io::{Read, Seek, SeekFrom};
+use std::time::Instant;
 
 use crc32fast::Hasher;
 
+use crate::telemetry::{self, profile, tags};
+use crate::types::duration_to_us;
 use crate::{OxideError, Result};
 
 use super::{BLOCK_HEADER_SIZE, BlockHeader, Footer, GLOBAL_HEADER_SIZE, GlobalHeader};
 
+/// Reads OXZ archives and provides access to individual blocks.
+///
+/// Supports both sequential iteration and random access to blocks.
 #[derive(Debug)]
 pub struct ArchiveReader<R: Read + Seek> {
     reader: R,
@@ -16,6 +22,10 @@ pub struct ArchiveReader<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> ArchiveReader<R> {
+    /// Creates a new archive reader from a readable and seekable source.
+    ///
+    /// Validates the global header, builds an index of block offsets, and
+    /// verifies the global CRC32 in the footer.
     pub fn new(mut reader: R) -> Result<Self> {
         let global_header = GlobalHeader::read(&mut reader)?;
         let (block_offsets, footer_offset) =
@@ -41,24 +51,31 @@ impl<R: Read + Seek> ArchiveReader<R> {
         })
     }
 
+    /// Returns the number of blocks in the archive.
     pub fn block_count(&self) -> u32 {
         self.global_header.block_count
     }
 
+    /// Returns the global header of the archive.
     pub fn global_header(&self) -> GlobalHeader {
         self.global_header
     }
 
+    /// Returns the footer of the archive.
     pub fn footer(&self) -> Footer {
         self.footer
     }
 
+    /// Reads a specific block by its index.
+    ///
+    /// Validates the block's CRC32 checksum before returning.
     pub fn read_block(&mut self, index: u32) -> Result<(BlockHeader, Vec<u8>)> {
-        let index = usize::try_from(index)
+        let start = Instant::now();
+        let index_val = usize::try_from(index)
             .map_err(|_| OxideError::InvalidFormat("block index exceeds usize range"))?;
         let offset = *self
             .block_offsets
-            .get(index)
+            .get(index_val)
             .ok_or(OxideError::InvalidFormat("block index out of range"))?;
 
         self.reader.seek(SeekFrom::Start(offset))?;
@@ -74,9 +91,30 @@ impl<R: Read + Seek> ArchiveReader<R> {
             });
         }
 
+        let elapsed_us = duration_to_us(start.elapsed());
+        telemetry::increment_counter(
+            tags::METRIC_OXZ_READ_BLOCK_COUNT,
+            1,
+            &[("subsystem", "oxz"), ("op", "read_block")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_OXZ_READ_BLOCK_LATENCY_US,
+            elapsed_us,
+            &[("subsystem", "oxz"), ("op", "read_block")],
+        );
+        profile::event(
+            tags::PROFILE_OXZ,
+            &[tags::TAG_OXZ],
+            "read_block",
+            "ok",
+            elapsed_us,
+            "oxz block read successfully",
+        );
+
         Ok((header, data))
     }
 
+    /// Returns an iterator over all blocks in the archive.
     pub fn iter_blocks(&mut self) -> BlockIterator<'_, R> {
         BlockIterator {
             reader: self,
@@ -84,6 +122,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
         }
     }
 
+    /// Consumes the reader and returns the underlying inner reader.
     pub fn into_inner(self) -> R {
         self.reader
     }
@@ -122,6 +161,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
     }
 }
 
+/// An iterator over blocks in an OXZ archive.
 pub struct BlockIterator<'a, R: Read + Seek> {
     reader: &'a mut ArchiveReader<R>,
     next_index: u32,

@@ -23,7 +23,7 @@ use crate::telemetry::{
 };
 use crate::types::{
     Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
-    PreProcessingStrategy, Result,
+    PreProcessingStrategy, Result, duration_to_us,
 };
 
 use super::directory::{self, DirectoryBatchSubmitter};
@@ -61,10 +61,10 @@ struct BlockSizeDecision {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct BlockSizeScore {
-    block_size: usize,
-    throughput_bps: f64,
-    output_bytes: usize,
+pub struct BlockSizeScore {
+    pub block_size: usize,
+    pub throughput_bps: f64,
+    pub output_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -325,11 +325,6 @@ impl DecodeRuntimeState {
 }
 
 #[inline]
-fn duration_to_us(duration: Duration) -> u64 {
-    duration.as_micros().min(u64::MAX as u128) as u64
-}
-
-#[inline]
 fn throughput_bps(bytes: u64, elapsed: Duration) -> f64 {
     let secs = elapsed.as_secs_f64();
     if bytes == 0 || secs <= 0.0 || !secs.is_finite() {
@@ -345,8 +340,6 @@ impl TelemetrySink for NoopTelemetrySink {
     fn on_event(&mut self, _event: TelemetryEvent) {}
 }
 
-/// End-to-end Phase 1 pipeline that wires scanner, workers, and OXZ I/O.
-///
 /// This pipeline performs pass-through processing for block payloads while preserving
 /// the metadata and ordering guarantees needed by the archive format.
 pub struct ArchivePipeline {
@@ -380,9 +373,11 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write,
     {
+        let path = path.as_ref();
+        tracing::info!(path = %path.display(), "starting file archival");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
-        self.archive_file_path_with(path.as_ref(), writer, &options, sink)
+        self.archive_file_path_with(path, writer, &options, sink)
     }
 
     /// Archives either a single file or a directory tree.
@@ -397,9 +392,10 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write + Send + 'static,
     {
+        let path = path.as_ref();
+        tracing::info!(path = %path.display(), "starting path archival");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
-        let path = path.as_ref();
         let metadata = fs::metadata(path)?;
         if metadata.is_file() {
             self.archive_file_path_with(path, writer, &options, sink)
@@ -424,9 +420,11 @@ impl ArchivePipeline {
         P: AsRef<Path>,
         W: Write + Send + 'static,
     {
+        let path = dir_path.as_ref();
+        tracing::info!(path = %path.display(), "starting directory archival");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
-        self.archive_directory_path_with(dir_path.as_ref(), writer, &options, sink)
+        self.archive_directory_path_with(path, writer, &options, sink)
     }
 
     fn archive_file_path_with<W>(
@@ -471,6 +469,7 @@ impl ArchivePipeline {
         options: RunTelemetryOptions,
         sink: Option<&mut dyn TelemetrySink>,
     ) -> Result<(Vec<u8>, ExtractReport)> {
+        tracing::info!("starting archive extraction");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
@@ -514,6 +513,7 @@ impl ArchivePipeline {
         R: Read + std::io::Seek,
         P: AsRef<Path>,
     {
+        tracing::info!(output_dir = %output_dir.as_ref().display(), "starting directory archive extraction");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
@@ -579,6 +579,7 @@ impl ArchivePipeline {
         R: Read + std::io::Seek,
         P: AsRef<Path>,
     {
+        tracing::info!(output_path = %output_path.as_ref().display(), "starting path extraction");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
@@ -1917,7 +1918,7 @@ impl ArchivePipeline {
         );
     }
 
-    fn max_inflight_blocks(
+    pub fn max_inflight_blocks(
         total_blocks: usize,
         num_workers: usize,
         block_size: usize,
@@ -2599,7 +2600,7 @@ impl ArchivePipeline {
     }
 
     #[inline]
-    fn select_stored_payload<'a>(
+    pub fn select_stored_payload<'a>(
         source: &'a [u8],
         compressed: &'a [u8],
         raw_fallback_enabled: bool,
@@ -2693,7 +2694,7 @@ impl ArchivePipeline {
         })
     }
 
-    fn score_block_size(&self, sample: &[u8], block_size: usize) -> Result<BlockSizeScore> {
+    pub fn score_block_size(&self, sample: &[u8], block_size: usize) -> Result<BlockSizeScore> {
         let started = Instant::now();
         let mut output_bytes = 0usize;
         let chunk_size = block_size.max(1);
@@ -2766,83 +2767,3 @@ impl ArchivePipeline {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn pseudo_random_bytes(len: usize) -> Vec<u8> {
-        let mut state = 0x1234_5678_9ABC_DEF0u64;
-        let mut out = Vec::with_capacity(len);
-        for _ in 0..len {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            out.push((state >> 56) as u8);
-        }
-        out
-    }
-
-    fn build_pipeline_for_score(raw_fallback_enabled: bool) -> ArchivePipeline {
-        let mut config = ArchivePipelineConfig::new(
-            8 * 1024,
-            1,
-            Arc::new(BufferPool::new(16 * 1024, 16)),
-            CompressionAlgo::Lz4,
-        );
-        config.performance.raw_fallback_enabled = raw_fallback_enabled;
-        ArchivePipeline::new(config)
-    }
-
-    #[test]
-    fn inflight_window_is_limited_by_byte_budget() {
-        let mut performance = PipelinePerformanceOptions::default();
-        performance.max_inflight_blocks_per_worker = 32;
-        performance.max_inflight_bytes = 16 * 1024 * 1024;
-
-        let inflight = ArchivePipeline::max_inflight_blocks(10_000, 16, 1024 * 1024, &performance);
-
-        assert_eq!(inflight, 16);
-    }
-
-    #[test]
-    fn inflight_window_never_exceeds_total_blocks() {
-        let mut performance = PipelinePerformanceOptions::default();
-        performance.max_inflight_blocks_per_worker = 64;
-        performance.max_inflight_bytes = 2 * 1024 * 1024 * 1024;
-
-        let inflight = ArchivePipeline::max_inflight_blocks(7, 16, 256 * 1024, &performance);
-
-        assert_eq!(inflight, 7);
-    }
-
-    #[test]
-    fn select_stored_payload_uses_raw_when_compression_is_not_smaller() {
-        let source = [1u8, 2, 3, 4];
-        let compressed_equal = [9u8, 9, 9, 9];
-        let compressed_larger = [9u8, 9, 9, 9, 9];
-
-        let (stored_equal, raw_equal) =
-            ArchivePipeline::select_stored_payload(&source, &compressed_equal, true);
-        assert!(raw_equal);
-        assert_eq!(stored_equal, source.as_slice());
-
-        let (stored_larger, raw_larger) =
-            ArchivePipeline::select_stored_payload(&source, &compressed_larger, true);
-        assert!(raw_larger);
-        assert_eq!(stored_larger, source.as_slice());
-    }
-
-    #[test]
-    fn score_block_size_respects_raw_fallback_setting() {
-        let sample = pseudo_random_bytes(64 * 1024);
-
-        let score_with_fallback = build_pipeline_for_score(true)
-            .score_block_size(&sample, 8 * 1024)
-            .expect("score with fallback");
-        let score_without_fallback = build_pipeline_for_score(false)
-            .score_block_size(&sample, 8 * 1024)
-            .expect("score without fallback");
-
-        assert!(score_without_fallback.output_bytes > sample.len());
-        assert!(score_with_fallback.output_bytes <= sample.len());
-        assert!(score_with_fallback.output_bytes <= score_without_fallback.output_bytes);
-    }
-}

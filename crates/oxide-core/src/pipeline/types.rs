@@ -7,21 +7,29 @@ use crate::CompressionPreset;
 use crate::buffer::BufferPool;
 use crate::types::CompressionAlgo;
 
+/// Indicates whether the archive source is a single file or a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArchiveSourceKind {
+    /// Source is a single file.
     File,
+    /// Source is a directory tree.
     Directory,
 }
 
 /// Extensible metric value used by pipeline internals before report export.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatValue {
+    /// Unsigned 64-bit integer.
     U64(u64),
+    /// 64-bit floating point number.
     F64(f64),
+    /// UTF-8 string.
     Text(String),
 }
 
 /// Throughput-oriented knobs for archive/extract behavior.
+///
+/// These options allow fine-tuning the performance of the pipeline.
 #[derive(Debug, Clone)]
 pub struct PipelinePerformanceOptions {
     /// Enables block-size autotuning before archive work starts.
@@ -75,14 +83,20 @@ impl Default for PipelinePerformanceOptions {
 /// Construction config for the archive pipeline.
 #[derive(Debug, Clone)]
 pub struct ArchivePipelineConfig {
+    /// Target size for data blocks.
     pub target_block_size: usize,
+    /// Number of parallel workers.
     pub workers: usize,
+    /// Shared buffer pool for memory management.
     pub buffer_pool: Arc<BufferPool>,
+    /// Compression algorithm to use.
     pub compression_algo: CompressionAlgo,
+    /// Performance tuning options.
     pub performance: PipelinePerformanceOptions,
 }
 
 impl ArchivePipelineConfig {
+    /// Creates a new pipeline configuration with default performance options.
     pub fn new(
         target_block_size: usize,
         workers: usize,

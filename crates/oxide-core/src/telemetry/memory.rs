@@ -3,11 +3,16 @@ use std::fs;
 /// Process-level memory usage sample.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProcessMemorySample {
+    /// Resident Set Size (physical memory) in bytes.
     pub rss_bytes: Option<u64>,
+    /// Virtual memory size in bytes.
     pub virtual_bytes: Option<u64>,
 }
 
-/// Samples current process memory usage.
+/// Samples the current process's memory usage from the operating system.
+///
+/// Currently supports Linux via `/proc/self/status`. Returns default (None) 
+/// on other platforms.
 pub fn sample_process_memory() -> ProcessMemorySample {
     #[cfg(target_os = "linux")]
     {
