@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use crate::OxideError;
 use crate::telemetry::{self, profile, tags};
 use crate::types::duration_to_us;
 use crate::{
@@ -18,8 +19,24 @@ pub mod utils;
 
 pub use utils::{AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat};
 
+/// Optional metadata used to interpret raw bytes for format-aware preprocessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreprocessingMetadata {
+    Image(ImageMetadata),
+    Audio(AudioMetadata),
+}
+
 /// Dispatches preprocessing to the specified strategy.
 pub fn apply_preprocessing(data: &[u8], strategy: &PreProcessingStrategy) -> Result<Vec<u8>> {
+    apply_preprocessing_with_metadata(data, strategy, None)
+}
+
+/// Dispatches preprocessing to the specified strategy with optional input metadata.
+pub fn apply_preprocessing_with_metadata(
+    data: &[u8],
+    strategy: &PreProcessingStrategy,
+    metadata: Option<&PreprocessingMetadata>,
+) -> Result<Vec<u8>> {
     let start = Instant::now();
     let input_bytes = data.len() as u64;
 
@@ -27,10 +44,18 @@ pub fn apply_preprocessing(data: &[u8], strategy: &PreProcessingStrategy) -> Res
         PreProcessingStrategy::None => Ok(data.to_vec()),
         PreProcessingStrategy::Text(TextStrategy::Bpe) => text_bpe::apply(data),
         PreProcessingStrategy::Text(TextStrategy::Bwt) => text_bwt::apply(data),
-        PreProcessingStrategy::Image(ImageStrategy::YCoCgR) => image_ycocgr::apply(data),
-        PreProcessingStrategy::Image(ImageStrategy::Paeth) => image_paeth::apply(data),
-        PreProcessingStrategy::Image(ImageStrategy::LocoI) => image_locoi::apply(data),
-        PreProcessingStrategy::Audio(AudioStrategy::Lpc) => audio_lpc::apply(data),
+        PreProcessingStrategy::Image(ImageStrategy::YCoCgR) => {
+            image_ycocgr::apply(data, metadata_as_image(metadata)?)
+        }
+        PreProcessingStrategy::Image(ImageStrategy::Paeth) => {
+            image_paeth::apply(data, metadata_as_image(metadata)?)
+        }
+        PreProcessingStrategy::Image(ImageStrategy::LocoI) => {
+            image_locoi::apply(data, metadata_as_image(metadata)?)
+        }
+        PreProcessingStrategy::Audio(AudioStrategy::Lpc) => {
+            audio_lpc::apply(data, metadata_as_audio(metadata)?)
+        }
         PreProcessingStrategy::Binary(BinaryStrategy::Bcj) => binary_bcj::apply(data),
     };
 
@@ -66,24 +91,49 @@ pub fn apply_preprocessing(data: &[u8], strategy: &PreProcessingStrategy) -> Res
     result
 }
 
+fn metadata_as_image(metadata: Option<&PreprocessingMetadata>) -> Result<Option<&ImageMetadata>> {
+    match metadata {
+        None => Ok(None),
+        Some(PreprocessingMetadata::Image(metadata)) => Ok(Some(metadata)),
+        Some(_) => Err(OxideError::InvalidFormat(
+            "preprocessing metadata type mismatch for image strategy",
+        )),
+    }
+}
+
+fn metadata_as_audio(metadata: Option<&PreprocessingMetadata>) -> Result<Option<&AudioMetadata>> {
+    match metadata {
+        None => Ok(None),
+        Some(PreprocessingMetadata::Audio(metadata)) => Ok(Some(metadata)),
+        Some(_) => Err(OxideError::InvalidFormat(
+            "preprocessing metadata type mismatch for audio strategy",
+        )),
+    }
+}
+
 pub fn get_preprocessing_strategy(
     file_type_hint: FileFormat,
     compression_algo: CompressionAlgo,
 ) -> PreProcessingStrategy {
     match (file_type_hint, compression_algo) {
-        (_, CompressionAlgo::Lz4) => PreProcessingStrategy::None,
-        (FileFormat::Text, CompressionAlgo::Lzma) => PreProcessingStrategy::Text(TextStrategy::Bwt),
-        (FileFormat::Text, CompressionAlgo::Deflate) => {
-            PreProcessingStrategy::Text(TextStrategy::Bpe)
-        }
-        (FileFormat::Image, CompressionAlgo::Lzma) => {
-            PreProcessingStrategy::Image(ImageStrategy::LocoI)
-        }
-        (FileFormat::Image, CompressionAlgo::Deflate) => {
-            PreProcessingStrategy::Image(ImageStrategy::Paeth)
-        }
+        (FileFormat::Text, _) => PreProcessingStrategy::Text(TextStrategy::Bpe),
+        (FileFormat::Image, _) => PreProcessingStrategy::Image(ImageStrategy::Paeth),
         (FileFormat::Audio, _) => PreProcessingStrategy::Audio(AudioStrategy::Lpc),
         (FileFormat::Binary, _) => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
+        (FileFormat::Common, _) => PreProcessingStrategy::Image(ImageStrategy::LocoI),
+        // (_, CompressionAlgo::Lz4) => PreProcessingStrategy::None,
+        // (FileFormat::Text, CompressionAlgo::Lzma) => PreProcessingStrategy::Text(TextStrategy::Bwt),
+        // (FileFormat::Text, CompressionAlgo::Deflate) => {
+        //     PreProcessingStrategy::Text(TextStrategy::Bpe)
+        // }
+        // (FileFormat::Image, CompressionAlgo::Lzma) => {
+        //     PreProcessingStrategy::Image(ImageStrategy::LocoI)
+        // }
+        // (FileFormat::Image, CompressionAlgo::Deflate) => {
+        //     PreProcessingStrategy::Image(ImageStrategy::Paeth)
+        // }
+        // (FileFormat::Audio, _) => PreProcessingStrategy::Audio(AudioStrategy::Lpc),
+        // (FileFormat::Binary, _) => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
         _ => PreProcessingStrategy::None,
     }
 }
