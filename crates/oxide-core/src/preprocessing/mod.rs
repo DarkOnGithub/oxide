@@ -116,11 +116,11 @@ pub fn get_preprocessing_strategy(
     compression_algo: CompressionAlgo,
 ) -> PreProcessingStrategy {
     match (file_type_hint, compression_algo) {
-        (FileFormat::Text, _) => PreProcessingStrategy::Text(TextStrategy::Bpe),
-        (FileFormat::Image, _) => PreProcessingStrategy::Image(ImageStrategy::Paeth),
+        // (FileFormat::Text, _) => PreProcessingStrategy::Text(TextStrategy::Bpe),
+        (FileFormat::Image, _) => PreProcessingStrategy::Image(ImageStrategy::YCoCgR),
         (FileFormat::Audio, _) => PreProcessingStrategy::Audio(AudioStrategy::Lpc),
         (FileFormat::Binary, _) => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
-        (FileFormat::Common, _) => PreProcessingStrategy::Image(ImageStrategy::LocoI),
+        _ => PreProcessingStrategy::None,
         // (_, CompressionAlgo::Lz4) => PreProcessingStrategy::None,
         // (FileFormat::Text, CompressionAlgo::Lzma) => PreProcessingStrategy::Text(TextStrategy::Bwt),
         // (FileFormat::Text, CompressionAlgo::Deflate) => {
@@ -134,7 +134,6 @@ pub fn get_preprocessing_strategy(
         // }
         // (FileFormat::Audio, _) => PreProcessingStrategy::Audio(AudioStrategy::Lpc),
         // (FileFormat::Binary, _) => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
-        _ => PreProcessingStrategy::None,
     }
 }
 

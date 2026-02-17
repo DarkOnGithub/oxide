@@ -2552,6 +2552,7 @@ impl ArchivePipeline {
     ) -> Result<CompressedBlock> {
         let pre_proc =
             crate::preprocessing::get_preprocessing_strategy(batch.file_type_hint, compression);
+        println!("pre_proc {:?}", pre_proc);
         let source = batch.data();
         let metadata = batch.preprocessing_metadata.as_ref();
         let (preprocessed, preprocessing_elapsed) =
