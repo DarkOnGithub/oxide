@@ -3,10 +3,9 @@ use crate::preprocessing::utils;
 
 /// Converts raw image bytes into RGB pixels for YCoCg-R color transforms.
 ///
-/// Input: `data` is a packed RGB byte stream in `RGBRGB...` order. Trailing
-/// bytes that do not form a full pixel are ignored.
-pub fn bytes_to_data(data: &[u8]) -> Vec<[u8; 3]> {
-    utils::bytes_to_rgb_pixels(data)
+/// Input remains raw bytes. Metadata controls pixel layout decoding.
+pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec<[u8; 3]>> {
+    utils::bytes_to_rgb_pixels(data, metadata)
 }
 
 /// Applies YCoCg-R color space conversion preprocessing to image bytes.

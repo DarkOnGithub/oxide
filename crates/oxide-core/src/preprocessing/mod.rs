@@ -3,7 +3,8 @@ use std::time::Instant;
 use crate::telemetry::{self, profile, tags};
 use crate::types::duration_to_us;
 use crate::{
-    AudioStrategy, BinaryStrategy, ImageStrategy, PreProcessingStrategy, Result, TextStrategy,
+    AudioStrategy, BinaryStrategy, CompressionAlgo, FileFormat, ImageStrategy,
+    PreProcessingStrategy, Result, TextStrategy,
 };
 
 pub mod audio_lpc;
@@ -14,6 +15,8 @@ pub mod image_ycocgr;
 pub mod text_bpe;
 pub mod text_bwt;
 pub mod utils;
+
+pub use utils::{AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat};
 
 /// Dispatches preprocessing to the specified strategy.
 pub fn apply_preprocessing(data: &[u8], strategy: &PreProcessingStrategy) -> Result<Vec<u8>> {
@@ -61,6 +64,28 @@ pub fn apply_preprocessing(data: &[u8], strategy: &PreProcessingStrategy) -> Res
     }
 
     result
+}
+
+pub fn get_preprocessing_strategy(
+    file_type_hint: FileFormat,
+    compression_algo: CompressionAlgo,
+) -> PreProcessingStrategy {
+    match (file_type_hint, compression_algo) {
+        (_, CompressionAlgo::Lz4) => PreProcessingStrategy::None,
+        (FileFormat::Text, CompressionAlgo::Lzma) => PreProcessingStrategy::Text(TextStrategy::Bwt),
+        (FileFormat::Text, CompressionAlgo::Deflate) => {
+            PreProcessingStrategy::Text(TextStrategy::Bpe)
+        }
+        (FileFormat::Image, CompressionAlgo::Lzma) => {
+            PreProcessingStrategy::Image(ImageStrategy::LocoI)
+        }
+        (FileFormat::Image, CompressionAlgo::Deflate) => {
+            PreProcessingStrategy::Image(ImageStrategy::Paeth)
+        }
+        (FileFormat::Audio, _) => PreProcessingStrategy::Audio(AudioStrategy::Lpc),
+        (FileFormat::Binary, _) => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
+        _ => PreProcessingStrategy::None,
+    }
 }
 
 /// Dispatches reverse preprocessing to the specified strategy.
