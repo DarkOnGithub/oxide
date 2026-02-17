@@ -29,7 +29,7 @@ enum Token {
 
 /// Compresses data using a custom Deflate-like algorithm.
 ///
-/// The output stream includes a 4-byte little-endian size prefix, 
+/// The output stream includes a 4-byte little-endian size prefix,
 /// a magic header "ODF1", and a version byte before the bitstream.
 pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() > u32::MAX as usize {
@@ -191,13 +191,14 @@ fn tokenize_lz77(input: &[u8]) -> Vec<Token> {
         };
 
         if let Some(mat) = best {
-            let next_better = if mat.len < LAZY_MATCH_THRESHOLD && pos + 1 + MIN_MATCH <= input.len() {
-                find_best_match(input, pos + 1, &head, &prev)
-                    .map(|next| next.len > mat.len + 1)
-                    .unwrap_or(false)
-            } else {
-                false
-            };
+            let next_better =
+                if mat.len < LAZY_MATCH_THRESHOLD && pos + 1 + MIN_MATCH <= input.len() {
+                    find_best_match(input, pos + 1, &head, &prev)
+                        .map(|next| next.len > mat.len + 1)
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
 
             if next_better {
                 insert_position(input, pos, &mut head, &mut prev);
@@ -601,7 +602,10 @@ impl DecodeTree {
         Ok(())
     }
 
-    fn decode_symbol(&self, reader: &mut BitReader<'_>) -> core::result::Result<usize, DecodeError> {
+    fn decode_symbol(
+        &self,
+        reader: &mut BitReader<'_>,
+    ) -> core::result::Result<usize, DecodeError> {
         let mut idx = 0usize;
         loop {
             let node = self.nodes[idx];
@@ -750,4 +754,3 @@ impl fmt::Display for DecodeError {
         }
     }
 }
-

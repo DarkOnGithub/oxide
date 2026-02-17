@@ -13,6 +13,7 @@ pub mod image_paeth;
 pub mod image_ycocgr;
 pub mod text_bpe;
 pub mod text_bwt;
+pub mod utils;
 
 /// Dispatches preprocessing to the specified strategy.
 pub fn apply_preprocessing(data: &[u8], strategy: &PreProcessingStrategy) -> Result<Vec<u8>> {
@@ -43,7 +44,11 @@ pub fn apply_preprocessing(data: &[u8], strategy: &PreProcessingStrategy) -> Res
             &labels,
         );
         telemetry::record_histogram(tags::METRIC_PREPROCESSING_INPUT_BYTES, input_bytes, &labels);
-        telemetry::record_histogram(tags::METRIC_PREPROCESSING_OUTPUT_BYTES, output_bytes, &labels);
+        telemetry::record_histogram(
+            tags::METRIC_PREPROCESSING_OUTPUT_BYTES,
+            output_bytes,
+            &labels,
+        );
 
         profile::event(
             tags::PROFILE_PREPROCESSING,
@@ -87,7 +92,11 @@ pub fn reverse_preprocessing(data: &[u8], strategy: &PreProcessingStrategy) -> R
             &labels,
         );
         telemetry::record_histogram(tags::METRIC_PREPROCESSING_INPUT_BYTES, input_bytes, &labels);
-        telemetry::record_histogram(tags::METRIC_PREPROCESSING_OUTPUT_BYTES, output_bytes, &labels);
+        telemetry::record_histogram(
+            tags::METRIC_PREPROCESSING_OUTPUT_BYTES,
+            output_bytes,
+            &labels,
+        );
 
         profile::event(
             tags::PROFILE_PREPROCESSING,

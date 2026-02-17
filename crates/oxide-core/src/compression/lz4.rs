@@ -509,4 +509,3 @@ unsafe fn copy_match(dst: *mut u8, offset: usize, len: usize) {
         copied += chunk;
     }
 }
-

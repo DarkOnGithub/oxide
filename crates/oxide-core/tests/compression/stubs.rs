@@ -76,7 +76,11 @@ fn compression_router_apply_is_codec_specific() {
 #[test]
 fn compression_router_reverse_fails_on_non_codec_payloads() {
     let input = fixture();
-    for algo in [CompressionAlgo::Lz4, CompressionAlgo::Lzma, CompressionAlgo::Deflate] {
+    for algo in [
+        CompressionAlgo::Lz4,
+        CompressionAlgo::Lzma,
+        CompressionAlgo::Deflate,
+    ] {
         assert!(
             reverse_compression(&input, algo).is_err(),
             "reverse should fail for non-{algo:?} payload"

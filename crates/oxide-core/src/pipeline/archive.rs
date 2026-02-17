@@ -2766,4 +2766,3 @@ impl ArchivePipeline {
         })
     }
 }
-
