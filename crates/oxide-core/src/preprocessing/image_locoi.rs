@@ -3,10 +3,9 @@ use crate::preprocessing::utils;
 
 /// Converts raw image bytes into grayscale-like pixel intensity samples.
 ///
-/// Input: `data` is an image byte stream where each byte is treated as one
-/// pixel/channel value.
-pub fn bytes_to_data(data: &[u8]) -> Vec<u8> {
-    utils::bytes_to_grayscale_pixels(data)
+/// Input remains raw bytes. Metadata controls pixel layout decoding.
+pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec<u8>> {
+    utils::bytes_to_grayscale_pixels(data, metadata)
 }
 
 /// Applies LOCO-I (JPEG-LS) predictor preprocessing to image bytes.

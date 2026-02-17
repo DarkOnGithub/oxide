@@ -39,7 +39,10 @@ pub use io::{BoundaryMode, InputScanner, MmapInput};
 pub use pipeline::{
     ArchivePipeline, ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions,
 };
-pub use preprocessing::{apply_preprocessing, reverse_preprocessing};
+pub use preprocessing::{
+    AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat,
+    apply_preprocessing, reverse_preprocessing,
+};
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use telemetry::{
     ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent, ExtractReport,
