@@ -41,7 +41,8 @@ pub use pipeline::{
 };
 pub use preprocessing::{
     AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat,
-    apply_preprocessing, reverse_preprocessing,
+    PreprocessingMetadata, apply_preprocessing, apply_preprocessing_with_metadata,
+    reverse_preprocessing,
 };
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use telemetry::{

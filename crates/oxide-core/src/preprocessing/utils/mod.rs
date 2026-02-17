@@ -28,9 +28,13 @@ impl ImagePixelFormat {
 pub struct ImageMetadata {
     /// Pixel format of the source bytes.
     pub pixel_format: ImagePixelFormat,
-    /// Image width in pixels. When `None`, bytes are treated as a packed stream.
+    /// Image width in pixels.
+    ///
+    /// When `None`, bytes are treated as a packed stream.
+    /// When set and `height` is `None`, bytes are treated as a row-structured stream
+    /// with unknown total row count.
     pub width: Option<usize>,
-    /// Image height in pixels. Must be set together with `width`.
+    /// Image height in pixels when known.
     pub height: Option<usize>,
     /// Number of source bytes between the start of consecutive rows.
     ///
@@ -58,6 +62,16 @@ impl ImageMetadata {
         }
     }
 
+    /// Adds row-structured layout with unknown total row count.
+    pub fn with_row_layout(self, width: usize, row_stride: usize) -> Self {
+        Self {
+            width: Some(width),
+            height: None,
+            row_stride: Some(row_stride),
+            ..self
+        }
+    }
+
     /// Adds explicit row stride to metadata.
     pub fn with_row_stride(self, row_stride: usize) -> Self {
         Self {
@@ -70,6 +84,22 @@ impl ImageMetadata {
         let bytes_per_pixel = self.pixel_format.bytes_per_pixel();
         match (self.width, self.height) {
             (None, None) => Ok(data_len / bytes_per_pixel),
+            (Some(width), None) => {
+                let row_bytes = width
+                    .checked_mul(bytes_per_pixel)
+                    .ok_or(OxideError::InvalidFormat("image row size overflow"))?;
+                let row_stride = self.row_stride.unwrap_or(row_bytes);
+                if row_stride < row_bytes {
+                    return Err(OxideError::InvalidFormat(
+                        "image row stride smaller than packed row size",
+                    ));
+                }
+
+                let full_rows = data_len / row_stride;
+                full_rows
+                    .checked_mul(width)
+                    .ok_or(OxideError::InvalidFormat("image pixel count overflow"))
+            }
             (Some(width), Some(height)) => {
                 let row_bytes = width
                     .checked_mul(bytes_per_pixel)
@@ -223,6 +253,23 @@ where
         (None, None) => {
             for pixel in data.chunks_exact(bytes_per_pixel) {
                 visitor(pixel);
+            }
+        }
+        (Some(width), None) => {
+            let row_bytes = width
+                .checked_mul(bytes_per_pixel)
+                .ok_or(OxideError::InvalidFormat("image row size overflow"))?;
+            let row_stride = metadata.row_stride.unwrap_or(row_bytes);
+            if row_stride < row_bytes {
+                return Err(OxideError::InvalidFormat(
+                    "image row stride smaller than packed row size",
+                ));
+            }
+
+            for row in data.chunks_exact(row_stride) {
+                for pixel in row[..row_bytes].chunks_exact(bytes_per_pixel) {
+                    visitor(pixel);
+                }
             }
         }
         (Some(width), Some(height)) => {
@@ -449,8 +496,8 @@ mod tests {
     fn rejects_incomplete_image_metadata_dimensions() {
         let metadata = ImageMetadata {
             pixel_format: ImagePixelFormat::Rgb8,
-            width: Some(2),
-            height: None,
+            width: None,
+            height: Some(2),
             row_stride: None,
         };
         let err = bytes_to_rgb_pixels(&[0u8; 6], &metadata).unwrap_err();
@@ -458,6 +505,19 @@ mod tests {
             err,
             OxideError::InvalidFormat("image metadata requires width and height together")
         ));
+    }
+
+    #[test]
+    fn supports_row_layout_without_total_height() {
+        let metadata = ImageMetadata::packed(ImagePixelFormat::Rgb8).with_row_layout(2, 8);
+        let input = [
+            255u8, 0, 0, 0, 255, 0, 99, 88, 0, 0, 255, 20, 30, 40, 77, 66,
+        ];
+        let output = bytes_to_rgb_pixels(&input, &metadata).unwrap();
+        assert_eq!(
+            output,
+            vec![[255, 0, 0], [0, 255, 0], [0, 0, 255], [20, 30, 40]]
+        );
     }
 
     #[test]

@@ -4,6 +4,13 @@ use std::time::Instant;
 
 use image::ImageDecoder;
 use memchr::memchr;
+use symphonia::core::codecs::{
+    CODEC_TYPE_PCM_F32BE, CODEC_TYPE_PCM_F32LE, CODEC_TYPE_PCM_F64BE, CODEC_TYPE_PCM_F64LE,
+    CODEC_TYPE_PCM_S8, CODEC_TYPE_PCM_S16BE, CODEC_TYPE_PCM_S16LE, CODEC_TYPE_PCM_S24BE,
+    CODEC_TYPE_PCM_S24LE, CODEC_TYPE_PCM_S32BE, CODEC_TYPE_PCM_S32LE, CODEC_TYPE_PCM_U8,
+    CODEC_TYPE_PCM_U16BE, CODEC_TYPE_PCM_U16LE, CODEC_TYPE_PCM_U24BE, CODEC_TYPE_PCM_U24LE,
+    CODEC_TYPE_PCM_U32BE, CODEC_TYPE_PCM_U32LE, CodecType,
+};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
@@ -11,6 +18,10 @@ use symphonia::core::probe::Hint;
 
 use crate::format::FormatDetector;
 use crate::io::MmapInput;
+use crate::preprocessing::{
+    AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat,
+    PreprocessingMetadata,
+};
 use crate::telemetry;
 use crate::telemetry::profile;
 use crate::telemetry::tags;
@@ -27,6 +38,12 @@ pub enum BoundaryMode {
     ImageRows { row_bytes: usize },
     AudioFrames { frame_bytes: usize },
     Raw,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScanDetection {
+    boundary_mode: BoundaryMode,
+    preprocessing_metadata: Option<PreprocessingMetadata>,
 }
 
 /// Aligns a boundary to the specified alignment size.
@@ -161,7 +178,8 @@ impl InputScanner {
         let format = FormatDetector::detect(probe.as_slice());
         let mapped_data = mmap.mapped_slice(0, len)?;
         let data = mapped_data.as_slice();
-        let boundary_mode = self.detect_boundary_mode(path, format);
+        let scan_detection = self.detect_scan_detection(path, format);
+        let boundary_mode = scan_detection.boundary_mode;
         self.record_mode(boundary_mode);
 
         let estimated_batches =
@@ -183,6 +201,7 @@ impl InputScanner {
                 source_path: source_path.clone(),
                 data: batch_data,
                 file_type_hint: format,
+                preprocessing_metadata: scan_detection.preprocessing_metadata,
             });
             start = end;
             id += 1;
@@ -193,15 +212,49 @@ impl InputScanner {
 
     /// Chooses boundary mode from format hints and metadata.
     pub fn detect_boundary_mode(&self, path: &Path, format: FileFormat) -> BoundaryMode {
+        self.detect_scan_detection(path, format).boundary_mode
+    }
+
+    /// Detects preprocessing metadata from format hints and source metadata.
+    pub fn detect_preprocessing_metadata(
+        &self,
+        path: &Path,
+        format: FileFormat,
+    ) -> Option<PreprocessingMetadata> {
+        self.detect_scan_detection(path, format)
+            .preprocessing_metadata
+    }
+
+    fn detect_scan_detection(&self, path: &Path, format: FileFormat) -> ScanDetection {
         match format {
-            FileFormat::Text => BoundaryMode::TextNewline,
+            FileFormat::Text => ScanDetection {
+                boundary_mode: BoundaryMode::TextNewline,
+                preprocessing_metadata: None,
+            },
             FileFormat::Image => self
-                .detect_image_mode(path)
-                .unwrap_or_else(|| self.fallback_to_raw("image metadata detection failed")),
+                .detect_image_mode_with_metadata(path)
+                .map(|(boundary_mode, metadata)| ScanDetection {
+                    boundary_mode,
+                    preprocessing_metadata: Some(PreprocessingMetadata::Image(metadata)),
+                })
+                .unwrap_or_else(|| ScanDetection {
+                    boundary_mode: self.fallback_to_raw("image metadata detection failed"),
+                    preprocessing_metadata: None,
+                }),
             FileFormat::Audio => self
-                .detect_audio_mode(path)
-                .unwrap_or_else(|| self.fallback_to_raw("audio metadata detection failed")),
-            _ => BoundaryMode::Raw,
+                .detect_audio_mode_with_metadata(path)
+                .map(|(boundary_mode, metadata)| ScanDetection {
+                    boundary_mode,
+                    preprocessing_metadata: Some(PreprocessingMetadata::Audio(metadata)),
+                })
+                .unwrap_or_else(|| ScanDetection {
+                    boundary_mode: self.fallback_to_raw("audio metadata detection failed"),
+                    preprocessing_metadata: None,
+                }),
+            _ => ScanDetection {
+                boundary_mode: BoundaryMode::Raw,
+                preprocessing_metadata: None,
+            },
         }
     }
 
@@ -270,6 +323,14 @@ impl InputScanner {
     /// # Returns
     /// The detected image mode, or `None` if the image is not supported.
     pub fn detect_image_mode(&self, path: &Path) -> Option<BoundaryMode> {
+        self.detect_image_mode_with_metadata(path)
+            .map(|(mode, _metadata)| mode)
+    }
+
+    fn detect_image_mode_with_metadata(
+        &self,
+        path: &Path,
+    ) -> Option<(BoundaryMode, ImageMetadata)> {
         let reader = image::ImageReader::open(path).ok()?;
         let reader = reader.with_guessed_format().ok()?;
         let decoder = reader.into_decoder().ok()?;
@@ -278,10 +339,27 @@ impl InputScanner {
         let color = decoder.color_type();
 
         let width = usize::try_from(width).ok()?;
-        let bpp = color.bytes_per_pixel() as usize;
-        let row_bytes = width.checked_mul(bpp)?;
+        let channels = color.channel_count() as usize;
+        let bytes_per_pixel = color.bytes_per_pixel() as usize;
+        if channels == 0 || bytes_per_pixel == 0 || bytes_per_pixel != channels {
+            return None;
+        }
 
-        (row_bytes > 0).then_some(BoundaryMode::ImageRows { row_bytes })
+        let pixel_format = match channels {
+            1 => ImagePixelFormat::Gray8,
+            2 => ImagePixelFormat::GrayAlpha8,
+            3 => ImagePixelFormat::Rgb8,
+            4 => ImagePixelFormat::Rgba8,
+            _ => return None,
+        };
+
+        let row_bytes = width.checked_mul(bytes_per_pixel)?;
+        if row_bytes == 0 {
+            return None;
+        }
+
+        let metadata = ImageMetadata::packed(pixel_format).with_row_layout(width, row_bytes);
+        Some((BoundaryMode::ImageRows { row_bytes }, metadata))
     }
 
     /// Detects audio mode from audio metadata.
@@ -292,6 +370,14 @@ impl InputScanner {
     /// # Returns
     /// The detected audio mode, or `None` if the audio is not supported.
     pub fn detect_audio_mode(&self, path: &Path) -> Option<BoundaryMode> {
+        self.detect_audio_mode_with_metadata(path)
+            .map(|(mode, _metadata)| mode)
+    }
+
+    fn detect_audio_mode_with_metadata(
+        &self,
+        path: &Path,
+    ) -> Option<(BoundaryMode, AudioMetadata)> {
         let file = File::open(path).ok()?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let mut hint = Hint::new();
@@ -312,11 +398,13 @@ impl InputScanner {
             let params = &track.codec_params;
             let channels = params.channels.map(|channels| channels.count() as usize);
             let bits_per_sample = params.bits_per_sample.map(|bits| bits as usize);
-            let frames_per_packet = params.max_frames_per_packet.map(|frames| frames as usize);
+            let frames_per_packet = params
+                .max_frames_per_packet
+                .and_then(|frames| usize::try_from(frames).ok())
+                .unwrap_or(1);
+            let (encoding, endian) = audio_sample_layout_for_codec(params.codec)?;
 
-            if let (Some(channels), Some(bits_per_sample), Some(frames_per_packet)) =
-                (channels, bits_per_sample, frames_per_packet)
-            {
+            if let (Some(channels), Some(bits_per_sample)) = (channels, bits_per_sample) {
                 if bits_per_sample == 0 || bits_per_sample % 8 != 0 {
                     continue;
                 }
@@ -326,12 +414,19 @@ impl InputScanner {
                     continue;
                 }
 
+                let metadata = AudioMetadata {
+                    channels,
+                    bytes_per_sample,
+                    encoding,
+                    endian,
+                };
+
                 if let Some(frame_bytes) = bytes_per_sample
                     .checked_mul(channels)
                     .and_then(|v| v.checked_mul(frames_per_packet))
                 {
                     if frame_bytes > 0 {
-                        return Some(BoundaryMode::AudioFrames { frame_bytes });
+                        return Some((BoundaryMode::AudioFrames { frame_bytes }, metadata));
                     }
                 }
             }
@@ -358,5 +453,29 @@ impl InputScanner {
             BoundaryMode::Raw => tags::METRIC_SCANNER_MODE_RAW_COUNT,
         };
         telemetry::increment_counter(metric_tag, 1, &[("subsystem", "scanner"), ("op", "mode")]);
+    }
+}
+
+fn audio_sample_layout_for_codec(codec: CodecType) -> Option<(AudioSampleEncoding, AudioEndian)> {
+    match codec {
+        CODEC_TYPE_PCM_S8 | CODEC_TYPE_PCM_S16LE | CODEC_TYPE_PCM_S24LE | CODEC_TYPE_PCM_S32LE => {
+            Some((AudioSampleEncoding::SignedPcm, AudioEndian::Little))
+        }
+        CODEC_TYPE_PCM_S16BE | CODEC_TYPE_PCM_S24BE | CODEC_TYPE_PCM_S32BE => {
+            Some((AudioSampleEncoding::SignedPcm, AudioEndian::Big))
+        }
+        CODEC_TYPE_PCM_U8 | CODEC_TYPE_PCM_U16LE | CODEC_TYPE_PCM_U24LE | CODEC_TYPE_PCM_U32LE => {
+            Some((AudioSampleEncoding::UnsignedPcm, AudioEndian::Little))
+        }
+        CODEC_TYPE_PCM_U16BE | CODEC_TYPE_PCM_U24BE | CODEC_TYPE_PCM_U32BE => {
+            Some((AudioSampleEncoding::UnsignedPcm, AudioEndian::Big))
+        }
+        CODEC_TYPE_PCM_F32LE | CODEC_TYPE_PCM_F64LE => {
+            Some((AudioSampleEncoding::Float, AudioEndian::Little))
+        }
+        CODEC_TYPE_PCM_F32BE | CODEC_TYPE_PCM_F64BE => {
+            Some((AudioSampleEncoding::Float, AudioEndian::Big))
+        }
+        _ => None,
     }
 }

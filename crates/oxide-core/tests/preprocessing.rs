@@ -1,6 +1,8 @@
 use oxide_core::preprocessing::{audio_lpc, image_locoi, image_paeth, image_ycocgr};
 use oxide_core::{
-    AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat, OxideError,
+    AudioEndian, AudioMetadata, AudioSampleEncoding, AudioStrategy, ImageMetadata,
+    ImagePixelFormat, ImageStrategy, OxideError, PreProcessingStrategy, PreprocessingMetadata,
+    apply_preprocessing_with_metadata,
 };
 
 #[test]
@@ -69,15 +71,56 @@ fn audio_lpc_converter_rejects_invalid_metadata() {
 #[test]
 fn image_and_audio_apply_reverse_keep_raw_bytes() {
     let raw = vec![0u8, 1, 2, 3, 4, 5, 6, 7];
+    let image_metadata = ImageMetadata::packed(ImagePixelFormat::Rgb8);
+    let audio_metadata = AudioMetadata::pcm_i16_le(1);
 
-    assert_eq!(image_paeth::apply(&raw).expect("apply should succeed"), raw);
+    assert_eq!(
+        image_paeth::apply(&raw, Some(&image_metadata)).expect("apply should succeed"),
+        raw
+    );
     assert_eq!(
         image_paeth::reverse(&raw).expect("reverse should succeed"),
         raw
     );
-    assert_eq!(audio_lpc::apply(&raw).expect("apply should succeed"), raw);
+    assert_eq!(
+        audio_lpc::apply(&raw, Some(&audio_metadata)).expect("apply should succeed"),
+        raw
+    );
     assert_eq!(
         audio_lpc::reverse(&raw).expect("reverse should succeed"),
         raw
     );
+}
+
+#[test]
+fn preprocessing_router_validates_metadata_type_for_strategy() {
+    let raw = [1u8, 2, 3, 4, 5, 6];
+    let image_metadata =
+        PreprocessingMetadata::Image(ImageMetadata::packed(ImagePixelFormat::Rgb8));
+    let audio_metadata = PreprocessingMetadata::Audio(AudioMetadata::pcm_i16_le(1));
+
+    let image_strategy = PreProcessingStrategy::Image(ImageStrategy::Paeth);
+    let audio_strategy = PreProcessingStrategy::Audio(AudioStrategy::Lpc);
+
+    let image_ok = apply_preprocessing_with_metadata(&raw, &image_strategy, Some(&image_metadata))
+        .expect("image metadata should be accepted");
+    assert_eq!(image_ok, raw);
+
+    let audio_ok = apply_preprocessing_with_metadata(&raw, &audio_strategy, Some(&audio_metadata))
+        .expect("audio metadata should be accepted");
+    assert_eq!(audio_ok, raw);
+
+    let image_err = apply_preprocessing_with_metadata(&raw, &image_strategy, Some(&audio_metadata))
+        .expect_err("mismatched metadata should fail");
+    assert!(matches!(
+        image_err,
+        OxideError::InvalidFormat("preprocessing metadata type mismatch for image strategy")
+    ));
+
+    let audio_err = apply_preprocessing_with_metadata(&raw, &audio_strategy, Some(&image_metadata))
+        .expect_err("mismatched metadata should fail");
+    assert!(matches!(
+        audio_err,
+        OxideError::InvalidFormat("preprocessing metadata type mismatch for audio strategy")
+    ));
 }

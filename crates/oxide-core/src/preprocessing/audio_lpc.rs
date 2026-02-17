@@ -11,7 +11,10 @@ pub fn bytes_to_data(data: &[u8], metadata: &utils::AudioMetadata) -> Result<Vec
 /// Applies Linear Predictive Coding preprocessing to audio bytes.
 ///
 /// Input: `data` is the raw audio byte buffer to preprocess.
-pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
+pub fn apply(data: &[u8], metadata: Option<&utils::AudioMetadata>) -> Result<Vec<u8>> {
+    if let Some(metadata) = metadata {
+        let _ = bytes_to_data(data, metadata)?;
+    }
     Ok(data.to_vec())
 }
 

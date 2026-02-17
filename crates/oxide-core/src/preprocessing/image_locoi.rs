@@ -11,7 +11,11 @@ pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec
 /// Applies LOCO-I (JPEG-LS) predictor preprocessing to image bytes.
 ///
 /// Input: `data` is the raw image byte buffer to preprocess.
-pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
+pub fn apply(data: &[u8], metadata: Option<&utils::ImageMetadata>) -> Result<Vec<u8>> {
+    if let Some(metadata) = metadata {
+        println!("metadata: {:?}", metadata);
+        let _ = bytes_to_data(data, metadata)?;
+    }
     Ok(data.to_vec())
 }
 

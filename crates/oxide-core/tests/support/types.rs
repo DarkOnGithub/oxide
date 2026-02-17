@@ -13,6 +13,7 @@ fn batch_constructor_defaults_to_unknown() {
     assert_eq!(batch.id, 7);
     assert_eq!(batch.source_path, std::path::PathBuf::from("sample.bin"));
     assert_eq!(batch.file_type_hint, FileFormat::Common);
+    assert!(batch.preprocessing_metadata.is_none());
     assert_eq!(batch.len(), 3);
     assert!(!batch.is_empty());
 }
@@ -22,6 +23,7 @@ fn batch_constructor_with_hint() {
     let batch = Batch::with_hint(1, "sound.wav", Bytes::new(), FileFormat::Audio);
 
     assert_eq!(batch.file_type_hint, FileFormat::Audio);
+    assert!(batch.preprocessing_metadata.is_none());
     assert!(batch.is_empty());
 }
 
@@ -73,6 +75,7 @@ fn mapped_batch_data_reports_len_and_slice() -> Result<(), Box<dyn std::error::E
     let batch = Batch::from_mapped(3, "mapped.bin", map, start, end, FileFormat::Binary);
     assert_eq!(batch.data(), b"cdef");
     assert_eq!(batch.file_type_hint, FileFormat::Binary);
+    assert!(batch.preprocessing_metadata.is_none());
 
     Ok(())
 }
