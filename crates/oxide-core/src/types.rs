@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::error::OxideError;
+use crate::preprocessing::PreprocessingMetadata;
 
 pub type Result<T> = std::result::Result<T, OxideError>;
 
@@ -25,6 +26,7 @@ pub struct Batch {
     pub source_path: PathBuf,
     pub data: BatchData,
     pub file_type_hint: FileFormat,
+    pub preprocessing_metadata: Option<PreprocessingMetadata>,
 }
 
 /// A batch of data extracted from a file for processing.
@@ -59,6 +61,7 @@ impl Batch {
             source_path: source_path.into(),
             data: BatchData::Owned(data),
             file_type_hint: FileFormat::Common,
+            preprocessing_metadata: None,
         }
     }
 
@@ -80,6 +83,7 @@ impl Batch {
             source_path: source_path.into(),
             data: BatchData::Owned(data),
             file_type_hint,
+            preprocessing_metadata: None,
         }
     }
 
@@ -105,6 +109,7 @@ impl Batch {
             source_path: source_path.into(),
             data: BatchData::Mapped { map, start, end },
             file_type_hint,
+            preprocessing_metadata: None,
         }
     }
 

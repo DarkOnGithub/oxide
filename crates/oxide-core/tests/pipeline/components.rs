@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use oxide_core::BufferPool;
 use oxide_core::pipeline::{
+    ArchivePipelineConfig, PipelinePerformanceOptions,
     archive::ArchivePipeline,
     directory::{BlockCountPlanner, DirectoryBatchSubmitter},
-    ArchivePipelineConfig, PipelinePerformanceOptions,
 };
 use oxide_core::types::{CompressionAlgo, FileFormat};
-use oxide_core::BufferPool;
 
 mod archive_tests {
     use super::*;

@@ -11,7 +11,7 @@ pub struct ProcessMemorySample {
 
 /// Samples the current process's memory usage from the operating system.
 ///
-/// Currently supports Linux via `/proc/self/status`. Returns default (None) 
+/// Currently supports Linux via `/proc/self/status`. Returns default (None)
 /// on other platforms.
 pub fn sample_process_memory() -> ProcessMemorySample {
     #[cfg(target_os = "linux")]

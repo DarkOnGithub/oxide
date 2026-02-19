@@ -131,9 +131,8 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
     }
 
     let expected = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    decode_stream(&data[4..], expected).map_err(|err| {
-        OxideError::DecompressionError(format!("lzma-like decode failed: {err}"))
-    })
+    decode_stream(&data[4..], expected)
+        .map_err(|err| OxideError::DecompressionError(format!("lzma-like decode failed: {err}")))
 }
 
 fn decode_stream(input: &[u8], expected_size: usize) -> core::result::Result<Vec<u8>, DecodeError> {
@@ -789,4 +788,3 @@ impl fmt::Display for DecodeError {
         }
     }
 }
-

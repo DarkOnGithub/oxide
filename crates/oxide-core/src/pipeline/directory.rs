@@ -59,11 +59,7 @@ pub struct DirectoryBatchSubmitter {
 }
 
 impl DirectoryBatchSubmitter {
-    pub fn new(
-        source_path: PathBuf,
-        block_size: usize,
-        preserve_format_boundaries: bool,
-    ) -> Self {
+    pub fn new(source_path: PathBuf, block_size: usize, preserve_format_boundaries: bool) -> Self {
         Self {
             source_path,
             block_size: block_size.max(1),
@@ -566,4 +562,3 @@ fn join_safe(root: &Path, rel_path: &str) -> Result<PathBuf> {
 
     Ok(root.join(rel))
 }
-
