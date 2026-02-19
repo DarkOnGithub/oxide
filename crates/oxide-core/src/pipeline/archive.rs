@@ -2550,18 +2550,19 @@ impl ArchivePipeline {
         raw_fallback_enabled: bool,
         processing_totals: &ProcessingThroughputTotals,
     ) -> Result<CompressedBlock> {
-        // High-performance mode currently bypasses preprocessing. Transform stages can be
-        // re-enabled later without changing on-disk block metadata shape.
-        let pre_proc = PreProcessingStrategy::None;
+        let pre_proc =
+            crate::preprocessing::get_preprocessing_strategy(batch.file_type_hint, compression);
+        println!("pre_proc {:?}", pre_proc);
         let source = batch.data();
+        let metadata = batch.preprocessing_metadata.as_ref();
         let (preprocessed, preprocessing_elapsed) =
             if matches!(pre_proc, PreProcessingStrategy::None) {
                 (None, Duration::ZERO)
             } else {
                 let preprocessing_started = Instant::now();
                 (
-                    Some(crate::preprocessing::apply_preprocessing(
-                        source, &pre_proc,
+                    Some(crate::preprocessing::apply_preprocessing_with_metadata(
+                        source, &pre_proc, metadata,
                     )?),
                     preprocessing_started.elapsed(),
                 )
@@ -2766,4 +2767,3 @@ impl ArchivePipeline {
         })
     }
 }
-
