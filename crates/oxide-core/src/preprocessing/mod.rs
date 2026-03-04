@@ -1,8 +1,8 @@
 use std::time::Instant;
 
+use crate::OxideError;
 use crate::telemetry::{self, profile, tags};
 use crate::types::duration_to_us;
-use crate::OxideError;
 use crate::{
     AudioStrategy, BinaryStrategy, CompressionAlgo, FileFormat, ImageStrategy,
     PreProcessingStrategy, Result, TextStrategy,

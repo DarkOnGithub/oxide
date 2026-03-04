@@ -9,9 +9,9 @@ use crate::types::duration_to_us;
 use crate::{BufferPool, CompressedBlock, OxideError, Result};
 
 use super::{
-    ChunkDescriptor, Footer, GlobalHeader, ReorderBuffer, SectionTableEntry, SectionType,
-    CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, DEFAULT_REORDER_PENDING_LIMIT, GLOBAL_HEADER_SIZE,
-    SECTION_TABLE_ENTRY_SIZE,
+    CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT,
+    Footer, GLOBAL_HEADER_SIZE, GlobalHeader, ReorderBuffer, SECTION_TABLE_ENTRY_SIZE,
+    SectionTableEntry, SectionType,
 };
 
 #[derive(Debug)]

@@ -3,12 +3,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, TryRecvError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, bounded};
 
 use crate::buffer::BufferPool;
 use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerPoolHandle, WorkerRuntimeSnapshot};
@@ -18,13 +18,13 @@ use crate::format::{
 };
 use crate::io::{InputScanner, MmapInput};
 use crate::telemetry::{
-    self, profile, tags, ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent,
-    ExtractReport, ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport,
-    WorkerReport,
+    self, ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent, ExtractReport,
+    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
+    profile, tags,
 };
 use crate::types::{
-    duration_to_us, Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset,
-    FileFormat, PreProcessingStrategy, Result,
+    Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
+    PreProcessingStrategy, Result, duration_to_us,
 };
 
 use super::directory::{self, DirectoryBatchSubmitter};
