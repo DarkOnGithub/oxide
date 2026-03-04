@@ -1,7 +1,6 @@
 use crate::preprocessing::utils;
 use crate::{OxideError, Result};
 
-
 /// Converts raw text bytes into integer symbol ids for BPE-style processing.
 pub fn bytes_to_data(data: &[u8]) -> Vec<u32> {
     utils::bytes_to_symbols(data)

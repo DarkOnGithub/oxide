@@ -1,9 +1,9 @@
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
-use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
+use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 
 use crate::telemetry;
 #[cfg(feature = "profiling")]

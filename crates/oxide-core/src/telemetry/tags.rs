@@ -90,6 +90,14 @@ pub const METRIC_PREPROCESSING_REVERSE_COUNT: &str = "oxide.preprocessing.revers
 pub const METRIC_OXZ_READ_BLOCK_COUNT: &str = "oxide.oxz.read.block.count";
 /// Counter for OXZ block writing operations.
 pub const METRIC_OXZ_WRITE_BLOCK_COUNT: &str = "oxide.oxz.write.block.count";
+/// Counter for OXZ chunk descriptor reads.
+pub const METRIC_OXZ_READ_CHUNK_DESCRIPTOR_COUNT: &str = "oxide.oxz.read.chunk_descriptor.count";
+/// Counter for OXZ chunk descriptor writes.
+pub const METRIC_OXZ_WRITE_CHUNK_DESCRIPTOR_COUNT: &str = "oxide.oxz.write.chunk_descriptor.count";
+/// Counter for OXZ section table reads.
+pub const METRIC_OXZ_READ_SECTION_TABLE_COUNT: &str = "oxide.oxz.read.section_table.count";
+/// Counter for OXZ section table writes.
+pub const METRIC_OXZ_WRITE_SECTION_TABLE_COUNT: &str = "oxide.oxz.write.section_table.count";
 
 /// Histogram for memory map open latency in microseconds.
 pub const METRIC_MMAP_OPEN_LATENCY_US: &str = "oxide.mmap.open.latency_us";
@@ -157,6 +165,21 @@ pub const METRIC_PREPROCESSING_OUTPUT_BYTES: &str = "oxide.preprocessing.output_
 pub const METRIC_OXZ_READ_BLOCK_LATENCY_US: &str = "oxide.oxz.read.block.latency_us";
 /// Histogram for OXZ block writing latency in microseconds.
 pub const METRIC_OXZ_WRITE_BLOCK_LATENCY_US: &str = "oxide.oxz.write.block.latency_us";
+/// Histogram for OXZ section table read latency in microseconds.
+pub const METRIC_OXZ_READ_SECTION_TABLE_LATENCY_US: &str =
+    "oxide.oxz.read.section_table.latency_us";
+/// Histogram for OXZ section table write latency in microseconds.
+pub const METRIC_OXZ_WRITE_SECTION_TABLE_LATENCY_US: &str =
+    "oxide.oxz.write.section_table.latency_us";
+/// Histogram for OXZ chunk index read latency in microseconds.
+pub const METRIC_OXZ_READ_CHUNK_INDEX_LATENCY_US: &str = "oxide.oxz.read.chunk_index.latency_us";
+/// Histogram for OXZ chunk index write latency in microseconds.
+pub const METRIC_OXZ_WRITE_CHUNK_INDEX_LATENCY_US: &str = "oxide.oxz.write.chunk_index.latency_us";
+/// Histogram for OXZ payload metadata calculation latency in microseconds.
+pub const METRIC_OXZ_WRITE_PAYLOAD_INDEX_LATENCY_US: &str =
+    "oxide.oxz.write.payload_meta.latency_us";
+/// Histogram for OXZ full container finalization latency in microseconds.
+pub const METRIC_OXZ_WRITE_CONTAINER_LATENCY_US: &str = "oxide.oxz.write.container.latency_us";
 
 /// Gauge for the current process Resident Set Size (RSS) in bytes.
 pub const METRIC_MEMORY_PROCESS_RSS_BYTES: &str = "oxide.memory.process.rss_bytes";

@@ -5,10 +5,13 @@ mod reorder;
 mod writer;
 
 pub use consts::{
-    BLOCK_HEADER_SIZE, DEFAULT_REORDER_PENDING_LIMIT, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
-    OXZ_END_MAGIC, OXZ_MAGIC, OXZ_VERSION,
+    CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, DEFAULT_REORDER_PENDING_LIMIT,
+    FEATURE_DEDUP_REFERENCES, FOOTER_SIZE, GLOBAL_HEADER_SIZE, OXZ_END_MAGIC, OXZ_MAGIC,
+    OXZ_VERSION, SECTION_TABLE_ENTRY_SIZE,
 };
-pub use headers::{BlockHeader, Footer, GlobalHeader};
+pub use headers::{
+    BlockHeader, ChunkDescriptor, Footer, GlobalHeader, SectionTableEntry, SectionType,
+};
 pub use reader::{ArchiveReader, BlockIterator};
 pub use reorder::ReorderBuffer;
 pub use writer::ArchiveWriter;
