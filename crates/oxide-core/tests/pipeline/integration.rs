@@ -411,6 +411,19 @@ fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>
 
     assert_eq!(report.source_kind, oxide_core::ArchiveSourceKind::File);
     assert_eq!(std::fs::read(out_file)?, data);
+    assert!(matches!(
+        report.extensions.get("pipeline.decode_task_queue_capacity"),
+        Some(ReportValue::U64(value)) if *value > 0
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.decode_result_queue_peak"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.reorder_pending_limit"),
+        Some(ReportValue::U64(value)) if *value > 0
+    ));
+    assert!(report.main_thread.stage_us.contains_key("ordered_write"));
     Ok(())
 }
 

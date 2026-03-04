@@ -1,5 +1,6 @@
 use std::fs;
-use std::io::{Read, Write, Seek};
+use std::io::SeekFrom;
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,11 +12,11 @@ use crate::telemetry::{
 };
 use crate::types::{CompressionAlgo, Result};
 
+use super::super::directory;
+use super::super::types::{ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions};
 use super::archiver::Archiver;
 use super::extractor::Extractor;
 use super::telemetry::*;
-use super::super::directory;
-use super::super::types::{ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions};
 
 pub struct NoopTelemetrySink;
 
@@ -51,7 +52,7 @@ impl ArchivePipeline {
             workers: self.num_workers,
             compression_algo: self.compression_algo,
             buffer_pool: Arc::clone(&self.buffer_pool),
-            performance: self.performance,
+            performance: self.performance.clone(),
         }
     }
 
@@ -71,7 +72,8 @@ impl ArchivePipeline {
         tracing::info!(path = %path.display(), "starting file archival");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
-        let archiver = Archiver::new(&self.config());
+        let config = self.config();
+        let archiver = Archiver::new(&config);
         archiver.archive_file_path_with(path, writer, &options, sink)
     }
 
@@ -93,10 +95,12 @@ impl ArchivePipeline {
         let sink = sink.unwrap_or(&mut noop);
         let metadata = fs::metadata(path)?;
         if metadata.is_file() {
-            let archiver = Archiver::new(&self.config());
+            let config = self.config();
+            let archiver = Archiver::new(&config);
             archiver.archive_file_path_with(path, writer, &options, sink)
         } else if metadata.is_dir() {
-            let archiver = Archiver::new(&self.config());
+            let config = self.config();
+            let archiver = Archiver::new(&config);
             archiver.archive_directory_streaming_with(path, writer, &options, sink)
         } else {
             Err(crate::OxideError::InvalidFormat(
@@ -121,8 +125,37 @@ impl ArchivePipeline {
         tracing::info!(path = %path.display(), "starting directory archival");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
-        let archiver = Archiver::new(&self.config());
+        let config = self.config();
+        let archiver = Archiver::new(&config);
         archiver.archive_directory_streaming_with(path, writer, &options, sink)
+    }
+
+    pub fn max_inflight_blocks(
+        total_blocks: usize,
+        num_workers: usize,
+        block_size: usize,
+        performance: &PipelinePerformanceOptions,
+    ) -> usize {
+        super::archiver::max_inflight_blocks(total_blocks, num_workers, block_size, performance)
+    }
+
+    #[inline]
+    pub fn select_stored_payload<'a>(
+        source: &'a [u8],
+        compressed: &'a [u8],
+        raw_fallback_enabled: bool,
+    ) -> (&'a [u8], bool) {
+        super::archiver::select_stored_payload(source, compressed, raw_fallback_enabled)
+    }
+
+    pub fn score_block_size(
+        &self,
+        sample: &[u8],
+        block_size: usize,
+    ) -> Result<super::types::BlockSizeScore> {
+        let config = self.config();
+        let archiver = Archiver::new(&config);
+        archiver.score_block_size(sample, block_size)
     }
 
     /// Extracts all block payload bytes from an OXZ archive in block order and
@@ -138,15 +171,11 @@ impl ArchivePipeline {
         let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
         let extractor = Extractor::new(self.num_workers);
-        let mut decoded = extractor.read_archive_payload_with_metrics(
-            reader,
-            started_at,
-            &options,
-            sink,
-        )?;
+        let mut decoded =
+            extractor.read_archive_payload_with_metrics(reader, started_at, &options, sink)?;
         let source_kind = directory::source_kind_from_flags(decoded.flags);
         let extensions = extract_extensions_from_flags(decoded.flags);
-        let decoded_bytes_total = decoded.payload.len() as u64;
+        let decoded_bytes_total = decoded.decoded_bytes_total;
         let stage_timings = decoded.stage_timings;
         let payload = std::mem::take(&mut decoded.payload);
         let report = build_extract_report_helper(
@@ -182,14 +211,10 @@ impl ArchivePipeline {
         let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
         let extractor = Extractor::new(self.num_workers);
-        let mut decoded = extractor.read_archive_payload_with_metrics(
-            reader,
-            started_at,
-            &options,
-            sink,
-        )?;
+        let mut decoded =
+            extractor.read_archive_payload_with_metrics(reader, started_at, &options, sink)?;
         let mut extensions = extract_extensions_from_flags(decoded.flags);
-        let decoded_bytes_total = decoded.payload.len() as u64;
+        let decoded_bytes_total = decoded.decoded_bytes_total;
 
         let directory_decode_started = Instant::now();
         let entries = directory::decode_directory_entries(&decoded.payload, decoded.flags)?.ok_or(
@@ -248,16 +273,39 @@ impl ArchivePipeline {
         let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
         let extractor = Extractor::new(self.num_workers);
-        let mut decoded = extractor.read_archive_payload_with_metrics(
-            reader,
-            started_at,
-            &options,
-            sink,
-        )?;
-        let mut extensions = extract_extensions_from_flags(decoded.flags);
-        let decoded_bytes_total = decoded.payload.len() as u64;
-        let (source_kind, output_bytes_total) =
-            extractor.restore_decoded_payload(output_path.as_ref(), &mut decoded, &mut extensions)?;
+        let mut reader = reader;
+        let source_kind = Extractor::probe_archive_source_kind(&mut reader)?;
+        reader.seek(SeekFrom::Start(0))?;
+
+        let mut decoded;
+        let mut extensions;
+        let output_bytes_total;
+        match source_kind {
+            ArchiveSourceKind::File => {
+                decoded = extractor.extract_file_to_path_with_metrics(
+                    reader,
+                    output_path.as_ref(),
+                    started_at,
+                    &options,
+                    sink,
+                )?;
+                extensions = extract_extensions_from_flags(decoded.flags);
+                output_bytes_total = decoded.decoded_bytes_total;
+            }
+            ArchiveSourceKind::Directory => {
+                decoded = extractor
+                    .read_archive_payload_with_metrics(reader, started_at, &options, sink)?;
+                extensions = extract_extensions_from_flags(decoded.flags);
+                let (_kind, written) = extractor.restore_decoded_payload(
+                    output_path.as_ref(),
+                    &mut decoded,
+                    &mut extensions,
+                )?;
+                output_bytes_total = written;
+            }
+        }
+
+        let decoded_bytes_total = decoded.decoded_bytes_total;
         let stage_timings = decoded.stage_timings;
         let report = build_extract_report_helper(
             started_at,
@@ -274,9 +322,14 @@ impl ArchivePipeline {
     }
 }
 
-fn extract_extensions_from_flags(flags: u32) -> std::collections::BTreeMap<String, crate::telemetry::ReportValue> {
+fn extract_extensions_from_flags(
+    flags: u32,
+) -> std::collections::BTreeMap<String, crate::telemetry::ReportValue> {
     let mut extensions = std::collections::BTreeMap::new();
-    extensions.insert("extract.flags".to_string(), crate::telemetry::ReportValue::U64(flags as u64));
+    extensions.insert(
+        "extract.flags".to_string(),
+        crate::telemetry::ReportValue::U64(flags as u64),
+    );
     extensions
 }
 
@@ -298,6 +351,7 @@ fn build_extract_report_helper(
         decoded.blocks_total,
         decoded.workers,
         decoded.stage_timings,
+        decoded.pipeline_stats,
         extensions,
         options,
     )

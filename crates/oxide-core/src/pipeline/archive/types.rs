@@ -1,13 +1,10 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
-use std::time::{Duration, Instant};
+use super::super::directory;
+use super::super::types::ArchiveSourceKind;
 use crate::core::{PoolRuntimeSnapshot, WorkerRuntimeSnapshot};
 use crate::format::BlockHeader;
-use crate::telemetry::ReportValue;
 use crate::types::{Batch, duration_to_us};
-use super::directory;
-use super::types::ArchiveSourceKind;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub struct PreparedInput {
@@ -126,8 +123,20 @@ pub struct ExtractStageTimings {
     pub decode_submit: Duration,
     pub decode_wait: Duration,
     pub merge: Duration,
+    pub ordered_write: Duration,
     pub directory_decode: Duration,
     pub output_write: Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExtractPipelineStats {
+    pub decode_task_queue_capacity: usize,
+    pub decode_task_queue_peak: usize,
+    pub decode_result_queue_capacity: usize,
+    pub decode_result_queue_peak: usize,
+    pub reorder_pending_limit: usize,
+    pub reorder_pending_peak: usize,
+    pub reorder_pending_bytes_peak: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -160,10 +169,12 @@ pub struct PrefetchResult {
 pub struct DecodedArchivePayload {
     pub flags: u32,
     pub payload: Vec<u8>,
+    pub decoded_bytes_total: u64,
     pub archive_bytes_total: u64,
     pub blocks_total: u32,
     pub workers: Vec<WorkerRuntimeSnapshot>,
     pub stage_timings: ExtractStageTimings,
+    pub pipeline_stats: ExtractPipelineStats,
 }
 
 #[derive(Debug)]

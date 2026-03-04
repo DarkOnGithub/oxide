@@ -1,3 +1,4 @@
+use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
@@ -7,13 +8,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
-use crossbeam_channel::{TryRecvError, bounded, RecvTimeoutError};
 
+use super::super::directory::{self, DirectoryBatchSubmitter};
+use super::super::types::{ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions};
+use super::telemetry::*;
+use super::types::*;
 use crate::buffer::BufferPool;
 use crate::core::{WorkerPool, WorkerPoolHandle};
 use crate::format::{
-    ArchiveWriter, FOOTER_SIZE, GLOBAL_HEADER_SIZE, CORE_SECTION_COUNT, SECTION_TABLE_ENTRY_SIZE,
-    CHUNK_DESCRIPTOR_SIZE,
+    ArchiveWriter, CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
+    SECTION_TABLE_ENTRY_SIZE,
 };
 use crate::io::{InputScanner, MmapInput};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
@@ -21,17 +25,14 @@ use crate::types::{
     Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
     PreProcessingStrategy, Result,
 };
-use super::directory::{self, DirectoryBatchSubmitter};
-use super::types::*;
-use super::telemetry::*;
-use super::super::types::{ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions};
 
 pub const SUBMISSION_DRAIN_BUDGET: usize = 128;
 pub const DIRECTORY_FORMAT_PROBE_LIMIT: usize = 64 * 1024;
 pub const DIRECTORY_PREFETCH_WINDOW: usize = 8;
 pub const MIN_INFLIGHT_BLOCKS: usize = 64;
 pub const MAX_INFLIGHT_BLOCKS: usize = 4096;
-pub const OXZ_SECTION_TABLE_BYTES: u64 = CORE_SECTION_COUNT as u64 * SECTION_TABLE_ENTRY_SIZE as u64;
+pub const OXZ_SECTION_TABLE_BYTES: u64 =
+    CORE_SECTION_COUNT as u64 * SECTION_TABLE_ENTRY_SIZE as u64;
 pub const AUTOTUNE_CANDIDATE_BLOCK_SIZES: [usize; 5] = [
     256 * 1024,
     512 * 1024,
@@ -219,9 +220,17 @@ impl<'a> Archiver<'a> {
         let producer_file_formats = file_formats.clone();
         let producer_block_size = block_size.selected_block_size;
         let preserve_boundaries = self.config.performance.preserve_directory_format_boundaries;
-        let stream_read_buffer_size = self.config.performance.directory_stream_read_buffer_size.max(1);
+        let stream_read_buffer_size = self
+            .config
+            .performance
+            .directory_stream_read_buffer_size
+            .max(1);
         let producer_threads = self.config.performance.producer_threads.clamp(1, 2);
-        let mmap_threshold = self.config.performance.directory_mmap_threshold_bytes.max(1);
+        let mmap_threshold = self
+            .config
+            .performance
+            .directory_mmap_threshold_bytes
+            .max(1);
 
         let producer_handle = thread::spawn(move || -> Result<DirectoryProducerOutcome> {
             let mut submitter = DirectoryBatchSubmitter::new(
@@ -985,7 +994,8 @@ impl<'a> Archiver<'a> {
         let mut output_bytes = 0usize;
         let chunk_size = block_size.max(1);
         for chunk in sample.chunks(chunk_size) {
-            let compressed = crate::compression::apply_compression(chunk, self.config.compression_algo)?;
+            let compressed =
+                crate::compression::apply_compression(chunk, self.config.compression_algo)?;
             let (stored_payload, _raw_passthrough) = select_stored_payload(
                 chunk,
                 compressed.as_slice(),
@@ -1019,8 +1029,7 @@ pub fn max_inflight_blocks(
     block_size: usize,
     performance: &PipelinePerformanceOptions,
 ) -> usize {
-    let scaled_by_workers =
-        num_workers.saturating_mul(performance.max_inflight_blocks_per_worker);
+    let scaled_by_workers = num_workers.saturating_mul(performance.max_inflight_blocks_per_worker);
     let bounded_workers = scaled_by_workers.clamp(MIN_INFLIGHT_BLOCKS, MAX_INFLIGHT_BLOCKS);
 
     let block_bytes = block_size.max(1);
@@ -1198,18 +1207,17 @@ pub fn process_batch(
         crate::preprocessing::get_preprocessing_strategy(batch.file_type_hint, compression);
     let source = batch.data();
     let metadata = batch.preprocessing_metadata.as_ref();
-    let (preprocessed, preprocessing_elapsed) =
-        if matches!(pre_proc, PreProcessingStrategy::None) {
-            (None, Duration::ZERO)
-        } else {
-            let preprocessing_started = Instant::now();
-            (
-                Some(crate::preprocessing::apply_preprocessing_with_metadata(
-                    source, &pre_proc, metadata,
-                )?),
-                preprocessing_started.elapsed(),
-            )
-        };
+    let (preprocessed, preprocessing_elapsed) = if matches!(pre_proc, PreProcessingStrategy::None) {
+        (None, Duration::ZERO)
+    } else {
+        let preprocessing_started = Instant::now();
+        (
+            Some(crate::preprocessing::apply_preprocessing_with_metadata(
+                source, &pre_proc, metadata,
+            )?),
+            preprocessing_started.elapsed(),
+        )
+    };
     let compression_input = preprocessed.as_deref().unwrap_or(source);
 
     let compression_started = Instant::now();
