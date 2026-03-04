@@ -1,13 +1,14 @@
-use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use super::super::types::ArchiveSourceKind;
+use super::super::types::StatValue;
+use super::types::*;
 use crate::core::PoolRuntimeSnapshot;
 use crate::telemetry::{
     self, ArchiveProgressEvent, ArchiveReport, ExtractProgressEvent, ExtractReport, ReportValue,
     RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport, profile, tags,
 };
-use crate::types::{CompressionPreset, StatValue, duration_to_us};
-use super::types::*;
-use super::super::types::ArchiveSourceKind;
+use crate::types::{CompressionPreset, duration_to_us};
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 pub fn record_pipeline_stage(metric: &'static str, op: &'static str, elapsed: Duration) {
     let elapsed_us = duration_to_us(elapsed);
@@ -115,6 +116,11 @@ pub fn record_extract_run_telemetry(elapsed: Duration, stage_timings: ExtractSta
         tags::METRIC_PIPELINE_STAGE_MERGE_US,
         "stage_merge",
         stage_timings.merge,
+    );
+    record_pipeline_stage(
+        tags::METRIC_PIPELINE_STAGE_ORDERED_WRITE_US,
+        "stage_ordered_write",
+        stage_timings.ordered_write,
     );
     record_pipeline_stage(
         tags::METRIC_PIPELINE_STAGE_DIRECTORY_DECODE_US,
@@ -270,12 +276,10 @@ pub fn build_stats_extensions(
     let compression_busy_us = duration_to_us(processing_snapshot.compression_elapsed);
     let preprocessing_avg_bps = processing_snapshot.preprocessing_avg_bps();
     let compression_avg_bps = processing_snapshot.compression_avg_bps();
-    let preprocessing_compression_avg_bps =
-        processing_snapshot.preprocessing_compression_avg_bps();
+    let preprocessing_compression_avg_bps = processing_snapshot.preprocessing_compression_avg_bps();
     let preprocessing_wall_avg_bps =
         processing_snapshot.preprocessing_wall_avg_bps(runtime.elapsed);
-    let compression_wall_avg_bps =
-        processing_snapshot.compression_wall_avg_bps(runtime.elapsed);
+    let compression_wall_avg_bps = processing_snapshot.compression_wall_avg_bps(runtime.elapsed);
     let preprocessing_compression_wall_avg_bps =
         processing_snapshot.preprocessing_compression_wall_avg_bps(runtime.elapsed);
     let elapsed_us = runtime.elapsed.as_micros().max(1).min(u64::MAX as u128) as u64;
@@ -495,6 +499,7 @@ pub fn build_extract_report(
     blocks_total: u32,
     worker_runtime: Vec<crate::core::WorkerRuntimeSnapshot>,
     stage_timings: ExtractStageTimings,
+    pipeline_stats: ExtractPipelineStats,
     mut extensions: BTreeMap<String, ReportValue>,
     options: RunTelemetryOptions,
 ) -> ExtractReport {
@@ -517,6 +522,34 @@ pub fn build_extract_report(
     extensions.insert(
         "runtime.worker_count".to_string(),
         ReportValue::U64(worker_runtime.len() as u64),
+    );
+    extensions.insert(
+        "pipeline.decode_task_queue_capacity".to_string(),
+        ReportValue::U64(pipeline_stats.decode_task_queue_capacity as u64),
+    );
+    extensions.insert(
+        "pipeline.decode_task_queue_peak".to_string(),
+        ReportValue::U64(pipeline_stats.decode_task_queue_peak as u64),
+    );
+    extensions.insert(
+        "pipeline.decode_result_queue_capacity".to_string(),
+        ReportValue::U64(pipeline_stats.decode_result_queue_capacity as u64),
+    );
+    extensions.insert(
+        "pipeline.decode_result_queue_peak".to_string(),
+        ReportValue::U64(pipeline_stats.decode_result_queue_peak as u64),
+    );
+    extensions.insert(
+        "pipeline.reorder_pending_limit".to_string(),
+        ReportValue::U64(pipeline_stats.reorder_pending_limit as u64),
+    );
+    extensions.insert(
+        "pipeline.reorder_pending_peak".to_string(),
+        ReportValue::U64(pipeline_stats.reorder_pending_peak as u64),
+    );
+    extensions.insert(
+        "pipeline.reorder_pending_bytes_peak".to_string(),
+        ReportValue::U64(pipeline_stats.reorder_pending_bytes_peak),
     );
 
     let workers = worker_runtime
@@ -542,6 +575,13 @@ pub fn build_extract_report(
     main_thread.stage_us.insert(
         "merge".to_string(),
         stage_timings.merge.as_micros().min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
+        "ordered_write".to_string(),
+        stage_timings
+            .ordered_write
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
     );
     main_thread.stage_us.insert(
         "directory_decode".to_string(),

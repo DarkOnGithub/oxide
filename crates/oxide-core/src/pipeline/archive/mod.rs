@@ -1,6 +1,7 @@
 pub mod archiver;
 pub mod extractor;
 pub mod pipeline;
+mod reorder_writer;
 pub mod telemetry;
 pub mod types;
 

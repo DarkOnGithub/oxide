@@ -42,6 +42,8 @@ Both tracks remain strictly lossless.
 
 ### A1. Redefine v1 container as sectioned metadata + chunk descriptors
 
+Status: Done.
+
 We keep `v1`, but redefine internal layout to be extensible:
 
 - Header fields include:
@@ -398,8 +400,8 @@ This keeps a single format version while enabling adaptive internals.
 
 ## Implementation Priorities (No Timeline)
 
-1. Redefine v1 container internals (section table + chunk descriptors).
-2. Introduce streaming DAG and bounded reorder writer path.
+1. [x] Redefine v1 container internals (section table + chunk descriptors).
+2. [x] Introduce streaming DAG and bounded reorder writer path.
 3. Add worker-local scratch arenas and remove hot-path debug output.
 4. Implement decode fast paths (table entropy + copy kernels).
 5. Add adaptive chunking and planner objective framework.

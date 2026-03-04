@@ -139,6 +139,8 @@ pub const METRIC_PIPELINE_STAGE_DECODE_SUBMIT_US: &str = "oxide.pipeline.stage.d
 pub const METRIC_PIPELINE_STAGE_DECODE_WAIT_US: &str = "oxide.pipeline.stage.decode_wait.us";
 /// Histogram for block merging stage latency in microseconds.
 pub const METRIC_PIPELINE_STAGE_MERGE_US: &str = "oxide.pipeline.stage.merge.us";
+/// Histogram for ordered write stage latency in microseconds.
+pub const METRIC_PIPELINE_STAGE_ORDERED_WRITE_US: &str = "oxide.pipeline.stage.ordered_write.us";
 /// Histogram for directory decoding stage latency in microseconds.
 pub const METRIC_PIPELINE_STAGE_DIRECTORY_DECODE_US: &str =
     "oxide.pipeline.stage.directory_decode.us";
