@@ -113,8 +113,8 @@ fn pipeline_roundtrip_reconstructs_original_bytes() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_incompressible_fixture(256 * 1024);
     let file = write_fixture(&data)?;
 
@@ -185,8 +185,8 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn pipeline_records_preprocessing_strategy_in_block_headers(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_records_preprocessing_strategy_in_block_headers()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -349,8 +349,8 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode()
+-> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(
         &source,
@@ -598,10 +598,11 @@ fn directory_progress_reports_stable_block_total() -> Result<(), Box<dyn std::er
 
     let expected_total = sink.snapshots[0].blocks_total;
     assert!(expected_total > 0);
-    assert!(sink
-        .snapshots
-        .iter()
-        .all(|snapshot| snapshot.blocks_total == expected_total));
+    assert!(
+        sink.snapshots
+            .iter()
+            .all(|snapshot| snapshot.blocks_total == expected_total)
+    );
 
     let final_snapshot = sink.snapshots.last().expect("missing final snapshot");
     assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
@@ -656,8 +657,8 @@ fn extract_progress_reports_runtime_worker_snapshots() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn extract_archive_handles_queue_pressure_without_deadlock(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn extract_archive_handles_queue_pressure_without_deadlock()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(192 * 1024);
     let file = write_fixture(&data)?;
 
