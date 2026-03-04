@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::CompressionPreset;
 use crate::buffer::BufferPool;
 use crate::types::CompressionAlgo;
+use crate::CompressionPreset;
 
 /// Indicates whether the archive source is a single file or a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

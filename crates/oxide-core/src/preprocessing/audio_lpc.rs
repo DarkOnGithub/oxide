@@ -1,7 +1,5 @@
 use crate::preprocessing::utils;
-use crate::{Result};
-
-
+use crate::Result;
 
 /// Converts raw audio bytes into a sequence of LPC-ready sample values.
 pub fn bytes_to_data(data: &[u8], metadata: &utils::AudioMetadata) -> Result<Vec<i16>> {

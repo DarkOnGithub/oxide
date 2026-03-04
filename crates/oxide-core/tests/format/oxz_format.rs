@@ -2,9 +2,10 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use oxide_core::{
-    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, BlockHeader, BufferPool, CompressionAlgo,
-    CompressionMeta, CompressionPreset, Footer, GLOBAL_HEADER_SIZE, GlobalHeader, ImageStrategy,
-    OxideError, PreProcessingStrategy, ReorderBuffer, TextStrategy,
+    ArchiveReader, ArchiveWriter, BlockHeader, BufferPool, CompressionAlgo, CompressionMeta,
+    CompressionPreset, Footer, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
+    ReorderBuffer, TextStrategy, CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, GLOBAL_HEADER_SIZE,
+    SECTION_TABLE_ENTRY_SIZE,
 };
 
 fn block(
@@ -64,7 +65,7 @@ fn compression_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let header = GlobalHeader::with_flags(42, 0x0001_0000);
+    let header = GlobalHeader::with_feature_bits(6, 0x0001, GLOBAL_HEADER_SIZE as u64);
     let mut encoded = Vec::new();
     header.write(&mut encoded)?;
     assert_eq!(encoded.len(), GLOBAL_HEADER_SIZE);
@@ -87,7 +88,7 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut encoded = Vec::new();
     header.write(&mut encoded)?;
-    assert_eq!(encoded.len(), BLOCK_HEADER_SIZE);
+    assert_eq!(encoded.len(), CHUNK_DESCRIPTOR_SIZE);
 
     let decoded = BlockHeader::read(&mut Cursor::new(encoded))?;
     assert_eq!(decoded, header);
@@ -112,7 +113,7 @@ fn block_header_round_trip_preserves_raw_passthrough() -> Result<(), Box<dyn std
 
     let mut encoded = Vec::new();
     header.write(&mut encoded)?;
-    assert_eq!(encoded.len(), BLOCK_HEADER_SIZE);
+    assert_eq!(encoded.len(), CHUNK_DESCRIPTOR_SIZE);
 
     let decoded = BlockHeader::read(&mut Cursor::new(encoded))?;
     let meta = decoded.compression_meta()?;
@@ -149,8 +150,8 @@ fn footer_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn archive_writer_and_reader_support_random_and_sequential_access()
--> Result<(), Box<dyn std::error::Error>> {
+fn archive_writer_and_reader_support_random_and_sequential_access(
+) -> Result<(), Box<dyn std::error::Error>> {
     let pool = Arc::new(BufferPool::new(128, 8));
     let mut writer = ArchiveWriter::new(Vec::new(), Arc::clone(&pool));
     writer.write_global_header(3)?;
@@ -178,14 +179,14 @@ fn archive_writer_and_reader_support_random_and_sequential_access()
     assert_eq!(reader.block_count(), 3);
 
     let (header, payload) = reader.read_block(1)?;
-    assert_eq!(header.block_id, 1);
+    assert_eq!(header.chunk_id, 1);
     assert_eq!(payload, b"beta");
 
     let mut seen_ids = Vec::new();
     for block_entry in reader.iter_blocks() {
         let (block_header, data) = block_entry?;
-        seen_ids.push(block_header.block_id);
-        assert_eq!(data.len(), block_header.compressed_size as usize);
+        seen_ids.push(block_header.chunk_id);
+        assert_eq!(data.len(), block_header.encoded_len as usize);
     }
     assert_eq!(seen_ids, vec![0, 1, 2]);
 
@@ -230,7 +231,7 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let ids: Vec<u64> = reader
         .iter_blocks()
-        .map(|entry| entry.map(|(header, _)| header.block_id))
+        .map(|entry| entry.map(|(header, _)| header.chunk_id))
         .collect::<Result<Vec<_>, _>>()?;
 
     assert_eq!(ids, vec![0, 1, 2]);
@@ -250,7 +251,9 @@ fn reader_rejects_global_crc_mismatch() -> Result<(), Box<dyn std::error::Error>
     ))?;
     let mut archive = writer.write_footer()?;
 
-    let payload_offset = GLOBAL_HEADER_SIZE + BLOCK_HEADER_SIZE;
+    let payload_offset = GLOBAL_HEADER_SIZE
+        + (CORE_SECTION_COUNT as usize * SECTION_TABLE_ENTRY_SIZE)
+        + CHUNK_DESCRIPTOR_SIZE;
     archive[payload_offset] ^= 0xFF;
 
     let err = ArchiveReader::new(Cursor::new(archive)).unwrap_err();

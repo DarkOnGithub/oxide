@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 #[cfg(feature = "profiling")]
-use crate::telemetry::events::{ProfileEvent, TelemetryEvent, emit_global};
+use crate::telemetry::events::{emit_global, ProfileEvent, TelemetryEvent};
 #[cfg(feature = "profiling")]
 use crate::telemetry::tags;
 #[cfg(feature = "profiling")]
@@ -40,7 +40,11 @@ fn parse_tags(raw: &str) -> Option<BTreeSet<String>> {
         tags.insert(normalized);
     }
 
-    if tags.is_empty() { None } else { Some(tags) }
+    if tags.is_empty() {
+        None
+    } else {
+        Some(tags)
+    }
 }
 
 #[cfg(feature = "profiling")]
@@ -194,6 +198,9 @@ pub fn event(
         }
         tags::PROFILE_PIPELINE => {
             tracing::debug!(target: tags::PROFILE_PIPELINE, op, result, elapsed_us, tags = ?tag_stack, "{message}");
+        }
+        tags::PROFILE_OXZ => {
+            tracing::debug!(target: tags::PROFILE_OXZ, op, result, elapsed_us, tags = ?tag_stack, "{message}");
         }
         _ => {
             tracing::debug!(target: "oxide.profile", op, result, elapsed_us, original_target = target, tags = ?tag_stack, "{message}");

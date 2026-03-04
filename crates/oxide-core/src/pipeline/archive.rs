@@ -3,27 +3,28 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, bounded};
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, TryRecvError};
 
 use crate::buffer::BufferPool;
 use crate::core::{PoolRuntimeSnapshot, WorkerPool, WorkerPoolHandle, WorkerRuntimeSnapshot};
 use crate::format::{
-    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, BlockHeader, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
+    ArchiveReader, ArchiveWriter, BlockHeader, CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT,
+    FOOTER_SIZE, GLOBAL_HEADER_SIZE, SECTION_TABLE_ENTRY_SIZE,
 };
 use crate::io::{InputScanner, MmapInput};
 use crate::telemetry::{
-    self, ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent, ExtractReport,
-    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
-    profile, tags,
+    self, profile, tags, ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent,
+    ExtractReport, ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport,
+    WorkerReport,
 };
 use crate::types::{
-    Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
-    PreProcessingStrategy, Result, duration_to_us,
+    duration_to_us, Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset,
+    FileFormat, PreProcessingStrategy, Result,
 };
 
 use super::directory::{self, DirectoryBatchSubmitter};
@@ -36,6 +37,7 @@ const DIRECTORY_FORMAT_PROBE_LIMIT: usize = 64 * 1024;
 const DIRECTORY_PREFETCH_WINDOW: usize = 8;
 const MIN_INFLIGHT_BLOCKS: usize = 64;
 const MAX_INFLIGHT_BLOCKS: usize = 4096;
+const OXZ_SECTION_TABLE_BYTES: u64 = CORE_SECTION_COUNT as u64 * SECTION_TABLE_ENTRY_SIZE as u64;
 const PROFILE_TAG_STACK_PIPELINE: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_PIPELINE];
 const AUTOTUNE_CANDIDATE_BLOCK_SIZES: [usize; 5] = [
     256 * 1024,
@@ -44,6 +46,13 @@ const AUTOTUNE_CANDIDATE_BLOCK_SIZES: [usize; 5] = [
     2 * 1024 * 1024,
     4 * 1024 * 1024,
 ];
+
+#[inline]
+fn container_prefix_bytes(block_count: u32) -> u64 {
+    GLOBAL_HEADER_SIZE as u64
+        + OXZ_SECTION_TABLE_BYTES
+        + block_count as u64 * CHUNK_DESCRIPTOR_SIZE as u64
+}
 
 #[derive(Debug)]
 struct PreparedInput {
@@ -686,7 +695,7 @@ impl ArchivePipeline {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
         let mut archive = ArchiveReader::new(reader)?;
-        let flags = archive.global_header().flags;
+        let flags = u32::from(archive.global_header().feature_bits);
         let source_kind = directory::source_kind_from_flags(flags);
         let block_capacity = archive.block_count() as usize;
         let mut expected_total = 0usize;
@@ -732,7 +741,8 @@ impl ArchivePipeline {
         drop(result_tx);
 
         let mut stage_timings = ExtractStageTimings::default();
-        let mut archive_bytes_total = GLOBAL_HEADER_SIZE as u64 + FOOTER_SIZE as u64;
+        let mut archive_bytes_total =
+            container_prefix_bytes(block_capacity as u32) + FOOTER_SIZE as u64;
         let mut submitted = 0usize;
         let mut received = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
@@ -744,10 +754,8 @@ impl ArchivePipeline {
             let read_started = Instant::now();
             let (header, block_data) = entry?;
             stage_timings.archive_read += read_started.elapsed();
-            expected_total = expected_total.saturating_add(header.original_size as usize);
-            archive_bytes_total = archive_bytes_total
-                .saturating_add(BLOCK_HEADER_SIZE as u64)
-                .saturating_add(block_data.len() as u64);
+            expected_total = expected_total.saturating_add(header.raw_len as usize);
+            archive_bytes_total = archive_bytes_total.saturating_add(block_data.len() as u64);
 
             while submitted.saturating_sub(received) >= queue_capacity {
                 Self::receive_decode_result(
@@ -963,7 +971,7 @@ impl ArchivePipeline {
         };
         let strategy = header.strategy()?;
         let restored = crate::preprocessing::reverse_preprocessing(&decoded, &strategy)?;
-        if restored.len() != header.original_size as usize {
+        if restored.len() != header.raw_len as usize {
             return Err(crate::OxideError::InvalidFormat(
                 "decoded block size mismatch",
             ));
@@ -1119,7 +1127,7 @@ impl ArchivePipeline {
             .max(1)
             .min(max_inflight_blocks.max(1));
         let (writer_tx, writer_rx) = bounded::<CompressedBlock>(writer_queue_capacity);
-        let writer_output_bytes = Arc::new(AtomicU64::new(GLOBAL_HEADER_SIZE as u64));
+        let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes(block_count)));
         let writer_output_bytes_shared = Arc::clone(&writer_output_bytes);
         let writer_buffer_pool = Arc::clone(&self.buffer_pool);
         let writer_handle = thread::spawn(move || -> Result<DirectoryWriterOutcome<W>> {
@@ -1129,7 +1137,7 @@ impl ArchivePipeline {
                 directory::source_kind_flags(ArchiveSourceKind::Directory),
             )?;
 
-            let mut output_bytes_written = GLOBAL_HEADER_SIZE as u64;
+            let mut output_bytes_written = container_prefix_bytes(block_count);
             let mut pending_sizes = BTreeMap::<usize, usize>::new();
             let mut next_written_id = 0usize;
             let mut pending_write_peak = 0usize;
@@ -1154,9 +1162,7 @@ impl ArchivePipeline {
                             "directory writer pending state drift detected",
                         ),
                     )?;
-                    output_bytes_written = output_bytes_written
-                        .saturating_add(BLOCK_HEADER_SIZE as u64)
-                        .saturating_add(len as u64);
+                    output_bytes_written = output_bytes_written.saturating_add(len as u64);
                     next_written_id += 1;
                 }
                 pending_write_peak = pending_write_peak.max(archive_writer.pending_blocks());
@@ -1188,7 +1194,7 @@ impl ArchivePipeline {
         let mut received_count = 0usize;
         let mut submitted_count = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
-        let mut output_bytes_written = GLOBAL_HEADER_SIZE as u64;
+        let mut output_bytes_written = container_prefix_bytes(block_count);
         let mut raw_passthrough_blocks = 0u64;
         let mut writer_queue_peak = 0usize;
         let result_wait_timeout = self
@@ -2073,9 +2079,8 @@ impl ArchivePipeline {
                 *pending_write_peak = (*pending_write_peak).max(pending_write.len());
 
                 while let Some(ready) = pending_write.remove(next_write_id) {
-                    *output_bytes_written = (*output_bytes_written)
-                        .saturating_add(BLOCK_HEADER_SIZE as u64)
-                        .saturating_add(ready.data.len() as u64);
+                    *output_bytes_written =
+                        (*output_bytes_written).saturating_add(ready.data.len() as u64);
                     let write_started = Instant::now();
                     if let Err(error) = archive_writer.write_owned_block(ready) {
                         first_error.get_or_insert(error);
@@ -2392,7 +2397,7 @@ impl ArchivePipeline {
             block_count,
             directory::source_kind_flags(source_kind),
         )?;
-        let mut output_bytes_written = GLOBAL_HEADER_SIZE as u64;
+        let mut output_bytes_written = container_prefix_bytes(block_count);
         let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
         let mut next_write_id = 0usize;
 

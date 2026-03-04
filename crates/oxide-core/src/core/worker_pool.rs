@@ -1,16 +1,16 @@
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 
-use crate::OxideError;
 use crate::buffer::BufferPool;
 use crate::core::work_stealing::{WorkStealingQueue, WorkStealingWorker};
 use crate::telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 use crate::types::{Batch, CompressedBlock, CompressionAlgo, Result};
+use crate::OxideError;
 
 /// Parallel worker pool backed by a work-stealing queue.
 pub struct WorkerPool {

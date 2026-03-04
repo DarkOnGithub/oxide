@@ -8,7 +8,6 @@ pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec
 
 /// Applies a Paeth row predictor filter.
 pub fn apply(data: &[u8], metadata: Option<&utils::ImageMetadata>) -> Result<Vec<u8>> {
-
     Ok(data.to_vec())
 }
 
@@ -16,6 +15,5 @@ pub fn apply(data: &[u8], metadata: Option<&utils::ImageMetadata>) -> Result<Vec
 ///
 /// Payloads without the transform marker are returned unchanged.
 pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
-
     Ok(data.to_vec())
 }
