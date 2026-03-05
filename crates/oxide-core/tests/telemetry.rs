@@ -6,3 +6,5 @@ mod compression;
 mod profile;
 #[path = "telemetry/report.rs"]
 mod report;
+#[path = "telemetry/shared.rs"]
+mod shared;

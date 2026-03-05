@@ -1,7 +1,6 @@
 #[cfg(feature = "telemetry")]
 mod telemetry_enabled_tests {
     use std::io::Write;
-    use std::sync::Mutex;
     use std::time::Duration;
 
     use oxide_core::format::FormatDetector;
@@ -12,7 +11,7 @@ mod telemetry_enabled_tests {
     };
     use tempfile::NamedTempFile;
 
-    static TELEMETRY_TEST_MUTEX: Mutex<()> = Mutex::new(());
+    use crate::shared::TELEMETRY_TEST_MUTEX;
 
     #[test]
     fn records_metrics_for_hotspots() -> Result<(), Box<dyn std::error::Error>> {

@@ -253,6 +253,7 @@ fn directory_archive_roundtrip_restores_tree() -> Result<(), Box<dyn std::error:
     write_directory_file(&source, "top.txt", b"top-level")?;
     write_directory_file(&source, "nested/a.bin", &[1, 2, 3, 4, 5])?;
     write_directory_file(&source, "nested/deeper/b.txt", b"deep-content")?;
+    write_directory_file(&source, "nested/empty.bin", b"")?;
     std::fs::create_dir_all(source.path().join("empty/leaf"))?;
 
     let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 128));
@@ -284,6 +285,10 @@ fn directory_archive_roundtrip_restores_tree() -> Result<(), Box<dyn std::error:
     assert_eq!(
         std::fs::read(out.path().join("nested/deeper/b.txt"))?,
         b"deep-content"
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("nested/empty.bin"))?,
+        Vec::<u8>::new()
     );
     assert!(out.path().join("empty/leaf").is_dir());
 
@@ -452,6 +457,12 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
         std::fs::read(out_dir.join("nested/data.bin"))?,
         vec![9, 8, 7]
     );
+    assert!(matches!(
+        report.extensions.get("extract.directory_entries"),
+        Some(ReportValue::U64(2))
+    ));
+    assert!(report.main_thread.stage_us.contains_key("directory_decode"));
+    assert!(report.main_thread.stage_us.contains_key("output_write"));
     Ok(())
 }
 

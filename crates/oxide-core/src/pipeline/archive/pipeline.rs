@@ -211,32 +211,21 @@ impl ArchivePipeline {
         let sink = sink.unwrap_or(&mut noop);
         let started_at = Instant::now();
         let extractor = Extractor::new(self.num_workers);
-        let mut decoded =
-            extractor.read_archive_payload_with_metrics(reader, started_at, &options, sink)?;
-        let mut extensions = extract_extensions_from_flags(decoded.flags);
-        let decoded_bytes_total = decoded.decoded_bytes_total;
-
-        let directory_decode_started = Instant::now();
-        let entries = directory::decode_directory_entries(&decoded.payload, decoded.flags)?.ok_or(
-            crate::OxideError::InvalidFormat("archive does not contain a directory bundle"),
+        let restored = extractor.extract_directory_to_path_with_metrics(
+            reader,
+            output_dir.as_ref(),
+            started_at,
+            &options,
+            sink,
         )?;
-        decoded.stage_timings.directory_decode += directory_decode_started.elapsed();
-
-        let output_bytes_total = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                directory::DirectoryBundleEntry::File { data, .. } => Some(data.len() as u64),
-                directory::DirectoryBundleEntry::Directory { .. } => None,
-            })
-            .sum();
+        let decoded = restored.decoded;
+        let mut extensions = extract_extensions_from_flags(decoded.flags);
         extensions.insert(
             "extract.directory_entries".to_string(),
-            crate::telemetry::ReportValue::U64(entries.len() as u64),
+            crate::telemetry::ReportValue::U64(restored.entry_count),
         );
-
-        let write_started = Instant::now();
-        directory::write_directory_entries(output_dir.as_ref(), entries)?;
-        decoded.stage_timings.output_write += write_started.elapsed();
+        let decoded_bytes_total = decoded.decoded_bytes_total;
+        let output_bytes_total = restored.output_bytes_total;
         let stage_timings = decoded.stage_timings;
 
         let report = build_extract_report_helper(
@@ -277,7 +266,7 @@ impl ArchivePipeline {
         let source_kind = Extractor::probe_archive_source_kind(&mut reader)?;
         reader.seek(SeekFrom::Start(0))?;
 
-        let mut decoded;
+        let decoded;
         let mut extensions;
         let output_bytes_total;
         match source_kind {
@@ -293,15 +282,20 @@ impl ArchivePipeline {
                 output_bytes_total = decoded.decoded_bytes_total;
             }
             ArchiveSourceKind::Directory => {
-                decoded = extractor
-                    .read_archive_payload_with_metrics(reader, started_at, &options, sink)?;
-                extensions = extract_extensions_from_flags(decoded.flags);
-                let (_kind, written) = extractor.restore_decoded_payload(
+                let restored = extractor.extract_directory_to_path_with_metrics(
+                    reader,
                     output_path.as_ref(),
-                    &mut decoded,
-                    &mut extensions,
+                    started_at,
+                    &options,
+                    sink,
                 )?;
-                output_bytes_total = written;
+                decoded = restored.decoded;
+                extensions = extract_extensions_from_flags(decoded.flags);
+                extensions.insert(
+                    "extract.directory_entries".to_string(),
+                    crate::telemetry::ReportValue::U64(restored.entry_count),
+                );
+                output_bytes_total = restored.output_bytes_total;
             }
         }
 

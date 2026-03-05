@@ -16,6 +16,7 @@ use crate::types::Result;
 use super::super::directory;
 use super::super::types::ArchiveSourceKind;
 use super::archiver::container_prefix_bytes;
+use super::directory_restore::DirectoryRestoreWriter;
 use super::reorder_writer::{BoundedReorderWriter, OrderedChunkWriter};
 use super::telemetry::*;
 use super::types::*;
@@ -79,6 +80,12 @@ struct DecodeStreamOutcome {
     workers: Vec<WorkerRuntimeSnapshot>,
     stage_timings: ExtractStageTimings,
     pipeline_stats: ExtractPipelineStats,
+}
+
+pub(crate) struct DirectoryRestoreOutcome {
+    pub(crate) decoded: DecodedArchivePayload,
+    pub(crate) output_bytes_total: u64,
+    pub(crate) entry_count: u64,
 }
 
 pub struct Extractor {
@@ -161,6 +168,50 @@ impl Extractor {
             workers: decoded.workers,
             stage_timings: decoded.stage_timings,
             pipeline_stats: decoded.pipeline_stats,
+        })
+    }
+
+    pub(crate) fn extract_directory_to_path_with_metrics<R: Read + Seek>(
+        &self,
+        reader: R,
+        output_path: &Path,
+        started_at: Instant,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<DirectoryRestoreOutcome> {
+        let mut writer = DirectoryRestoreWriter::create(output_path)?;
+        let decoded =
+            self.decode_archive_to_writer(reader, started_at, options, sink, &mut writer)?;
+
+        if !matches!(
+            directory::source_kind_from_flags(decoded.flags),
+            ArchiveSourceKind::Directory
+        ) {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive is not a directory payload",
+            ));
+        }
+
+        let restore_stats = writer.finish()?;
+        let mut stage_timings = decoded.stage_timings;
+        let restore_time = restore_stats.directory_decode + restore_stats.output_write;
+        stage_timings.ordered_write = stage_timings.ordered_write.saturating_sub(restore_time);
+        stage_timings.directory_decode += restore_stats.directory_decode;
+        stage_timings.output_write += restore_stats.output_write;
+
+        Ok(DirectoryRestoreOutcome {
+            decoded: DecodedArchivePayload {
+                flags: decoded.flags,
+                payload: Vec::new(),
+                decoded_bytes_total: decoded.decoded_bytes_total,
+                archive_bytes_total: decoded.archive_bytes_total,
+                blocks_total: decoded.blocks_total,
+                workers: decoded.workers,
+                stage_timings,
+                pipeline_stats: decoded.pipeline_stats,
+            },
+            output_bytes_total: restore_stats.output_bytes_total,
+            entry_count: restore_stats.entry_count,
         })
     }
 
