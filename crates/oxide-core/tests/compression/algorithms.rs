@@ -14,6 +14,12 @@ fn round_trip_case(data: &[u8]) {
     assert_eq!(decoded, data);
 }
 
+fn decode_case(hex: &str, expected: &[u8]) {
+    let encoded = decode_hex(hex);
+    let decoded = lz4::reverse(&encoded).expect("decode should succeed");
+    assert_eq!(decoded, expected);
+}
+
 #[test]
 fn roundtrip_empty() {
     round_trip_case(b"");
@@ -68,6 +74,52 @@ fn decode_legacy_fixture_vectors() {
         let decoded = lz4::reverse(&encoded).expect("legacy vector must decode");
         assert_eq!(decoded, expected);
     }
+}
+
+#[test]
+fn decode_uses_rle_copy_kernel() {
+    decode_case("0c00000017610100", &[b'a'; 12]);
+}
+
+#[test]
+fn decode_uses_repeat2_copy_kernel() {
+    decode_case("0c0000002661620200", b"abababababab");
+}
+
+#[test]
+fn decode_uses_repeat4_copy_kernel() {
+    decode_case("1000000048616263640400", b"abcdabcdabcdabcd");
+}
+
+#[test]
+fn decode_uses_repeat8_copy_kernel() {
+    decode_case(
+        "180000008c61626364656667680800",
+        b"abcdefghabcdefghabcdefgh",
+    );
+}
+
+#[test]
+fn decode_uses_non_overlapping_copy_kernel() {
+    decode_case("0c0000008061626364656667680800", b"abcdefghabcd");
+}
+
+#[test]
+fn decode_uses_generic_overlap_copy_kernel() {
+    decode_case("0a000000336162630300", b"abcabcabca");
+}
+
+#[test]
+fn decode_handles_extended_literal_length() {
+    decode_case(
+        "14000000f0056162636465666768696a6b6c6d6e6f7071727374",
+        b"abcdefghijklmnopqrst",
+    );
+}
+
+#[test]
+fn decode_handles_extended_match_length() {
+    decode_case("180000003f616263030002", b"abcabcabcabcabcabcabcabc");
 }
 
 #[test]

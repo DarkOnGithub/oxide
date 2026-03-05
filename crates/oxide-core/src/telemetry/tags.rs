@@ -84,6 +84,30 @@ pub const METRIC_PIPELINE_EXTRACT_RUN_COUNT: &str = "oxide.pipeline.extract.run.
 pub const METRIC_COMPRESSION_APPLY_COUNT: &str = "oxide.compression.apply.count";
 /// Counter for compression reversal operations.
 pub const METRIC_COMPRESSION_REVERSE_COUNT: &str = "oxide.compression.reverse.count";
+/// Counter for LZ4 decode tokens consumed through the table frontend.
+pub const METRIC_COMPRESSION_DECODE_TABLE_TOKEN_COUNT: &str =
+    "oxide.compression.decode.table_token.count";
+/// Counter for LZ4 decode length-extension reads.
+pub const METRIC_COMPRESSION_DECODE_LENGTH_EXTENSION_COUNT: &str =
+    "oxide.compression.decode.length_extension.count";
+/// Counter for LZ4 decode RLE copy-kernel dispatches.
+pub const METRIC_COMPRESSION_DECODE_COPY_RLE_COUNT: &str =
+    "oxide.compression.decode.copy.rle.count";
+/// Counter for LZ4 decode 2-byte repeat copy-kernel dispatches.
+pub const METRIC_COMPRESSION_DECODE_COPY_REPEAT2_COUNT: &str =
+    "oxide.compression.decode.copy.repeat2.count";
+/// Counter for LZ4 decode 4-byte repeat copy-kernel dispatches.
+pub const METRIC_COMPRESSION_DECODE_COPY_REPEAT4_COUNT: &str =
+    "oxide.compression.decode.copy.repeat4.count";
+/// Counter for LZ4 decode 8-byte repeat copy-kernel dispatches.
+pub const METRIC_COMPRESSION_DECODE_COPY_REPEAT8_COUNT: &str =
+    "oxide.compression.decode.copy.repeat8.count";
+/// Counter for LZ4 decode non-overlapping copy-kernel dispatches.
+pub const METRIC_COMPRESSION_DECODE_COPY_NON_OVERLAP_COUNT: &str =
+    "oxide.compression.decode.copy.non_overlap.count";
+/// Counter for LZ4 decode overlapping copy-kernel dispatches.
+pub const METRIC_COMPRESSION_DECODE_COPY_OVERLAP_COUNT: &str =
+    "oxide.compression.decode.copy.overlap.count";
 /// Counter for preprocessing application operations.
 pub const METRIC_PREPROCESSING_APPLY_COUNT: &str = "oxide.preprocessing.apply.count";
 /// Counter for preprocessing reversal operations.
@@ -163,6 +187,10 @@ pub const METRIC_PREPROCESSING_REVERSE_LATENCY_US: &str = "oxide.preprocessing.r
 pub const METRIC_COMPRESSION_INPUT_BYTES: &str = "oxide.compression.input_bytes";
 /// Histogram for compression output bytes.
 pub const METRIC_COMPRESSION_OUTPUT_BYTES: &str = "oxide.compression.output_bytes";
+/// Histogram for literal bytes copied during LZ4 decode.
+pub const METRIC_COMPRESSION_DECODE_LITERAL_BYTES: &str = "oxide.compression.decode.literal_bytes";
+/// Histogram for match bytes copied during LZ4 decode.
+pub const METRIC_COMPRESSION_DECODE_MATCH_BYTES: &str = "oxide.compression.decode.match_bytes";
 /// Histogram for preprocessing input bytes.
 pub const METRIC_PREPROCESSING_INPUT_BYTES: &str = "oxide.preprocessing.input_bytes";
 /// Histogram for preprocessing output bytes.
