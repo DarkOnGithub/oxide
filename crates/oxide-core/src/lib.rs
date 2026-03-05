@@ -7,7 +7,7 @@
 //! ## Key Components
 //!
 //! - **Pipeline**: Orchestrates the scanning, processing, and writing of archives.
-//! - **Compression**: Implementation of various compression algorithms (LZ4, LZMA, Deflate).
+//! - **Compression**: LZ4 codec implementation and dispatch.
 //! - **Preprocessing**: Format-aware data transformations to improve compression ratios.
 //! - **IO**: Efficient I/O operations, including memory-mapped files and smart scanners.
 //! - **Telemetry**: Comprehensive instrumentation for monitoring and profiling.
@@ -27,7 +27,7 @@ pub use buffer::{BufferPool, PoolMetricsSnapshot, PooledBuffer};
 pub use compression::{apply_compression, reverse_compression};
 pub use core::{
     PoolRuntimeSnapshot, WorkStealingQueue, WorkStealingWorker, WorkerPool, WorkerPoolHandle,
-    WorkerRuntimeSnapshot,
+    WorkerRuntimeSnapshot, WorkerScratchArena,
 };
 pub use error::OxideError;
 pub use format::{

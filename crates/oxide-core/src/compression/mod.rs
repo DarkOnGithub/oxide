@@ -4,29 +4,31 @@ use crate::telemetry::{self, profile, tags};
 use crate::types::duration_to_us;
 use crate::{CompressionAlgo, Result};
 
-pub mod deflate;
 pub mod lz4;
-pub mod lzma;
+pub(crate) mod scratch;
+
+pub(crate) use scratch::CompressionScratchArena;
 
 /// Dispatches compression to the specified algorithm.
 pub fn apply_compression(data: &[u8], algo: CompressionAlgo) -> Result<Vec<u8>> {
+    let mut scratch = CompressionScratchArena::new();
+    apply_compression_with_scratch(data, algo, &mut scratch)
+}
+
+pub(crate) fn apply_compression_with_scratch(
+    data: &[u8],
+    _algo: CompressionAlgo,
+    scratch: &mut CompressionScratchArena,
+) -> Result<Vec<u8>> {
     let start = Instant::now();
     let input_bytes = data.len() as u64;
 
-    let result = match algo {
-        CompressionAlgo::Lz4 => lz4::apply(data),
-        CompressionAlgo::Lzma => lzma::apply(data),
-        CompressionAlgo::Deflate => deflate::apply(data),
-    };
+    let result = lz4::apply_with_scratch(data, scratch.lz4());
 
     if let Ok(ref compressed) = result {
         let elapsed_us = duration_to_us(start.elapsed());
         let output_bytes = compressed.len() as u64;
-        let algo_str = match algo {
-            CompressionAlgo::Lz4 => "lz4",
-            CompressionAlgo::Lzma => "lzma",
-            CompressionAlgo::Deflate => "deflate",
-        };
+        let algo_str = "lz4";
 
         let labels = [("algo", algo_str)];
         telemetry::increment_counter(tags::METRIC_COMPRESSION_APPLY_COUNT, 1, &labels);
@@ -52,24 +54,16 @@ pub fn apply_compression(data: &[u8], algo: CompressionAlgo) -> Result<Vec<u8>> 
 }
 
 /// Dispatches decompression to the specified algorithm.
-pub fn reverse_compression(data: &[u8], algo: CompressionAlgo) -> Result<Vec<u8>> {
+pub fn reverse_compression(data: &[u8], _algo: CompressionAlgo) -> Result<Vec<u8>> {
     let start = Instant::now();
     let input_bytes = data.len() as u64;
 
-    let result = match algo {
-        CompressionAlgo::Lz4 => lz4::reverse(data),
-        CompressionAlgo::Lzma => lzma::reverse(data),
-        CompressionAlgo::Deflate => deflate::reverse(data),
-    };
+    let result = lz4::reverse(data);
 
     if let Ok(ref decompressed) = result {
         let elapsed_us = duration_to_us(start.elapsed());
         let output_bytes = decompressed.len() as u64;
-        let algo_str = match algo {
-            CompressionAlgo::Lz4 => "lz4",
-            CompressionAlgo::Lzma => "lzma",
-            CompressionAlgo::Deflate => "deflate",
-        };
+        let algo_str = "lz4";
 
         let labels = [("algo", algo_str)];
         telemetry::increment_counter(tags::METRIC_COMPRESSION_REVERSE_COUNT, 1, &labels);

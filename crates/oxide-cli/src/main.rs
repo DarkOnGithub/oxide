@@ -117,16 +117,12 @@ enum Commands {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CompressionArg {
     Lz4,
-    Lzma,
-    Deflate,
 }
 
 impl From<CompressionArg> for CompressionAlgo {
     fn from(value: CompressionArg) -> Self {
         match value {
             CompressionArg::Lz4 => CompressionAlgo::Lz4,
-            CompressionArg::Lzma => CompressionAlgo::Lzma,
-            CompressionArg::Deflate => CompressionAlgo::Deflate,
         }
     }
 }
@@ -778,6 +774,12 @@ fn print_telemetry_summary(snapshot: Option<&oxide_core::telemetry::TelemetrySna
     }
     if let Some(active_workers) = snapshot.gauge(tags::METRIC_WORKER_ACTIVE_COUNT) {
         println!("  telemetry active workers: {active_workers}");
+    }
+    if let Some(scratch_bytes) = snapshot.gauge(tags::METRIC_WORKER_SCRATCH_BYTES) {
+        println!(
+            "  telemetry worker scratch: {}",
+            format_bytes(scratch_bytes)
+        );
     }
 }
 

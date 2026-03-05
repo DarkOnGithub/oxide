@@ -13,11 +13,34 @@ const HASH_SEED: u32 = 2_654_435_761;
 const MAX_OFFSET: usize = u16::MAX as usize;
 const SKIP_STRENGTH: usize = 6;
 
+#[derive(Debug, Default)]
+pub(crate) struct Lz4Scratch {
+    table: Vec<u32>,
+}
+
+impl Lz4Scratch {
+    fn prepare(&mut self) {
+        if self.table.len() != HASH_SIZE {
+            self.table.resize(HASH_SIZE, 0);
+        }
+        self.table.fill(0);
+    }
+
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.table.capacity().saturating_mul(size_of::<u32>())
+    }
+}
+
 /// Compresses data using the LZ4 algorithm.
 ///
 /// Returns a byte vector starting with a 4-byte little-endian original size
 /// followed by the LZ4 block.
 pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
+    let mut scratch = Lz4Scratch::default();
+    apply_with_scratch(data, &mut scratch)
+}
+
+pub(crate) fn apply_with_scratch(data: &[u8], scratch: &mut Lz4Scratch) -> Result<Vec<u8>> {
     if data.len() > u32::MAX as usize {
         return Err(OxideError::CompressionError(
             "lz4 input exceeds 32-bit size prefix".to_string(),
@@ -26,7 +49,7 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
 
     let mut output = Vec::with_capacity(4 + max_compressed_size(data.len()));
     output.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    compress_block(data, &mut output);
+    compress_block(data, &mut output, scratch);
     Ok(output)
 }
 
@@ -50,13 +73,14 @@ fn max_compressed_size(input_len: usize) -> usize {
     input_len + (input_len / 255) + 16
 }
 
-fn compress_block(input: &[u8], output: &mut Vec<u8>) {
+fn compress_block(input: &[u8], output: &mut Vec<u8>, scratch: &mut Lz4Scratch) {
     if input.len() < MFLIMIT + 1 {
         emit_last_literals(output, input, 0);
         return;
     }
 
-    let mut table = [0u32; HASH_SIZE];
+    scratch.prepare();
+    let table = &mut scratch.table;
     let mut anchor = 0usize;
     let mut search_pos = 1usize;
     let mflimit = input.len() - MFLIMIT;
