@@ -29,7 +29,7 @@ Both tracks remain strictly lossless.
 
 ## Known Pain Points in Current Design
 
-- Codec preset is mostly metadata; it does not strongly drive codec internals.
+- Compression preset is mostly metadata; it does not strongly drive codec internals.
 - Block autotuning primarily ranks throughput, then output size.
 - Several preprocessing paths are placeholder-level.
 - Extract path can retain a large decoded block set before final output merge.
@@ -118,16 +118,18 @@ Risk:
 
 ### A4. Per-chunk codec/preset selection
 
-Replace archive-wide codec lock with chunk-level policy:
-- Candidate codecs: LZ4-like.
+Replace archive-wide compression policy lock with chunk-level policy:
+- Current implementation exposes `Lz4` only; additional codecs are deferred follow-up work.
+- Candidate codecs: LZ4-like initially, with other codecs added later.
 - Candidate presets: fast/default/high.
-- Planner does micro-trials on sampled bytes, then commits deterministic choice.
+- Allow raw passthrough when compression is not worthwhile.
+- Planner does micro-trials on sampled bytes, then commits deterministic codec/preset/raw choice.
 
 Why this helps:
-- Mixed datasets are not served well by a single codec globally.
+- Mixed datasets are not served well by a single codec/preset policy globally.
 
 Expected impact:
-- Ratio: +3% to +15% vs static global codec.
+- Ratio: modest gain at first, with larger upside once additional codecs land.
 - Speed: can also improve by routing incompressible chunks to fast/raw paths.
 
 Risk:
@@ -403,7 +405,7 @@ This keeps a single format version while enabling adaptive internals.
 1. [x] Redefine v1 container internals (section table + chunk descriptors).
 2. [x] Introduce streaming DAG and bounded reorder writer path.
 3. [x] Add worker-local scratch arenas and remove hot-path debug output.
-4. Implement decode fast paths (table entropy + copy kernels).
+4. [x] Implement decode fast paths (table entropy + copy kernels).
 5. Add adaptive chunking and planner objective framework.
 6. Wire dictionaries and per-chunk codec/preset selection.
 7. Keep preprocessing/transform execution out of scope for this rework.

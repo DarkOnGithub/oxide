@@ -1,8 +1,12 @@
-use core::fmt;
 use core::mem::size_of;
 use core::ptr;
 
 use crate::{OxideError, Result};
+
+#[path = "lz4/copy.rs"]
+mod copy;
+#[path = "lz4/decode.rs"]
+mod decode;
 
 const MIN_MATCH: usize = 4;
 const LAST_LITERALS: usize = 5;
@@ -64,7 +68,7 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
     }
 
     let expected_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    decompress_block(&data[4..], expected_size)
+    decode::decompress_block(&data[4..], expected_size)
         .map_err(|err| OxideError::DecompressionError(format!("lz4 decode failed: {err}")))
 }
 
@@ -335,201 +339,4 @@ unsafe fn load_u32(ptr: *const u8) -> u32 {
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn load_usize(ptr: *const u8) -> usize {
     ptr::read_unaligned(ptr as *const usize)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DecodeError {
-    ExpectedAnotherByte,
-    LiteralOutOfBounds,
-    OffsetOutOfBounds,
-    OutputTooSmall { expected: usize, actual: usize },
-    LengthOverflow,
-    DecodedSizeMismatch { expected: usize, actual: usize },
-}
-
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ExpectedAnotherByte => f.write_str("expected another byte, found none"),
-            Self::LiteralOutOfBounds => f.write_str("literal is out of bounds of the input"),
-            Self::OffsetOutOfBounds => {
-                f.write_str("the offset to copy is not contained in the decompressed buffer")
-            }
-            Self::OutputTooSmall { expected, actual } => {
-                write!(
-                    f,
-                    "provided output is too small for the decompressed data, actual {actual}, expected {expected}"
-                )
-            }
-            Self::LengthOverflow => f.write_str("decoded length overflows platform usize"),
-            Self::DecodedSizeMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "decoded size mismatch, expected {expected} bytes, got {actual}"
-                )
-            }
-        }
-    }
-}
-
-fn decompress_block(
-    input: &[u8],
-    expected_size: usize,
-) -> core::result::Result<Vec<u8>, DecodeError> {
-    if input.is_empty() {
-        return Err(DecodeError::ExpectedAnotherByte);
-    }
-
-    let mut output: Vec<u8> = Vec::with_capacity(expected_size);
-    unsafe {
-        // SAFETY: we only read from already-decoded regions and fully validate writes before copying.
-        output.set_len(expected_size);
-    }
-
-    let mut input_pos = 0usize;
-    let mut output_pos = 0usize;
-    let input_ptr = input.as_ptr();
-    let output_ptr = output.as_mut_ptr();
-
-    while input_pos < input.len() {
-        let token = input[input_pos];
-        input_pos += 1;
-
-        let mut literal_len = (token >> 4) as usize;
-        if literal_len == 15 {
-            literal_len = literal_len
-                .checked_add(read_length(input, &mut input_pos)?)
-                .ok_or(DecodeError::LengthOverflow)?;
-        }
-
-        if input_pos
-            .checked_add(literal_len)
-            .is_none_or(|end| end > input.len())
-        {
-            return Err(DecodeError::LiteralOutOfBounds);
-        }
-
-        if output_pos
-            .checked_add(literal_len)
-            .is_none_or(|end| end > expected_size)
-        {
-            return Err(DecodeError::OutputTooSmall {
-                expected: output_pos.saturating_add(literal_len),
-                actual: expected_size,
-            });
-        }
-
-        unsafe {
-            // SAFETY: both ranges were bounds-checked above and do not overlap.
-            ptr::copy_nonoverlapping(
-                input_ptr.add(input_pos),
-                output_ptr.add(output_pos),
-                literal_len,
-            );
-        }
-
-        input_pos += literal_len;
-        output_pos += literal_len;
-
-        if input_pos == input.len() {
-            return if output_pos == expected_size {
-                Ok(output)
-            } else {
-                Err(DecodeError::DecodedSizeMismatch {
-                    expected: expected_size,
-                    actual: output_pos,
-                })
-            };
-        }
-
-        if input_pos + 2 > input.len() {
-            return Err(DecodeError::ExpectedAnotherByte);
-        }
-
-        let offset = u16::from_le_bytes([input[input_pos], input[input_pos + 1]]) as usize;
-        input_pos += 2;
-
-        if offset == 0 || offset > output_pos {
-            return Err(DecodeError::OffsetOutOfBounds);
-        }
-
-        let mut match_len = (token as usize & 0x0F) + MIN_MATCH;
-        if (token & 0x0F) == 0x0F {
-            match_len = match_len
-                .checked_add(read_length(input, &mut input_pos)?)
-                .ok_or(DecodeError::LengthOverflow)?;
-        }
-
-        if output_pos
-            .checked_add(match_len)
-            .is_none_or(|end| end > expected_size)
-        {
-            return Err(DecodeError::OutputTooSmall {
-                expected: output_pos.saturating_add(match_len),
-                actual: expected_size,
-            });
-        }
-
-        unsafe {
-            // SAFETY: offset is validated against output_pos, and destination is within output.
-            copy_match(output_ptr.add(output_pos), offset, match_len);
-        }
-
-        output_pos += match_len;
-    }
-
-    if output_pos != expected_size {
-        return Err(DecodeError::DecodedSizeMismatch {
-            expected: expected_size,
-            actual: output_pos,
-        });
-    }
-
-    Ok(output)
-}
-
-#[inline]
-fn read_length(input: &[u8], input_pos: &mut usize) -> core::result::Result<usize, DecodeError> {
-    let mut len = 0usize;
-
-    loop {
-        let byte = *input
-            .get(*input_pos)
-            .ok_or(DecodeError::ExpectedAnotherByte)?;
-        *input_pos += 1;
-
-        len = len
-            .checked_add(byte as usize)
-            .ok_or(DecodeError::LengthOverflow)?;
-
-        if byte != 255 {
-            return Ok(len);
-        }
-    }
-}
-
-#[inline]
-#[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn copy_match(dst: *mut u8, offset: usize, len: usize) {
-    let src = dst.sub(offset);
-
-    if offset == 1 {
-        // RLE fast path, common for long runs.
-        let value = src.read();
-        ptr::write_bytes(dst, value, len);
-        return;
-    }
-
-    if offset >= len {
-        ptr::copy_nonoverlapping(src, dst, len);
-        return;
-    }
-
-    let mut copied = 0usize;
-    while copied < len {
-        let chunk = (len - copied).min(offset);
-        let from = dst.add(copied).sub(offset);
-        ptr::copy_nonoverlapping(from, dst.add(copied), chunk);
-        copied += chunk;
-    }
 }
