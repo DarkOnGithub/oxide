@@ -14,7 +14,7 @@ use super::super::types::{ArchivePipelineConfig, ArchiveSourceKind, PipelinePerf
 use super::telemetry::*;
 use super::types::*;
 use crate::buffer::BufferPool;
-use crate::core::{WorkerPool, WorkerPoolHandle};
+use crate::core::{WorkerPool, WorkerPoolHandle, WorkerScratchArena};
 use crate::format::{
     ArchiveWriter, CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
     SECTION_TABLE_ENTRY_SIZE,
@@ -119,7 +119,7 @@ impl<'a> Archiver<'a> {
         let compression_preset = self.config.performance.compression_preset;
         let raw_fallback_enabled = self.config.performance.raw_fallback_enabled;
         let worker_processing_totals = Arc::clone(&processing_totals);
-        let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression| {
+        let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
             process_batch(
                 batch,
                 pool,
@@ -127,6 +127,7 @@ impl<'a> Archiver<'a> {
                 compression_preset,
                 raw_fallback_enabled,
                 worker_processing_totals.as_ref(),
+                scratch,
             )
         });
 
@@ -738,7 +739,7 @@ impl<'a> Archiver<'a> {
         let compression_preset = self.config.performance.compression_preset;
         let raw_fallback_enabled = self.config.performance.raw_fallback_enabled;
         let worker_processing_totals = Arc::clone(&processing_totals);
-        let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression| {
+        let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
             process_batch(
                 batch,
                 pool,
@@ -746,6 +747,7 @@ impl<'a> Archiver<'a> {
                 compression_preset,
                 raw_fallback_enabled,
                 worker_processing_totals.as_ref(),
+                scratch,
             )
         });
 
@@ -1197,11 +1199,12 @@ pub fn record_result_to_writer<W: Write>(
 
 pub fn process_batch(
     batch: Batch,
-    pool: &BufferPool,
+    _pool: &BufferPool,
     compression: CompressionAlgo,
     compression_preset: CompressionPreset,
     raw_fallback_enabled: bool,
     processing_totals: &ProcessingThroughputTotals,
+    scratch: &mut WorkerScratchArena,
 ) -> Result<CompressedBlock> {
     let pre_proc =
         crate::preprocessing::get_preprocessing_strategy(batch.file_type_hint, compression);
@@ -1221,7 +1224,11 @@ pub fn process_batch(
     let compression_input = preprocessed.as_deref().unwrap_or(source);
 
     let compression_started = Instant::now();
-    let compressed = crate::compression::apply_compression(compression_input, compression)?;
+    let compressed = crate::compression::apply_compression_with_scratch(
+        compression_input,
+        compression,
+        scratch.compression(),
+    )?;
     let compression_elapsed = compression_started.elapsed();
     processing_totals.record(
         source.len() as u64,
@@ -1229,18 +1236,12 @@ pub fn process_batch(
         compression_input.len() as u64,
         compression_elapsed,
     );
-    let (output, raw_passthrough) = select_stored_payload(
-        compression_input,
-        compressed.as_slice(),
-        raw_fallback_enabled,
-    );
-
-    let mut scratch = pool.acquire();
-    scratch.extend_from_slice(output);
-
-    // Move the pooled Vec out without allocating.
-    let mut data = Vec::new();
-    std::mem::swap(scratch.as_mut_vec(), &mut data);
+    let raw_passthrough = raw_fallback_enabled && compressed.len() >= compression_input.len();
+    let data = if raw_passthrough {
+        compression_input.to_vec()
+    } else {
+        compressed
+    };
 
     Ok(CompressedBlock::with_compression_meta(
         batch.id,

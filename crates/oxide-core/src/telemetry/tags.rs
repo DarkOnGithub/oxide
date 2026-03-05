@@ -74,6 +74,8 @@ pub const METRIC_WORKER_TASK_FINISH_COUNT: &str = "oxide.worker.task.finish.coun
 pub const METRIC_WORKER_TASK_FAIL_COUNT: &str = "oxide.worker.task.fail.count";
 /// Counter for worker queue depth samples taken.
 pub const METRIC_WORKER_QUEUE_DEPTH_SAMPLES: &str = "oxide.worker.queue.depth.samples";
+/// Counter for worker-local scratch arena initializations.
+pub const METRIC_WORKER_SCRATCH_INIT_COUNT: &str = "oxide.worker.scratch.init.count";
 /// Counter for the number of archive operations started.
 pub const METRIC_PIPELINE_ARCHIVE_RUN_COUNT: &str = "oxide.pipeline.archive.run.count";
 /// Counter for the number of extract operations started.
@@ -115,6 +117,8 @@ pub const METRIC_SCANNER_SCAN_LATENCY_US: &str = "oxide.scanner.scan.latency_us"
 pub const METRIC_WORKER_TASK_LATENCY_US: &str = "oxide.worker.task.latency_us";
 /// Histogram for worker queue depth observations.
 pub const METRIC_WORKER_QUEUE_DEPTH_HIST: &str = "oxide.worker.queue.depth.hist";
+/// Histogram for worker-local scratch arena footprint in bytes.
+pub const METRIC_WORKER_SCRATCH_BYTES_HIST: &str = "oxide.worker.scratch.bytes.hist";
 /// Histogram for total archive operation latency in microseconds.
 pub const METRIC_PIPELINE_ARCHIVE_RUN_LATENCY_US: &str = "oxide.pipeline.archive.run.latency_us";
 /// Histogram for total extract operation latency in microseconds.
@@ -196,3 +200,5 @@ pub const METRIC_WORKER_TASK_COUNT: &str = "oxide.worker.task.count";
 pub const METRIC_WORKER_QUEUE_DEPTH: &str = "oxide.worker.queue.depth";
 /// Number of workers currently active.
 pub const METRIC_WORKER_ACTIVE_COUNT: &str = "oxide.worker.active.count";
+/// Gauge for current worker-local scratch arena bytes.
+pub const METRIC_WORKER_SCRATCH_BYTES: &str = "oxide.worker.scratch.bytes";

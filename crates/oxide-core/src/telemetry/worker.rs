@@ -17,6 +17,8 @@ pub trait WorkerTelemetry: Send + Sync {
     fn on_task_started(&self, worker_id: usize, task_kind: &str);
     fn on_task_finished(&self, worker_id: usize, task_kind: &str, elapsed: Duration);
     fn on_task_failed(&self, worker_id: usize, task_kind: &str, elapsed: Duration);
+    fn on_worker_scratch_ready(&self, _worker_id: usize, _allocated_bytes: usize) {}
+    fn on_worker_scratch_sample(&self, _worker_id: usize, _allocated_bytes: usize) {}
 }
 
 /// Default telemetry implementation that reports worker metrics.
@@ -50,17 +52,6 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
             0,
             "worker queue depth sampled",
         );
-
-        #[cfg(feature = "profiling")]
-        if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_WORKER) {
-            tracing::debug!(
-                target: tags::PROFILE_WORKER,
-                op = "queue_depth",
-                queue_depth = depth,
-                tags = ?PROFILE_TAG_STACK_WORKER,
-                "worker queue depth sampled"
-            );
-        }
     }
 
     fn on_task_started(&self, _worker_id: usize, _task_kind: &str) {
@@ -84,17 +75,6 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
             0,
             "worker task started",
         );
-
-        #[cfg(feature = "profiling")]
-        if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_WORKER) {
-            tracing::debug!(
-                target: tags::PROFILE_WORKER,
-                op = "task_start",
-                task_kind = _task_kind,
-                tags = ?PROFILE_TAG_STACK_WORKER,
-                "worker task started"
-            );
-        }
     }
 
     fn on_task_finished(&self, _worker_id: usize, _task_kind: &str, elapsed: Duration) {
@@ -134,19 +114,6 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
             elapsed_us,
             "worker task finished",
         );
-
-        #[cfg(feature = "profiling")]
-        if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_WORKER) {
-            tracing::debug!(
-                target: tags::PROFILE_WORKER,
-                op = "task_finish",
-                result = "ok",
-                task_kind = _task_kind,
-                elapsed_us,
-                tags = ?PROFILE_TAG_STACK_WORKER,
-                "worker task finished"
-            );
-        }
     }
 
     fn on_task_failed(&self, _worker_id: usize, _task_kind: &str, elapsed: Duration) {
@@ -186,18 +153,48 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
             elapsed_us,
             "worker task failed",
         );
+    }
+
+    fn on_worker_scratch_ready(&self, _worker_id: usize, allocated_bytes: usize) {
+        let allocated_bytes = allocated_bytes.min(u64::MAX as usize) as u64;
+        telemetry::increment_counter(
+            tags::METRIC_WORKER_SCRATCH_INIT_COUNT,
+            1,
+            &[("subsystem", "worker"), ("op", "scratch_ready")],
+        );
+        telemetry::set_gauge(
+            tags::METRIC_WORKER_SCRATCH_BYTES,
+            allocated_bytes,
+            &[("subsystem", "worker"), ("op", "scratch_ready")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_WORKER_SCRATCH_BYTES_HIST,
+            allocated_bytes,
+            &[("subsystem", "worker"), ("op", "scratch_ready")],
+        );
 
         #[cfg(feature = "profiling")]
-        if profile::is_tag_stack_enabled(&PROFILE_TAG_STACK_WORKER) {
-            tracing::debug!(
-                target: tags::PROFILE_WORKER,
-                op = "task_finish",
-                result = "error",
-                task_kind = _task_kind,
-                elapsed_us,
-                tags = ?PROFILE_TAG_STACK_WORKER,
-                "worker task failed"
-            );
-        }
+        profile::event(
+            tags::PROFILE_WORKER,
+            &PROFILE_TAG_STACK_WORKER,
+            "scratch_ready",
+            "ok",
+            allocated_bytes,
+            "worker scratch initialized",
+        );
+    }
+
+    fn on_worker_scratch_sample(&self, _worker_id: usize, allocated_bytes: usize) {
+        let allocated_bytes = allocated_bytes.min(u64::MAX as usize) as u64;
+        telemetry::set_gauge(
+            tags::METRIC_WORKER_SCRATCH_BYTES,
+            allocated_bytes,
+            &[("subsystem", "worker"), ("op", "scratch_sample")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_WORKER_SCRATCH_BYTES_HIST,
+            allocated_bytes,
+            &[("subsystem", "worker"), ("op", "scratch_sample")],
+        );
     }
 }

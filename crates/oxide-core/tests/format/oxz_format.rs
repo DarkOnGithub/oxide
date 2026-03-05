@@ -47,11 +47,7 @@ fn strategy_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn compression_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let algorithms = [
-        CompressionAlgo::Lz4,
-        CompressionAlgo::Lzma,
-        CompressionAlgo::Deflate,
-    ];
+    let algorithms = [CompressionAlgo::Lz4];
 
     for algorithm in algorithms {
         let flags = algorithm.to_flags();
@@ -82,7 +78,7 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         1024,
         384,
         PreProcessingStrategy::Text(TextStrategy::Bwt),
-        CompressionAlgo::Lzma,
+        CompressionAlgo::Lz4,
         0xAABB_CCDD,
     );
 
@@ -96,7 +92,7 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         decoded.strategy()?,
         PreProcessingStrategy::Text(TextStrategy::Bwt)
     );
-    assert_eq!(decoded.compression()?, CompressionAlgo::Lzma);
+    assert_eq!(decoded.compression()?, CompressionAlgo::Lz4);
     Ok(())
 }
 
@@ -165,13 +161,13 @@ fn archive_writer_and_reader_support_random_and_sequential_access()
         1,
         b"beta",
         PreProcessingStrategy::Text(TextStrategy::Bwt),
-        CompressionAlgo::Lzma,
+        CompressionAlgo::Lz4,
     ))?;
     writer.write_block(&block(
         2,
         b"gamma",
         PreProcessingStrategy::Image(ImageStrategy::Paeth),
-        CompressionAlgo::Deflate,
+        CompressionAlgo::Lz4,
     ))?;
     let archive = writer.write_footer()?;
 

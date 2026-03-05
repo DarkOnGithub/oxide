@@ -130,17 +130,32 @@ mod telemetry_enabled_tests {
         worker_telemetry.on_task_finished(0, "compress", Duration::from_micros(120));
         worker_telemetry.on_task_started(0, "compress");
         worker_telemetry.on_task_failed(0, "compress", Duration::from_micros(75));
+        worker_telemetry.on_worker_scratch_ready(0, 8192);
+        worker_telemetry.on_worker_scratch_sample(0, 4096);
 
         let snapshot = telemetry::snapshot();
         assert_eq!(snapshot.gauge(tags::METRIC_WORKER_QUEUE_DEPTH), Some(7));
         assert_eq!(snapshot.gauge(tags::METRIC_WORKER_ACTIVE_COUNT), Some(0));
         assert_eq!(snapshot.counter(tags::METRIC_WORKER_TASK_COUNT), Some(2));
+        assert_eq!(
+            snapshot.counter(tags::METRIC_WORKER_SCRATCH_INIT_COUNT),
+            Some(1)
+        );
+        assert_eq!(
+            snapshot.gauge(tags::METRIC_WORKER_SCRATCH_BYTES),
+            Some(4096)
+        );
 
         let task_hist = snapshot
             .histogram(tags::METRIC_WORKER_TASK_LATENCY_US)
             .expect("worker task histogram missing");
         assert_eq!(task_hist.count, 2);
         assert!(task_hist.max >= task_hist.min);
+
+        let scratch_hist = snapshot
+            .histogram(tags::METRIC_WORKER_SCRATCH_BYTES_HIST)
+            .expect("worker scratch histogram missing");
+        assert_eq!(scratch_hist.count, 2);
     }
 }
 
@@ -168,6 +183,8 @@ mod telemetry_disabled_tests {
         worker_telemetry.on_task_started(0, "compress");
         worker_telemetry.on_task_finished(0, "compress", Duration::from_micros(120));
         worker_telemetry.on_task_failed(0, "compress", Duration::from_micros(75));
+        worker_telemetry.on_worker_scratch_ready(0, 4096);
+        worker_telemetry.on_worker_scratch_sample(0, 2048);
 
         let snapshot = telemetry::snapshot();
         assert!(snapshot.counters.is_empty());

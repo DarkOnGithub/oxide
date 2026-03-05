@@ -164,7 +164,7 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 64));
-    let pipeline = build_pipeline(8 * 1024, 4, buffer_pool, CompressionAlgo::Deflate);
+    let pipeline = build_pipeline(8 * 1024, 4, buffer_pool, CompressionAlgo::Lz4);
     let archive = pipeline
         .archive_file(
             file.path(),
@@ -221,7 +221,7 @@ fn pipeline_reaches_buffer_pool_steady_state() -> Result<(), Box<dyn std::error:
         512 * 1024,
         1,
         Arc::clone(&buffer_pool),
-        CompressionAlgo::Lzma,
+        CompressionAlgo::Lz4,
     );
 
     let _archive = pipeline.archive_file(
@@ -256,12 +256,7 @@ fn directory_archive_roundtrip_restores_tree() -> Result<(), Box<dyn std::error:
     std::fs::create_dir_all(source.path().join("empty/leaf"))?;
 
     let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 128));
-    let pipeline = build_pipeline(
-        16 * 1024,
-        4,
-        Arc::clone(&buffer_pool),
-        CompressionAlgo::Deflate,
-    );
+    let pipeline = build_pipeline(16 * 1024, 4, Arc::clone(&buffer_pool), CompressionAlgo::Lz4);
 
     let archive = pipeline
         .archive_directory(
@@ -390,7 +385,7 @@ fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
-    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Deflate);
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
 
     let archive = pipeline
         .archive_path(
@@ -466,7 +461,7 @@ fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn st
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 64));
-    let pipeline = build_pipeline(16 * 1024, 4, buffer_pool, CompressionAlgo::Deflate);
+    let pipeline = build_pipeline(16 * 1024, 4, buffer_pool, CompressionAlgo::Lz4);
     let mut sink = CollectProgress::default();
 
     let run = pipeline.archive_path(

@@ -46,7 +46,7 @@ fn compressed_block_crc_detects_mutation() {
         2,
         vec![1, 2, 3, 4],
         PreProcessingStrategy::None,
-        CompressionAlgo::Deflate,
+        CompressionAlgo::Lz4,
         4,
     );
     block.data.push(5);

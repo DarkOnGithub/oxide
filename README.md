@@ -119,7 +119,7 @@ Risk:
 ### A4. Per-chunk codec/preset selection
 
 Replace archive-wide codec lock with chunk-level policy:
-- Candidate codecs: LZ4-like, Deflate-like, LZMA-like (and future additions).
+- Candidate codecs: LZ4-like.
 - Candidate presets: fast/default/high.
 - Planner does micro-trials on sampled bytes, then commits deterministic choice.
 
@@ -402,7 +402,7 @@ This keeps a single format version while enabling adaptive internals.
 
 1. [x] Redefine v1 container internals (section table + chunk descriptors).
 2. [x] Introduce streaming DAG and bounded reorder writer path.
-3. Add worker-local scratch arenas and remove hot-path debug output.
+3. [x] Add worker-local scratch arenas and remove hot-path debug output.
 4. Implement decode fast paths (table entropy + copy kernels).
 5. Add adaptive chunking and planner objective framework.
 6. Wire dictionaries and per-chunk codec/preset selection.

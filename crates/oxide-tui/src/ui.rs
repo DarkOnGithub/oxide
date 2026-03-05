@@ -25,8 +25,6 @@ const COLOR_DANGER: Color = Color::LightRed;
 fn compression_label(algo: oxide_core::CompressionAlgo) -> &'static str {
     match algo {
         oxide_core::CompressionAlgo::Lz4 => "lz4",
-        oxide_core::CompressionAlgo::Lzma => "lzma",
-        oxide_core::CompressionAlgo::Deflate => "deflate",
     }
 }
 

@@ -17,7 +17,7 @@ fn make_batch(id: usize, data: Vec<u8>) -> Batch {
 fn worker_pool_processes_all_batches() -> Result<(), Box<dyn std::error::Error>> {
     let buffer_pool = Arc::new(BufferPool::new(128, 32));
     let worker_pool = WorkerPool::new(4, Arc::clone(&buffer_pool), CompressionAlgo::Lz4);
-    let handle = worker_pool.spawn(|_worker_id, batch, pool, compression| {
+    let handle = worker_pool.spawn(|_worker_id, batch, pool, compression, _scratch| {
         let mut scratch = pool.acquire();
         scratch.extend_from_slice(batch.data());
 
@@ -58,11 +58,7 @@ fn worker_pool_processes_all_batches() -> Result<(), Box<dyn std::error::Error>>
 fn worker_pool_balances_mixed_workloads() -> Result<(), Box<dyn std::error::Error>> {
     let worker_count = 4usize;
     let buffer_pool = Arc::new(BufferPool::new(64, 16));
-    let worker_pool = WorkerPool::new(
-        worker_count,
-        Arc::clone(&buffer_pool),
-        CompressionAlgo::Deflate,
-    );
+    let worker_pool = WorkerPool::new(worker_count, Arc::clone(&buffer_pool), CompressionAlgo::Lz4);
     let task_counts: Arc<Vec<AtomicUsize>> = Arc::new(
         (0..worker_count)
             .map(|_| AtomicUsize::new(0))
@@ -72,7 +68,7 @@ fn worker_pool_balances_mixed_workloads() -> Result<(), Box<dyn std::error::Erro
 
     let counts_for_worker = Arc::clone(&task_counts);
     let seen_for_worker = Arc::clone(&seen_workers);
-    let handle = worker_pool.spawn(move |worker_id, batch, _pool, compression| {
+    let handle = worker_pool.spawn(move |worker_id, batch, _pool, compression, _scratch| {
         counts_for_worker[worker_id].fetch_add(1, Ordering::AcqRel);
         seen_for_worker
             .lock()
@@ -119,8 +115,8 @@ fn worker_pool_balances_mixed_workloads() -> Result<(), Box<dyn std::error::Erro
 #[test]
 fn shutdown_rejects_new_work_and_drains_existing_tasks() -> Result<(), Box<dyn std::error::Error>> {
     let buffer_pool = Arc::new(BufferPool::new(64, 8));
-    let worker_pool = WorkerPool::new(2, buffer_pool, CompressionAlgo::Lzma);
-    let handle = worker_pool.spawn(|_worker_id, batch, _pool, compression| {
+    let worker_pool = WorkerPool::new(2, buffer_pool, CompressionAlgo::Lz4);
+    let handle = worker_pool.spawn(|_worker_id, batch, _pool, compression, _scratch| {
         Ok(CompressedBlock::new(
             batch.id,
             batch.to_owned().to_vec(),
