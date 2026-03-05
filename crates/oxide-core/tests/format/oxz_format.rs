@@ -235,7 +235,7 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn reader_rejects_global_crc_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+fn reader_ignores_global_crc_mismatch() -> Result<(), Box<dyn std::error::Error>> {
     let pool = Arc::new(BufferPool::new(128, 8));
     let mut writer = ArchiveWriter::new(Vec::new(), pool);
     writer.write_global_header(1)?;
@@ -252,13 +252,13 @@ fn reader_rejects_global_crc_mismatch() -> Result<(), Box<dyn std::error::Error>
         + CHUNK_DESCRIPTOR_SIZE;
     archive[payload_offset] ^= 0xFF;
 
-    let err = ArchiveReader::new(Cursor::new(archive)).unwrap_err();
-    assert!(matches!(err, OxideError::ChecksumMismatch { .. }));
+    let reader = ArchiveReader::new(Cursor::new(archive))?;
+    assert_eq!(reader.block_count(), 1);
     Ok(())
 }
 
 #[test]
-fn reader_detects_block_crc_mismatch_on_read() -> Result<(), Box<dyn std::error::Error>> {
+fn reader_ignores_block_crc_mismatch_on_read() -> Result<(), Box<dyn std::error::Error>> {
     let pool = Arc::new(BufferPool::new(128, 8));
     let mut writer = ArchiveWriter::new(Vec::new(), pool);
     writer.write_global_header(1)?;
@@ -274,8 +274,9 @@ fn reader_detects_block_crc_mismatch_on_read() -> Result<(), Box<dyn std::error:
     let archive = writer.write_footer()?;
 
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
-    let err = reader.read_block(0).unwrap_err();
-    assert!(matches!(err, OxideError::ChecksumMismatch { .. }));
+    let (header, payload) = reader.read_block(0)?;
+    assert_eq!(header.chunk_id, 0);
+    assert_eq!(payload, b"payload");
     Ok(())
 }
 

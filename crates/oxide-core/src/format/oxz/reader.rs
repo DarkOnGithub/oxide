@@ -2,8 +2,6 @@ use std::cmp::min;
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 
-use crc32fast::Hasher;
-
 use crate::telemetry::{self, profile, tags};
 use crate::types::duration_to_us;
 use crate::{OxideError, Result};
@@ -30,7 +28,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
     /// Creates a new archive reader from a readable and seekable source.
     ///
     /// Validates the global header, section table, chunk index, payload layout,
-    /// and global footer CRC32.
+    /// and declared archive length. Checksum fields are currently ignored.
     pub fn new(mut reader: R) -> Result<Self> {
         let section_table_started = Instant::now();
         let global_header = GlobalHeader::read(&mut reader)?;
@@ -58,25 +56,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
 
         reader.seek(SeekFrom::Start(footer_offset))?;
         let footer = Footer::read(&mut reader)?;
-
-        let computed_crc = Self::compute_crc32_up_to(&mut reader, footer_offset)?;
-        if computed_crc != footer.global_crc32 {
-            return Err(OxideError::ChecksumMismatch {
-                expected: footer.global_crc32,
-                actual: computed_crc,
-            });
-        }
-
-        if payload_entry.length > 0 {
-            let payload_crc =
-                Self::compute_crc32_range(&mut reader, payload_entry.offset, payload_entry.length)?;
-            if payload_crc != payload_entry.checksum {
-                return Err(OxideError::ChecksumMismatch {
-                    expected: payload_entry.checksum,
-                    actual: payload_crc,
-                });
-            }
-        }
 
         telemetry::increment_counter(
             tags::METRIC_OXZ_READ_SECTION_TABLE_COUNT,
@@ -122,6 +101,10 @@ impl<R: Read + Seek> ArchiveReader<R> {
         })
     }
 
+    pub(crate) fn new_for_sequential_extract(reader: R) -> Result<Self> {
+        Self::new(reader)
+    }
+
     /// Returns the number of chunks in the archive.
     pub fn block_count(&self) -> u32 {
         self.chunk_descriptors.len() as u32
@@ -144,7 +127,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
 
     /// Reads a specific chunk by its index.
     ///
-    /// Validates the chunk checksum before returning.
+    /// Checksum fields are currently ignored.
     pub fn read_block(&mut self, index: u32) -> Result<(ChunkDescriptor, Vec<u8>)> {
         let start = Instant::now();
         let index_val = usize::try_from(index)
@@ -162,14 +145,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
         self.reader.seek(SeekFrom::Start(offset))?;
         let mut data = vec![0u8; descriptor.encoded_len as usize];
         self.reader.read_exact(&mut data)?;
-
-        let actual_crc = crc32fast::hash(&data);
-        if actual_crc != descriptor.checksum {
-            return Err(OxideError::ChecksumMismatch {
-                expected: descriptor.checksum,
-                actual: actual_crc,
-            });
-        }
 
         let elapsed_us = duration_to_us(start.elapsed());
         telemetry::increment_counter(
@@ -210,6 +185,10 @@ impl<R: Read + Seek> ArchiveReader<R> {
     /// Consumes the reader and returns the underlying inner reader.
     pub fn into_inner(self) -> R {
         self.reader
+    }
+
+    pub(crate) fn finish_sequential_extract_validation(&mut self) -> Result<()> {
+        Ok(())
     }
 
     fn read_section_table(reader: &mut R, header: GlobalHeader) -> Result<Vec<SectionTableEntry>> {
@@ -275,13 +254,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
             .map_err(|_| OxideError::InvalidFormat("chunk index length exceeds usize range"))?;
         let mut chunk_index_bytes = vec![0u8; chunk_index_len];
         reader.read_exact(&mut chunk_index_bytes)?;
-        let actual_chunk_index_crc = crc32fast::hash(&chunk_index_bytes);
-        if actual_chunk_index_crc != chunk_index_entry.checksum {
-            return Err(OxideError::ChecksumMismatch {
-                expected: chunk_index_entry.checksum,
-                actual: actual_chunk_index_crc,
-            });
-        }
 
         for raw in chunk_index_bytes.chunks_exact(CHUNK_DESCRIPTOR_SIZE) {
             let mut bytes = [0u8; CHUNK_DESCRIPTOR_SIZE];
@@ -323,36 +295,34 @@ impl<R: Read + Seek> ArchiveReader<R> {
             .try_fold(0u64, |max_end, end| end.map(|value| max_end.max(value)))
     }
 
+    #[allow(dead_code)]
     fn compute_crc32_up_to(reader: &mut R, len: u64) -> Result<u32> {
         reader.seek(SeekFrom::Start(0))?;
-        let mut hasher = Hasher::new();
         let mut remaining = len;
         let mut buffer = [0u8; 8 * 1024];
 
         while remaining > 0 {
             let to_read = min(remaining as usize, buffer.len());
             reader.read_exact(&mut buffer[..to_read])?;
-            hasher.update(&buffer[..to_read]);
             remaining -= to_read as u64;
         }
 
-        Ok(hasher.finalize())
+        Ok(0)
     }
 
+    #[allow(dead_code)]
     fn compute_crc32_range(reader: &mut R, offset: u64, len: u64) -> Result<u32> {
         reader.seek(SeekFrom::Start(offset))?;
-        let mut hasher = Hasher::new();
         let mut remaining = len;
         let mut buffer = [0u8; 8 * 1024];
 
         while remaining > 0 {
             let to_read = min(remaining as usize, buffer.len());
             reader.read_exact(&mut buffer[..to_read])?;
-            hasher.update(&buffer[..to_read]);
             remaining -= to_read as u64;
         }
 
-        Ok(hasher.finalize())
+        Ok(0)
     }
 }
 

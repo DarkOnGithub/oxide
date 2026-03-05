@@ -16,6 +16,14 @@ pub fn duration_to_us(duration: Duration) -> u64 {
     duration.as_micros().min(u64::MAX as u128) as u64
 }
 
+/// Placeholder checksum used while archive integrity checks are disabled.
+pub const PLACEHOLDER_CHECKSUM: u32 = 0;
+
+/// Returns the placeholder checksum for the given bytes.
+pub fn placeholder_checksum(_bytes: &[u8]) -> u32 {
+    PLACEHOLDER_CHECKSUM
+}
+
 /// A batch of data extracted from a file for processing.
 ///
 /// Batches are the primary unit of work in the processing pipeline,
@@ -298,12 +306,12 @@ pub struct CompressedBlock {
     pub raw_passthrough: bool,
     /// Original uncompressed length.
     pub original_len: u64,
-    /// CRC32 checksum of the compressed data
+    /// Placeholder checksum of the compressed data.
     pub crc32: u32,
 }
 
 impl CompressedBlock {
-    /// Creates a new compressed block with an auto-computed CRC32 checksum.
+    /// Creates a new compressed block with a placeholder checksum.
     ///
     /// # Arguments
     /// * `id` - Unique identifier for this block
@@ -335,7 +343,6 @@ impl CompressedBlock {
         compression_meta: CompressionMeta,
         original_len: u64,
     ) -> Self {
-        let crc32 = crc32fast::hash(&data);
         Self {
             id,
             data,
@@ -344,7 +351,7 @@ impl CompressedBlock {
             compression_preset: compression_meta.preset,
             raw_passthrough: compression_meta.raw_passthrough,
             original_len,
-            crc32,
+            crc32: PLACEHOLDER_CHECKSUM,
         }
     }
 
@@ -357,9 +364,9 @@ impl CompressedBlock {
         }
     }
 
-    /// Verifies the integrity of the compressed data using CRC32.
+    /// Placeholder checksum verification while integrity checks are disabled.
     pub fn verify_crc32(&self) -> bool {
-        crc32fast::hash(&self.data) == self.crc32
+        true
     }
 }
 

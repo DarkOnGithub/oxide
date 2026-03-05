@@ -240,11 +240,45 @@ impl DirectoryRestoreWriter {
             }
         }
 
-        if cursor > 0 {
+        if cursor == self.pending.len() {
+            self.pending.clear();
+        } else if cursor > 0 {
             self.pending.drain(..cursor);
         }
 
         Ok(())
+    }
+
+    fn write_file_data_bytes(&mut self, bytes: &[u8]) -> Result<usize> {
+        let mut take = 0usize;
+        let mut finished = false;
+
+        if let RestoreState::FileData { remaining, writer } = &mut self.state {
+            take = bytes.len().min(*remaining);
+            if take == 0 {
+                return Ok(0);
+            }
+
+            let output_started = Instant::now();
+            writer.write_all(&bytes[..take])?;
+            self.stats.output_write += output_started.elapsed();
+            self.stats.output_bytes_total =
+                self.stats.output_bytes_total.saturating_add(take as u64);
+            *remaining -= take;
+
+            if *remaining == 0 {
+                let output_started = Instant::now();
+                writer.flush()?;
+                self.stats.output_write += output_started.elapsed();
+                finished = true;
+            }
+        }
+
+        if finished {
+            self.complete_entry();
+        }
+
+        Ok(take)
     }
 
     fn complete_entry(&mut self) {
@@ -260,6 +294,17 @@ impl DirectoryRestoreWriter {
 
 impl OrderedChunkWriter for DirectoryRestoreWriter {
     fn write_chunk(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.pending.is_empty() {
+            let consumed = self.write_file_data_bytes(bytes)?;
+            if consumed == bytes.len() {
+                return Ok(());
+            }
+            if consumed > 0 {
+                self.pending.extend_from_slice(&bytes[consumed..]);
+                return self.consume_pending();
+            }
+        }
+
         self.pending.extend_from_slice(bytes);
         self.consume_pending()
     }
