@@ -1,12 +1,10 @@
 #[cfg(feature = "telemetry")]
 mod telemetry_enabled_tests {
-    use std::sync::Mutex;
-
     use oxide_core::compression::lz4;
     use oxide_core::telemetry;
     use oxide_core::telemetry::tags;
 
-    static TELEMETRY_TEST_MUTEX: Mutex<()> = Mutex::new(());
+    use crate::shared::TELEMETRY_TEST_MUTEX;
 
     fn decode_hex(hex: &str) -> Vec<u8> {
         assert_eq!(hex.len() % 2, 0);
