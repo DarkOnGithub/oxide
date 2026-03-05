@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader, BufferPool,
-    CompressionAlgo, ExtractProgressEvent, PreProcessingStrategy, ReportValue, RunTelemetryOptions,
-    TelemetryEvent, TelemetrySink,
+    CompressionAlgo, ExtractProgressEvent, FOOTER_SIZE, GLOBAL_HEADER_SIZE, PreProcessingStrategy,
+    ReportValue, RunTelemetryOptions, SECTION_TABLE_ENTRY_SIZE, TelemetryEvent, TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -463,6 +463,60 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
     ));
     assert!(report.main_thread.stage_us.contains_key("directory_decode"));
     assert!(report.main_thread.stage_us.contains_key("output_write"));
+    Ok(())
+}
+
+#[test]
+fn extract_archive_ignores_footer_crc_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(96 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let mut archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let footer_crc_offset = archive.len() - FOOTER_SIZE + 4;
+    archive[footer_crc_offset] ^= 0x5A;
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, data);
+
+    Ok(())
+}
+
+#[test]
+fn extract_archive_ignores_payload_checksum_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(96 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let mut archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let payload_entry_index = 5usize;
+    let payload_checksum_offset =
+        GLOBAL_HEADER_SIZE + (payload_entry_index * SECTION_TABLE_ENTRY_SIZE) + 20;
+    archive[payload_checksum_offset] ^= 0xA5;
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, data);
+
     Ok(())
 }
 

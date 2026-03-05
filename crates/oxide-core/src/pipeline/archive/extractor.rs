@@ -227,7 +227,10 @@ impl Extractor {
         R: Read + Seek,
         W: OrderedChunkWriter,
     {
-        let mut archive = ArchiveReader::new(reader)?;
+        let mut stage_timings = ExtractStageTimings::default();
+        let archive_started = Instant::now();
+        let mut archive = ArchiveReader::new_for_sequential_extract(reader)?;
+        stage_timings.archive_read += archive_started.elapsed();
         let flags = u32::from(archive.global_header().feature_bits);
         let source_kind = directory::source_kind_from_flags(flags);
         let block_capacity = archive.block_count() as usize;
@@ -276,7 +279,6 @@ impl Extractor {
         }
         drop(result_tx);
 
-        let mut stage_timings = ExtractStageTimings::default();
         let mut archive_bytes_total =
             container_prefix_bytes(block_capacity as u32) + FOOTER_SIZE as u64;
         let mut submitted = 0usize;
@@ -290,9 +292,9 @@ impl Extractor {
         let mut decode_result_queue_peak = 0usize;
         let mut reorder = BoundedReorderWriter::with_limit(writer, reorder_pending_limit);
 
-        for entry in archive.iter_blocks() {
+        for block_index in 0..block_capacity {
             let read_started = Instant::now();
-            let (header, block_data) = entry?;
+            let (header, block_data) = archive.read_block(block_index as u32)?;
             stage_timings.archive_read += read_started.elapsed();
             archive_bytes_total = archive_bytes_total.saturating_add(block_data.len() as u64);
 
@@ -377,6 +379,10 @@ impl Extractor {
             );
         }
         drop(task_tx);
+
+        if let Err(error) = archive.finish_sequential_extract_validation() {
+            first_error.get_or_insert(error);
+        }
 
         if submitted != block_capacity {
             return Err(crate::OxideError::InvalidFormat(

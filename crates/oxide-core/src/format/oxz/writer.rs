@@ -2,10 +2,8 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crc32fast::Hasher;
-
 use crate::telemetry::{self, profile, tags};
-use crate::types::duration_to_us;
+use crate::types::{PLACEHOLDER_CHECKSUM, duration_to_us, placeholder_checksum};
 use crate::{BufferPool, CompressedBlock, OxideError, Result};
 
 use super::{
@@ -171,14 +169,12 @@ impl<W: Write> ArchiveWriter<W> {
 
         let payload_started = Instant::now();
         let mut payload_len = 0u64;
-        let mut payload_hasher = Hasher::new();
         for chunk in &self.pending_chunks {
             payload_len = payload_len
                 .checked_add(chunk.data.len() as u64)
                 .ok_or(OxideError::InvalidFormat("payload length overflow"))?;
-            payload_hasher.update(&chunk.data);
         }
-        let payload_checksum = payload_hasher.finalize();
+        let payload_checksum = PLACEHOLDER_CHECKSUM;
         let payload_elapsed_us = duration_to_us(payload_started.elapsed());
 
         let section_table_len = u64::from(CORE_SECTION_COUNT) * SECTION_TABLE_ENTRY_SIZE as u64;
@@ -190,7 +186,7 @@ impl<W: Write> ArchiveWriter<W> {
             .checked_add(chunk_index_len)
             .ok_or(OxideError::InvalidFormat("payload offset overflow"))?;
 
-        let chunk_index_checksum = crc32fast::hash(&chunk_index_bytes);
+        let chunk_index_checksum = placeholder_checksum(&chunk_index_bytes);
         let section_entries = [
             SectionTableEntry::new(
                 SectionType::ChunkIndex,
@@ -221,19 +217,18 @@ impl<W: Write> ArchiveWriter<W> {
         }
         let section_table_elapsed_us = duration_to_us(section_table_started.elapsed());
 
-        let mut global_crc = Hasher::new();
         let header_bytes = header.to_bytes();
-        self.write_tracked_bytes(&header_bytes, &mut global_crc)?;
-        self.write_tracked_bytes(&section_table_bytes, &mut global_crc)?;
-        self.write_tracked_bytes(&chunk_index_bytes, &mut global_crc)?;
+        self.write_tracked_bytes(&header_bytes)?;
+        self.write_tracked_bytes(&section_table_bytes)?;
+        self.write_tracked_bytes(&chunk_index_bytes)?;
 
         let pending_chunks = std::mem::take(&mut self.pending_chunks);
         for chunk in pending_chunks {
-            self.write_tracked_bytes(&chunk.data, &mut global_crc)?;
+            self.write_tracked_bytes(&chunk.data)?;
             self.recycle_block_data(chunk.data);
         }
 
-        let footer = Footer::new(global_crc.finalize());
+        let footer = Footer::new(PLACEHOLDER_CHECKSUM);
         footer.write(&mut self.writer)?;
 
         let finalize_elapsed_us = duration_to_us(finalize_started.elapsed());
@@ -360,9 +355,8 @@ impl<W: Write> ArchiveWriter<W> {
         Ok(())
     }
 
-    fn write_tracked_bytes(&mut self, bytes: &[u8], global_crc: &mut Hasher) -> Result<()> {
+    fn write_tracked_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         self.writer.write_all(bytes)?;
-        global_crc.update(bytes);
         Ok(())
     }
 
