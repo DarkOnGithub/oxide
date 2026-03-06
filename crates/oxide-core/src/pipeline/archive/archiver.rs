@@ -1,29 +1,29 @@
 use bytes::Bytes;
-use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
+use crossbeam_channel::{bounded, RecvTimeoutError, TryRecvError};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use super::super::directory::{self, DirectoryBatchSubmitter};
 use super::super::types::{ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions};
 use super::planning::{
-    DictionaryCatalog, MAX_DICTIONARY_BYTES, PlannerSummary, apply_chunk_plans,
-    plan_batch_encoding, record_planner_telemetry,
+    apply_chunk_plans, plan_batch_encoding, record_planner_telemetry, DictionaryCatalog,
+    PlannerSummary, MAX_DICTIONARY_BYTES,
 };
 use super::telemetry::*;
 use super::types::*;
 use crate::buffer::BufferPool;
-use crate::compression::{CompressionRequest, apply_compression_request_with_scratch};
+use crate::compression::{apply_compression_request_with_scratch, CompressionRequest};
 use crate::core::{WorkerPool, WorkerPoolHandle, WorkerScratchArena};
 use crate::format::{
-    ArchiveWriter, CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
-    SECTION_TABLE_ENTRY_SIZE,
+    ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter, CHUNK_DESCRIPTOR_SIZE,
+    CORE_SECTION_COUNT, FOOTER_SIZE, GLOBAL_HEADER_SIZE, SECTION_TABLE_ENTRY_SIZE,
 };
 use crate::io::{ChunkingPolicy, InputScanner, MmapInput};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
@@ -95,7 +95,43 @@ impl<'a> Archiver<'a> {
         }
         let block_size = self.choose_block_size_for_file(path, metadata.len())?;
         let prepared = self.prepare_file(path, block_size.selected_block_size)?;
-        self.archive_prepared_with(prepared, writer, options, sink, block_size)
+        self.archive_prepared_with_writer(
+            prepared,
+            writer,
+            options,
+            sink,
+            block_size,
+            |writer, pool, dictionaries| {
+                ArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            },
+        )
+    }
+
+    pub fn archive_file_path_seekable_with<W: Write + Seek>(
+        &self,
+        path: &Path,
+        writer: W,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<ArchiveRun<W>> {
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_file() {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive_file expects a file path",
+            ));
+        }
+        let block_size = self.choose_block_size_for_file(path, metadata.len())?;
+        let prepared = self.prepare_file(path, block_size.selected_block_size)?;
+        self.archive_prepared_with_writer(
+            prepared,
+            writer,
+            options,
+            sink,
+            block_size,
+            |writer, pool, dictionaries| {
+                SeekableArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            },
+        )
     }
 
     pub fn archive_directory_streaming_with<W: Write + Send + 'static>(
@@ -105,6 +141,48 @@ impl<'a> Archiver<'a> {
         options: &RunTelemetryOptions,
         sink: &mut dyn TelemetrySink,
     ) -> Result<ArchiveRun<W>> {
+        self.archive_directory_streaming_with_writer(
+            root,
+            writer,
+            options,
+            sink,
+            |writer, pool, dictionaries| {
+                ArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            },
+        )
+    }
+
+    pub fn archive_directory_streaming_seekable_with<W: Write + Seek + Send + 'static>(
+        &self,
+        root: &Path,
+        writer: W,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<ArchiveRun<W>> {
+        self.archive_directory_streaming_with_writer(
+            root,
+            writer,
+            options,
+            sink,
+            |writer, pool, dictionaries| {
+                SeekableArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            },
+        )
+    }
+
+    fn archive_directory_streaming_with_writer<W, AW, F>(
+        &self,
+        root: &Path,
+        writer: W,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+        writer_factory: F,
+    ) -> Result<ArchiveRun<W>>
+    where
+        W: Write + Send + 'static,
+        AW: ArchiveBlockWriter<InnerWriter = W> + Send + 'static,
+        F: FnOnce(W, Arc<BufferPool>, Vec<crate::format::StoredDictionary>) -> AW + Send + 'static,
+    {
         let mut stage_timings = StageTimings::default();
 
         let discovery_started = Instant::now();
@@ -197,7 +275,7 @@ impl<'a> Archiver<'a> {
         let writer_dictionaries = directory_dictionaries.entries().to_vec();
         let writer_handle = thread::spawn(move || -> Result<DirectoryWriterOutcome<W>> {
             let mut archive_writer =
-                ArchiveWriter::with_dictionaries(writer, writer_buffer_pool, writer_dictionaries);
+                writer_factory(writer, writer_buffer_pool, writer_dictionaries);
             archive_writer.write_global_header_with_flags(
                 block_count,
                 directory::source_kind_flags(ArchiveSourceKind::Directory),
@@ -241,7 +319,9 @@ impl<'a> Archiver<'a> {
                 ));
             }
 
+            let footer_started = Instant::now();
             let writer = archive_writer.write_footer()?;
+            writer_time += footer_started.elapsed();
             output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
             writer_output_bytes_shared.store(output_bytes_written, AtomicOrdering::Release);
 
@@ -284,7 +364,7 @@ impl<'a> Archiver<'a> {
             .performance
             .directory_stream_read_buffer_size
             .max(1);
-        let producer_threads = self.config.performance.producer_threads.clamp(1, 2);
+        let producer_threads = self.config.performance.producer_threads.max(1);
         let mmap_threshold = self
             .config
             .performance
@@ -343,33 +423,41 @@ impl<'a> Archiver<'a> {
 
             let mut prefetch_request_tx = None;
             let mut prefetch_result_rx = None;
-            let mut prefetch_handle = None;
+            let mut prefetch_handles = Vec::new();
+            let prefetch_window = producer_threads
+                .saturating_mul(DIRECTORY_PREFETCH_WINDOW)
+                .max(DIRECTORY_PREFETCH_WINDOW);
             if producer_threads > 1 {
-                let (prefetch_tx, prefetch_rx) =
-                    bounded::<PrefetchRequest>(DIRECTORY_PREFETCH_WINDOW);
-                let (result_tx, result_rx) = bounded::<PrefetchResult>(DIRECTORY_PREFETCH_WINDOW);
-                let handle = thread::spawn(move || -> Result<()> {
-                    while let Ok(request) = prefetch_rx.recv() {
-                        let read_started = Instant::now();
-                        let data = fs::read(&request.file.full_path)?;
-                        let read_elapsed = read_started.elapsed();
-                        result_tx
-                            .send(PrefetchResult {
-                                index: request.index,
-                                data,
-                                read_elapsed,
-                            })
-                            .map_err(|_| {
-                                crate::OxideError::CompressionError(
-                                    "directory prefetch result queue closed".to_string(),
-                                )
-                            })?;
-                    }
-                    Ok(())
-                });
+                let helper_threads = producer_threads.saturating_sub(1).max(1);
+                let (prefetch_tx, prefetch_rx) = bounded::<PrefetchRequest>(prefetch_window);
+                let (result_tx, result_rx) = bounded::<PrefetchResult>(prefetch_window);
+                for _ in 0..helper_threads {
+                    let worker_prefetch_rx = prefetch_rx.clone();
+                    let worker_result_tx = result_tx.clone();
+                    let handle = thread::spawn(move || -> Result<()> {
+                        while let Ok(request) = worker_prefetch_rx.recv() {
+                            let read_started = Instant::now();
+                            let data = fs::read(&request.file.full_path)?;
+                            let read_elapsed = read_started.elapsed();
+                            worker_result_tx
+                                .send(PrefetchResult {
+                                    index: request.index,
+                                    data,
+                                    read_elapsed,
+                                })
+                                .map_err(|_| {
+                                    crate::OxideError::CompressionError(
+                                        "directory prefetch result queue closed".to_string(),
+                                    )
+                                })?;
+                        }
+                        Ok(())
+                    });
+                    prefetch_handles.push(handle);
+                }
+                drop(result_tx);
                 prefetch_request_tx = Some(prefetch_tx);
                 prefetch_result_rx = Some(result_rx);
-                prefetch_handle = Some(handle);
             }
 
             let mut prefetched = BTreeMap::<usize, PrefetchResult>::new();
@@ -382,7 +470,7 @@ impl<'a> Archiver<'a> {
             {
                 if let Some(prefetch_tx) = prefetch_request_tx.as_ref() {
                     while next_prefetch < producer_files.len()
-                        && next_prefetch <= file_index.saturating_add(DIRECTORY_PREFETCH_WINDOW)
+                        && next_prefetch <= file_index.saturating_add(prefetch_window)
                     {
                         let candidate = &producer_files[next_prefetch];
                         let candidate_size = usize::try_from(candidate.size).unwrap_or(usize::MAX);
@@ -483,7 +571,7 @@ impl<'a> Archiver<'a> {
             }
 
             drop(prefetch_request_tx);
-            if let Some(prefetch_handle) = prefetch_handle {
+            for prefetch_handle in prefetch_handles {
                 match prefetch_handle.join() {
                     Ok(outcome) => outcome?,
                     Err(payload) => {
@@ -780,6 +868,52 @@ impl<'a> Archiver<'a> {
         sink: &mut dyn TelemetrySink,
         block_size: BlockSizeDecision,
     ) -> Result<ArchiveRun<W>> {
+        self.archive_prepared_with_writer(
+            prepared,
+            writer,
+            options,
+            sink,
+            block_size,
+            |writer, pool, dictionaries| {
+                ArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            },
+        )
+    }
+
+    pub fn archive_prepared_seekable_with<W: Write + Seek>(
+        &self,
+        prepared: PreparedInput,
+        writer: W,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+        block_size: BlockSizeDecision,
+    ) -> Result<ArchiveRun<W>> {
+        self.archive_prepared_with_writer(
+            prepared,
+            writer,
+            options,
+            sink,
+            block_size,
+            |writer, pool, dictionaries| {
+                SeekableArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            },
+        )
+    }
+
+    fn archive_prepared_with_writer<W, AW, F>(
+        &self,
+        prepared: PreparedInput,
+        writer: W,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+        block_size: BlockSizeDecision,
+        writer_factory: F,
+    ) -> Result<ArchiveRun<W>>
+    where
+        W: Write,
+        AW: ArchiveBlockWriter<InnerWriter = W>,
+        F: FnOnce(W, Arc<BufferPool>, Vec<crate::format::StoredDictionary>) -> AW,
+    {
         let PreparedInput {
             source_kind,
             batches,
@@ -820,7 +954,7 @@ impl<'a> Archiver<'a> {
             )
         });
 
-        let mut archive_writer = ArchiveWriter::with_dictionaries(
+        let mut archive_writer = writer_factory(
             writer,
             Arc::clone(&self.config.buffer_pool),
             dictionaries.entries().to_vec(),
@@ -947,7 +1081,9 @@ impl<'a> Archiver<'a> {
             ));
         }
 
+        let footer_started = Instant::now();
         let writer = archive_writer.write_footer()?;
+        stage_timings.writer += footer_started.elapsed();
         output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
         let processing_snapshot = processing_totals.snapshot();
         let extensions = build_stats_extensions(
@@ -1189,9 +1325,9 @@ pub fn record_result_to_writer_queue(
     }
 }
 
-pub fn drain_results_to_writer<W: Write>(
+pub fn drain_results_to_writer<AW: ArchiveBlockWriter>(
     handle: &WorkerPoolHandle,
-    archive_writer: &mut ArchiveWriter<W>,
+    archive_writer: &mut AW,
     pending_write: &mut BTreeMap<usize, CompressedBlock>,
     next_write_id: &mut usize,
     output_bytes_written: &mut u64,
@@ -1227,10 +1363,10 @@ pub fn drain_results_to_writer<W: Write>(
     drained
 }
 
-pub fn recv_result_to_writer<W: Write>(
+pub fn recv_result_to_writer<AW: ArchiveBlockWriter>(
     handle: &WorkerPoolHandle,
     timeout: Duration,
-    archive_writer: &mut ArchiveWriter<W>,
+    archive_writer: &mut AW,
     pending_write: &mut BTreeMap<usize, CompressedBlock>,
     next_write_id: &mut usize,
     output_bytes_written: &mut u64,
@@ -1261,9 +1397,9 @@ pub fn recv_result_to_writer<W: Write>(
     }
 }
 
-pub fn record_result_to_writer<W: Write>(
+pub fn record_result_to_writer<AW: ArchiveBlockWriter>(
     result: Result<CompressedBlock>,
-    archive_writer: &mut ArchiveWriter<W>,
+    archive_writer: &mut AW,
     pending_write: &mut BTreeMap<usize, CompressedBlock>,
     next_write_id: &mut usize,
     output_bytes_written: &mut u64,
