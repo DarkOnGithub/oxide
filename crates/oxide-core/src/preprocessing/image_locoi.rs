@@ -1,5 +1,5 @@
-use crate::preprocessing::utils;
 use crate::Result;
+use crate::preprocessing::utils;
 
 /// Converts raw image bytes into grayscale-like pixel intensity samples.
 pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec<u8>> {

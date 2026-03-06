@@ -1,6 +1,6 @@
+use oxide_core::OxideError;
 use oxide_core::pipeline::archive::reorder_writer::{BoundedReorderWriter, OrderedChunkWriter};
 use oxide_core::types::Result;
-use oxide_core::OxideError;
 
 #[derive(Default)]
 struct CollectWriter {
