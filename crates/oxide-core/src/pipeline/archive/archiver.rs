@@ -1,11 +1,11 @@
-use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
+use crossbeam_channel::{bounded, RecvTimeoutError, TryRecvError};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -927,7 +927,7 @@ impl<'a> Archiver<'a> {
         self.pick_tuned_block_size(&sample)
     }
 
-    pub fn choose_block_size_for_directory(
+    fn choose_block_size_for_directory(
         &self,
         discovery: &directory::DirectoryDiscovery,
     ) -> Result<BlockSizeDecision> {
@@ -1279,7 +1279,7 @@ pub fn collect_file_sample(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
     Ok(sample)
 }
 
-pub fn collect_directory_sample(
+fn collect_directory_sample(
     discovery: &directory::DirectoryDiscovery,
     max_bytes: usize,
 ) -> Result<Vec<u8>> {

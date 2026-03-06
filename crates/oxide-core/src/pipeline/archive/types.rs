@@ -2,7 +2,7 @@ use super::super::directory;
 use super::super::types::ArchiveSourceKind;
 use crate::core::{PoolRuntimeSnapshot, WorkerRuntimeSnapshot};
 use crate::format::BlockHeader;
-use crate::types::{Batch, duration_to_us};
+use crate::types::{duration_to_us, Batch};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
@@ -153,9 +153,9 @@ pub struct DirectoryWriterOutcome<W> {
 }
 
 #[derive(Debug, Clone)]
-pub struct PrefetchRequest {
+pub(super) struct PrefetchRequest {
     pub index: usize,
-    pub file: directory::DirectoryFileSpec,
+    pub(super) file: directory::DirectoryFileSpec,
 }
 
 #[derive(Debug)]
