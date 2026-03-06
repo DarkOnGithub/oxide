@@ -9,7 +9,7 @@ use crate::{BufferPool, CompressedBlock, OxideError, Result};
 use super::{
     CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT,
     Footer, GLOBAL_HEADER_SIZE, GlobalHeader, ReorderBuffer, SECTION_TABLE_ENTRY_SIZE,
-    SectionTableEntry, SectionType,
+    SectionTableEntry, SectionType, StoredDictionary, encode_dictionary_store,
 };
 
 #[derive(Debug)]
@@ -24,6 +24,7 @@ struct PendingChunk {
 pub struct ArchiveWriter<W: Write> {
     writer: W,
     buffer_pool: Arc<BufferPool>,
+    dictionaries: Vec<StoredDictionary>,
     expected_block_count: Option<u32>,
     feature_bits: u16,
     blocks_written: u32,
@@ -34,14 +35,38 @@ pub struct ArchiveWriter<W: Write> {
 impl<W: Write> ArchiveWriter<W> {
     /// Creates a new archive writer with the default reorder limit.
     pub fn new(writer: W, buffer_pool: Arc<BufferPool>) -> Self {
-        Self::with_reorder_limit(writer, buffer_pool, DEFAULT_REORDER_PENDING_LIMIT)
+        Self::with_dictionaries(writer, buffer_pool, Vec::new())
+    }
+
+    /// Creates a new archive writer with explicit dictionary contents.
+    pub fn with_dictionaries(
+        writer: W,
+        buffer_pool: Arc<BufferPool>,
+        dictionaries: Vec<StoredDictionary>,
+    ) -> Self {
+        Self::with_reorder_limit_and_dictionaries(
+            writer,
+            buffer_pool,
+            DEFAULT_REORDER_PENDING_LIMIT,
+            dictionaries,
+        )
     }
 
     /// Creates a new archive writer with a custom reorder limit.
     pub fn with_reorder_limit(writer: W, buffer_pool: Arc<BufferPool>, max_pending: usize) -> Self {
+        Self::with_reorder_limit_and_dictionaries(writer, buffer_pool, max_pending, Vec::new())
+    }
+
+    fn with_reorder_limit_and_dictionaries(
+        writer: W,
+        buffer_pool: Arc<BufferPool>,
+        max_pending: usize,
+        dictionaries: Vec<StoredDictionary>,
+    ) -> Self {
         Self {
             writer,
             buffer_pool,
+            dictionaries,
             expected_block_count: None,
             feature_bits: 0,
             blocks_written: 0,
@@ -167,6 +192,10 @@ impl<W: Write> ArchiveWriter<W> {
         }
         let chunk_index_elapsed_us = duration_to_us(chunk_index_started.elapsed());
 
+        let dictionary_store_started = Instant::now();
+        let dictionary_store_bytes = encode_dictionary_store(&self.dictionaries)?;
+        let dictionary_store_elapsed_us = duration_to_us(dictionary_store_started.elapsed());
+
         let payload_started = Instant::now();
         let mut payload_len = 0u64;
         for chunk in &self.pending_chunks {
@@ -182,11 +211,19 @@ impl<W: Write> ArchiveWriter<W> {
             .checked_add(section_table_len)
             .ok_or(OxideError::InvalidFormat("section table offset overflow"))?;
         let chunk_index_len = chunk_index_bytes.len() as u64;
-        let payload_offset = chunk_index_offset
-            .checked_add(chunk_index_len)
+        let dictionary_store_offset =
+            chunk_index_offset
+                .checked_add(chunk_index_len)
+                .ok_or(OxideError::InvalidFormat(
+                    "dictionary store offset overflow",
+                ))?;
+        let dictionary_store_len = dictionary_store_bytes.len() as u64;
+        let payload_offset = dictionary_store_offset
+            .checked_add(dictionary_store_len)
             .ok_or(OxideError::InvalidFormat("payload offset overflow"))?;
 
         let chunk_index_checksum = placeholder_checksum(&chunk_index_bytes);
+        let dictionary_store_checksum = placeholder_checksum(&dictionary_store_bytes);
         let section_entries = [
             SectionTableEntry::new(
                 SectionType::ChunkIndex,
@@ -194,7 +231,12 @@ impl<W: Write> ArchiveWriter<W> {
                 chunk_index_len,
                 chunk_index_checksum,
             ),
-            SectionTableEntry::new(SectionType::DictionaryStore, payload_offset, 0, 0),
+            SectionTableEntry::new(
+                SectionType::DictionaryStore,
+                dictionary_store_offset,
+                dictionary_store_len,
+                dictionary_store_checksum,
+            ),
             SectionTableEntry::new(SectionType::EntropyTableStore, payload_offset, 0, 0),
             SectionTableEntry::new(SectionType::TransformChainTable, payload_offset, 0, 0),
             SectionTableEntry::new(SectionType::DedupReferenceTable, payload_offset, 0, 0),
@@ -221,6 +263,7 @@ impl<W: Write> ArchiveWriter<W> {
         self.write_tracked_bytes(&header_bytes)?;
         self.write_tracked_bytes(&section_table_bytes)?;
         self.write_tracked_bytes(&chunk_index_bytes)?;
+        self.write_tracked_bytes(&dictionary_store_bytes)?;
 
         let pending_chunks = std::mem::take(&mut self.pending_chunks);
         for chunk in pending_chunks {
@@ -246,6 +289,11 @@ impl<W: Write> ArchiveWriter<W> {
             tags::METRIC_OXZ_WRITE_CHUNK_INDEX_LATENCY_US,
             chunk_index_elapsed_us,
             &[("subsystem", "oxz"), ("op", "write_chunk_index")],
+        );
+        telemetry::record_histogram(
+            tags::METRIC_OXZ_WRITE_DICTIONARY_STORE_LATENCY_US,
+            dictionary_store_elapsed_us,
+            &[("subsystem", "oxz"), ("op", "write_dictionary_store")],
         );
         telemetry::record_histogram(
             tags::METRIC_OXZ_WRITE_PAYLOAD_INDEX_LATENCY_US,
@@ -276,6 +324,14 @@ impl<W: Write> ArchiveWriter<W> {
         profile::event(
             tags::PROFILE_OXZ,
             &[tags::TAG_OXZ],
+            "write_dictionary_store",
+            "ok",
+            dictionary_store_elapsed_us,
+            "oxz dictionary store written successfully",
+        );
+        profile::event(
+            tags::PROFILE_OXZ,
+            &[tags::TAG_OXZ],
             "write_container",
             "ok",
             finalize_elapsed_us,
@@ -302,10 +358,12 @@ impl<W: Write> ArchiveWriter<W> {
     fn stage_block_clone(&mut self, block: &CompressedBlock) -> Result<()> {
         let owned = CompressedBlock {
             id: block.id,
+            stream_id: block.stream_id,
             data: block.data.clone(),
             pre_proc: block.pre_proc.clone(),
             compression: block.compression,
             compression_preset: block.compression_preset,
+            dict_id: block.dict_id,
             raw_passthrough: block.raw_passthrough,
             original_len: block.original_len,
             crc32: block.crc32,

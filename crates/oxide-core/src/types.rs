@@ -35,6 +35,41 @@ pub struct Batch {
     pub data: BatchData,
     pub file_type_hint: FileFormat,
     pub preprocessing_metadata: Option<PreprocessingMetadata>,
+    pub stream_id: u32,
+    pub compression_plan: ChunkEncodingPlan,
+}
+
+/// Planner-selected encoding parameters for a chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkEncodingPlan {
+    /// Compression algorithm selected for the chunk.
+    pub algo: CompressionAlgo,
+    /// Compression preset selected for the chunk.
+    pub preset: CompressionPreset,
+    /// Optional dictionary identifier referenced by the chunk descriptor.
+    pub dict_id: u16,
+}
+
+impl ChunkEncodingPlan {
+    /// Creates a new chunk encoding plan.
+    pub const fn new(algo: CompressionAlgo, preset: CompressionPreset, dict_id: u16) -> Self {
+        Self {
+            algo,
+            preset,
+            dict_id,
+        }
+    }
+
+    /// Builds compression metadata for the final stored payload.
+    pub fn compression_meta(self, raw_passthrough: bool) -> CompressionMeta {
+        CompressionMeta::new(self.algo, self.preset, raw_passthrough)
+    }
+}
+
+impl Default for ChunkEncodingPlan {
+    fn default() -> Self {
+        Self::new(CompressionAlgo::Lz4, CompressionPreset::Default, 0)
+    }
 }
 
 /// A batch of data extracted from a file for processing.
@@ -70,6 +105,8 @@ impl Batch {
             data: BatchData::Owned(data),
             file_type_hint: FileFormat::Common,
             preprocessing_metadata: None,
+            stream_id: 0,
+            compression_plan: ChunkEncodingPlan::default(),
         }
     }
 
@@ -92,6 +129,8 @@ impl Batch {
             data: BatchData::Owned(data),
             file_type_hint,
             preprocessing_metadata: None,
+            stream_id: 0,
+            compression_plan: ChunkEncodingPlan::default(),
         }
     }
 
@@ -118,6 +157,8 @@ impl Batch {
             data: BatchData::Mapped { map, start, end },
             file_type_hint,
             preprocessing_metadata: None,
+            stream_id: 0,
+            compression_plan: ChunkEncodingPlan::default(),
         }
     }
 
@@ -294,6 +335,8 @@ impl CompressionMeta {
 pub struct CompressedBlock {
     /// Unique identifier for this block.
     pub id: usize,
+    /// Logical stream identifier stored in the chunk descriptor.
+    pub stream_id: u32,
     /// The compressed (or raw) data bytes.
     pub data: Vec<u8>,
     /// Preprocessing strategy applied before compression.
@@ -302,6 +345,8 @@ pub struct CompressedBlock {
     pub compression: CompressionAlgo,
     /// Preset used for compression.
     pub compression_preset: CompressionPreset,
+    /// Optional dictionary identifier used for compression.
+    pub dict_id: u16,
     /// Whether the data is stored raw.
     pub raw_passthrough: bool,
     /// Original uncompressed length.
@@ -345,11 +390,37 @@ impl CompressedBlock {
     ) -> Self {
         Self {
             id,
+            stream_id: 0,
             data,
             pre_proc,
             compression: compression_meta.algo,
             compression_preset: compression_meta.preset,
+            dict_id: 0,
             raw_passthrough: compression_meta.raw_passthrough,
+            original_len,
+            crc32: PLACEHOLDER_CHECKSUM,
+        }
+    }
+
+    /// Creates a new compressed block using an explicit planner encoding plan.
+    pub fn with_chunk_encoding(
+        id: usize,
+        stream_id: u32,
+        data: Vec<u8>,
+        pre_proc: PreProcessingStrategy,
+        encoding_plan: ChunkEncodingPlan,
+        raw_passthrough: bool,
+        original_len: u64,
+    ) -> Self {
+        Self {
+            id,
+            stream_id,
+            data,
+            pre_proc,
+            compression: encoding_plan.algo,
+            compression_preset: encoding_plan.preset,
+            dict_id: encoding_plan.dict_id,
+            raw_passthrough,
             original_len,
             crc32: PLACEHOLDER_CHECKSUM,
         }

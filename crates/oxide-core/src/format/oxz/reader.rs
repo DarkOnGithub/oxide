@@ -8,7 +8,7 @@ use crate::{OxideError, Result};
 
 use super::{
     CHUNK_DESCRIPTOR_SIZE, ChunkDescriptor, FOOTER_SIZE, Footer, GLOBAL_HEADER_SIZE, GlobalHeader,
-    SectionTableEntry, SectionType,
+    SectionTableEntry, SectionType, StoredDictionary, decode_dictionary_store,
 };
 
 /// Reads OXZ archives and provides access to individual chunk payloads.
@@ -19,6 +19,7 @@ pub struct ArchiveReader<R: Read + Seek> {
     reader: R,
     global_header: GlobalHeader,
     section_table: Vec<SectionTableEntry>,
+    dictionaries: Vec<StoredDictionary>,
     chunk_descriptors: Vec<ChunkDescriptor>,
     chunk_offsets: Vec<u64>,
     footer: Footer,
@@ -36,7 +37,13 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let section_table_elapsed_us = duration_to_us(section_table_started.elapsed());
 
         let chunk_index_entry = Self::require_section(&section_table, SectionType::ChunkIndex)?;
+        let dictionary_store_entry =
+            Self::require_section(&section_table, SectionType::DictionaryStore)?;
         let payload_entry = Self::require_section(&section_table, SectionType::PayloadRegion)?;
+
+        let dictionary_store_started = Instant::now();
+        let dictionaries = Self::read_dictionary_store(&mut reader, *dictionary_store_entry)?;
+        let dictionary_store_elapsed_us = duration_to_us(dictionary_store_started.elapsed());
 
         let chunk_index_started = Instant::now();
         let (chunk_descriptors, chunk_offsets) =
@@ -72,6 +79,11 @@ impl<R: Read + Seek> ArchiveReader<R> {
             chunk_index_elapsed_us,
             &[("subsystem", "oxz"), ("op", "read_chunk_index")],
         );
+        telemetry::record_histogram(
+            tags::METRIC_OXZ_READ_DICTIONARY_STORE_LATENCY_US,
+            dictionary_store_elapsed_us,
+            &[("subsystem", "oxz"), ("op", "read_dictionary_store")],
+        );
         profile::event(
             tags::PROFILE_OXZ,
             &[tags::TAG_OXZ],
@@ -88,6 +100,14 @@ impl<R: Read + Seek> ArchiveReader<R> {
             chunk_index_elapsed_us,
             "oxz chunk index read successfully",
         );
+        profile::event(
+            tags::PROFILE_OXZ,
+            &[tags::TAG_OXZ],
+            "read_dictionary_store",
+            "ok",
+            dictionary_store_elapsed_us,
+            "oxz dictionary store read successfully",
+        );
 
         reader.seek(SeekFrom::Start(payload_entry.offset))?;
 
@@ -95,6 +115,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             reader,
             global_header,
             section_table,
+            dictionaries,
             chunk_descriptors,
             chunk_offsets,
             footer,
@@ -123,6 +144,18 @@ impl<R: Read + Seek> ArchiveReader<R> {
     /// Returns the footer of the archive.
     pub fn footer(&self) -> Footer {
         self.footer
+    }
+
+    /// Returns the dictionary payload referenced by `dict_id`, if present.
+    pub fn dictionary(&self, dict_id: u16) -> Option<&[u8]> {
+        if dict_id == 0 {
+            return None;
+        }
+
+        self.dictionaries
+            .iter()
+            .find(|dictionary| dictionary.id == dict_id)
+            .map(|dictionary| dictionary.data.as_slice())
     }
 
     /// Reads a specific chunk by its index.
@@ -281,6 +314,23 @@ impl<R: Read + Seek> ArchiveReader<R> {
         }
 
         Ok((descriptors, offsets))
+    }
+
+    fn read_dictionary_store(
+        reader: &mut R,
+        dictionary_store_entry: SectionTableEntry,
+    ) -> Result<Vec<StoredDictionary>> {
+        if dictionary_store_entry.length == 0 {
+            return Ok(Vec::new());
+        }
+
+        let len = usize::try_from(dictionary_store_entry.length).map_err(|_| {
+            OxideError::InvalidFormat("dictionary store length exceeds usize range")
+        })?;
+        let mut bytes = vec![0u8; len];
+        reader.seek(SeekFrom::Start(dictionary_store_entry.offset))?;
+        reader.read_exact(&mut bytes)?;
+        decode_dictionary_store(&bytes)
     }
 
     fn section_data_end(entries: &[SectionTableEntry]) -> Result<u64> {

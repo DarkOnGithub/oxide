@@ -1,30 +1,33 @@
-use crossbeam_channel::{bounded, RecvTimeoutError, TryRecvError};
+use bytes::Bytes;
+use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use super::super::directory::{self, DirectoryBatchSubmitter};
 use super::super::types::{ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions};
+use super::planning::{
+    DictionaryCatalog, MAX_DICTIONARY_BYTES, PlannerSummary, apply_chunk_plans,
+    plan_batch_encoding, record_planner_telemetry,
+};
 use super::telemetry::*;
 use super::types::*;
 use crate::buffer::BufferPool;
+use crate::compression::{CompressionRequest, apply_compression_request_with_scratch};
 use crate::core::{WorkerPool, WorkerPoolHandle, WorkerScratchArena};
 use crate::format::{
     ArchiveWriter, CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
     SECTION_TABLE_ENTRY_SIZE,
 };
-use crate::io::{InputScanner, MmapInput};
+use crate::io::{ChunkingPolicy, InputScanner, MmapInput};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
-use crate::types::{
-    Batch, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
-    PreProcessingStrategy, Result,
-};
+use crate::types::{Batch, CompressedBlock, CompressionAlgo, FileFormat, Result};
 
 pub const SUBMISSION_DRAIN_BUDGET: usize = 128;
 pub const DIRECTORY_FORMAT_PROBE_LIMIT: usize = 64 * 1024;
@@ -42,10 +45,11 @@ pub const AUTOTUNE_CANDIDATE_BLOCK_SIZES: [usize; 5] = [
 ];
 
 #[inline]
-pub fn container_prefix_bytes(block_count: u32) -> u64 {
+pub fn container_prefix_bytes(block_count: u32, dictionary_bytes: usize) -> u64 {
     GLOBAL_HEADER_SIZE as u64
         + OXZ_SECTION_TABLE_BYTES
         + block_count as u64 * CHUNK_DESCRIPTOR_SIZE as u64
+        + dictionary_bytes as u64
 }
 
 pub struct Archiver<'a> {
@@ -55,6 +59,25 @@ pub struct Archiver<'a> {
 impl<'a> Archiver<'a> {
     pub fn new(config: &'a ArchivePipelineConfig) -> Self {
         Self { config }
+    }
+
+    fn planner_summary(&self, summary: &PlannerSummary) -> PlannerArchiveSummary {
+        PlannerArchiveSummary {
+            mode: summary.mode,
+            chunking_mode: match summary.chunking_policy.mode {
+                crate::io::ChunkingMode::Fixed => "fixed",
+                crate::io::ChunkingMode::Adaptive => "adaptive",
+            },
+            superchunk_size: summary.chunking_policy.superchunk_size,
+            chunk_count: summary.chunk_count,
+            avg_chunk_bytes: summary.avg_chunk_bytes(),
+            min_chunk_bytes: summary.min_chunk_bytes(),
+            max_chunk_bytes: summary.max_chunk_bytes,
+            dictionary_count: summary.dictionary_count,
+            dictionary_bytes: summary.dictionary_bytes,
+            chunks_with_dictionaries: summary.chunks_with_dictionaries,
+            preset_chunk_counts: summary.preset_chunk_counts,
+        }
     }
 
     pub fn archive_file_path_with<W: Write>(
@@ -93,6 +116,32 @@ impl<'a> Archiver<'a> {
         let file_formats =
             directory::detect_file_formats(&discovery, DIRECTORY_FORMAT_PROBE_LIMIT)?;
         stage_timings.format_probe += format_probe_started.elapsed();
+        let planner_started = Instant::now();
+        let dictionary_batches =
+            collect_directory_dictionary_batches(&discovery, &file_formats, MAX_DICTIONARY_BYTES)?;
+        let directory_dictionaries =
+            DictionaryCatalog::from_batches(&dictionary_batches, MAX_DICTIONARY_BYTES)?;
+        let planner_summary = PlannerArchiveSummary {
+            mode: self.config.performance.compression_preset,
+            chunking_mode: "fixed",
+            superchunk_size: block_size.selected_block_size.saturating_mul(8),
+            chunk_count: 0,
+            avg_chunk_bytes: 0.0,
+            min_chunk_bytes: 0,
+            max_chunk_bytes: 0,
+            dictionary_count: directory_dictionaries.count(),
+            dictionary_bytes: directory_dictionaries.total_bytes(),
+            chunks_with_dictionaries: 0,
+            preset_chunk_counts: [0; 3],
+        };
+        record_planner_telemetry(
+            &PlannerSummary::new(
+                self.config.performance.compression_preset,
+                ChunkingPolicy::fixed(block_size.selected_block_size),
+                &directory_dictionaries,
+            ),
+            planner_started.elapsed(),
+        );
         let block_count = directory::estimate_directory_block_count(
             &discovery,
             &file_formats,
@@ -100,6 +149,7 @@ impl<'a> Archiver<'a> {
             self.config.performance.preserve_directory_format_boundaries,
         )?;
         let input_bytes_total = discovery.input_bytes_total;
+        let dictionary_bytes = directory_dictionaries.total_bytes();
         let total_blocks = usize::try_from(block_count)
             .map_err(|_| crate::OxideError::InvalidFormat("block count exceeds usize range"))?;
         let max_inflight_blocks = max_inflight_blocks(
@@ -116,16 +166,16 @@ impl<'a> Archiver<'a> {
             self.config.compression_algo,
         );
         let processing_totals = Arc::new(ProcessingThroughputTotals::default());
-        let compression_preset = self.config.performance.compression_preset;
         let raw_fallback_enabled = self.config.performance.raw_fallback_enabled;
+        let worker_dictionaries = directory_dictionaries.clone();
         let worker_processing_totals = Arc::clone(&processing_totals);
         let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
             process_batch(
                 batch,
                 pool,
                 compression,
-                compression_preset,
                 raw_fallback_enabled,
+                &worker_dictionaries,
                 worker_processing_totals.as_ref(),
                 scratch,
             )
@@ -138,17 +188,22 @@ impl<'a> Archiver<'a> {
             .max(1)
             .min(max_inflight_blocks.max(1));
         let (writer_tx, writer_rx) = bounded::<CompressedBlock>(writer_queue_capacity);
-        let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes(block_count)));
+        let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes(
+            block_count,
+            dictionary_bytes,
+        )));
         let writer_output_bytes_shared = Arc::clone(&writer_output_bytes);
         let writer_buffer_pool = Arc::clone(&self.config.buffer_pool);
+        let writer_dictionaries = directory_dictionaries.entries().to_vec();
         let writer_handle = thread::spawn(move || -> Result<DirectoryWriterOutcome<W>> {
-            let mut archive_writer = ArchiveWriter::new(writer, writer_buffer_pool);
+            let mut archive_writer =
+                ArchiveWriter::with_dictionaries(writer, writer_buffer_pool, writer_dictionaries);
             archive_writer.write_global_header_with_flags(
                 block_count,
                 directory::source_kind_flags(ArchiveSourceKind::Directory),
             )?;
 
-            let mut output_bytes_written = container_prefix_bytes(block_count);
+            let mut output_bytes_written = container_prefix_bytes(block_count, dictionary_bytes);
             let mut pending_sizes = BTreeMap::<usize, usize>::new();
             let mut next_written_id = 0usize;
             let mut pending_write_peak = 0usize;
@@ -205,7 +260,7 @@ impl<'a> Archiver<'a> {
         let mut received_count = 0usize;
         let mut submitted_count = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
-        let mut output_bytes_written = container_prefix_bytes(block_count);
+        let mut output_bytes_written = container_prefix_bytes(block_count, dictionary_bytes);
         let mut raw_passthrough_blocks = 0u64;
         let mut writer_queue_peak = 0usize;
         let result_wait_timeout = self
@@ -220,6 +275,9 @@ impl<'a> Archiver<'a> {
         let producer_files = discovery.files.clone();
         let producer_file_formats = file_formats.clone();
         let producer_block_size = block_size.selected_block_size;
+        let producer_algo = self.config.compression_algo;
+        let producer_mode = self.config.performance.compression_preset;
+        let producer_dictionaries = directory_dictionaries.clone();
         let preserve_boundaries = self.config.performance.preserve_directory_format_boundaries;
         let stream_read_buffer_size = self
             .config
@@ -240,8 +298,16 @@ impl<'a> Archiver<'a> {
                 preserve_boundaries,
             );
             let mut producer_read = Duration::ZERO;
+            let mut planning_scratch = WorkerScratchArena::new();
 
-            let submit_batch = |batch: Batch| -> Result<()> {
+            let mut submit_batch = |mut batch: Batch| -> Result<()> {
+                batch.compression_plan = plan_batch_encoding(
+                    &batch,
+                    producer_algo,
+                    producer_mode,
+                    &producer_dictionaries,
+                    &mut planning_scratch,
+                )?;
                 batch_tx.send(batch).map_err(|_| {
                     crate::OxideError::CompressionError(
                         "directory producer channel closed before completion".to_string(),
@@ -684,6 +750,7 @@ impl<'a> Archiver<'a> {
             writer_queue_peak,
             stage_timings,
             processing_snapshot,
+            Some(&planner_summary),
         );
 
         let report = build_archive_report(
@@ -717,10 +784,13 @@ impl<'a> Archiver<'a> {
             source_kind,
             batches,
             input_bytes_total,
+            dictionaries,
+            planner_summary,
         } = prepared;
         let total_blocks = batches.len();
         let block_count = u32::try_from(total_blocks)
             .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
+        let dictionary_bytes = dictionaries.total_bytes();
         let max_inflight_blocks = max_inflight_blocks(
             total_blocks,
             self.config.workers,
@@ -735,28 +805,31 @@ impl<'a> Archiver<'a> {
             self.config.compression_algo,
         );
         let processing_totals = Arc::new(ProcessingThroughputTotals::default());
-
-        let compression_preset = self.config.performance.compression_preset;
         let raw_fallback_enabled = self.config.performance.raw_fallback_enabled;
         let worker_processing_totals = Arc::clone(&processing_totals);
+        let worker_dictionaries = dictionaries.clone();
         let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
             process_batch(
                 batch,
                 pool,
                 compression,
-                compression_preset,
                 raw_fallback_enabled,
+                &worker_dictionaries,
                 worker_processing_totals.as_ref(),
                 scratch,
             )
         });
 
-        let mut archive_writer = ArchiveWriter::new(writer, Arc::clone(&self.config.buffer_pool));
+        let mut archive_writer = ArchiveWriter::with_dictionaries(
+            writer,
+            Arc::clone(&self.config.buffer_pool),
+            dictionaries.entries().to_vec(),
+        );
         archive_writer.write_global_header_with_flags(
             block_count,
             directory::source_kind_flags(source_kind),
         )?;
-        let mut output_bytes_written = container_prefix_bytes(block_count);
+        let mut output_bytes_written = container_prefix_bytes(block_count, dictionary_bytes);
         let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
         let mut next_write_id = 0usize;
 
@@ -890,6 +963,7 @@ impl<'a> Archiver<'a> {
             0,
             stage_timings,
             processing_snapshot,
+            planner_summary.as_ref(),
         );
         let report = build_archive_report(
             source_kind,
@@ -972,10 +1046,16 @@ impl<'a> Archiver<'a> {
 
         scores.sort_by(|left, right| {
             right
-                .throughput_bps
-                .partial_cmp(&left.throughput_bps)
+                .objective_score
+                .partial_cmp(&left.objective_score)
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| left.output_bytes.cmp(&right.output_bytes))
+                .then_with(|| {
+                    right
+                        .throughput_bps
+                        .partial_cmp(&left.throughput_bps)
+                        .unwrap_or(Ordering::Equal)
+                })
                 .then_with(|| left.block_size.cmp(&right.block_size))
         });
 
@@ -995,9 +1075,17 @@ impl<'a> Archiver<'a> {
         let started = Instant::now();
         let mut output_bytes = 0usize;
         let chunk_size = block_size.max(1);
+        let mut trial_scratch = WorkerScratchArena::new();
         for chunk in sample.chunks(chunk_size) {
-            let compressed =
-                crate::compression::apply_compression(chunk, self.config.compression_algo)?;
+            let compressed = apply_compression_request_with_scratch(
+                CompressionRequest {
+                    data: chunk,
+                    algo: self.config.compression_algo,
+                    preset: self.config.performance.compression_preset,
+                    dictionary: None,
+                },
+                trial_scratch.compression(),
+            )?;
             let (stored_payload, _raw_passthrough) = select_stored_payload(
                 chunk,
                 compressed.as_slice(),
@@ -1005,22 +1093,48 @@ impl<'a> Archiver<'a> {
             );
             output_bytes = output_bytes.saturating_add(stored_payload.len());
         }
-        let elapsed = started.elapsed().as_secs_f64().max(1e-9);
+        let elapsed = started.elapsed();
+        let throughput_bps = sample.len() as f64 / elapsed.as_secs_f64().max(1e-9);
+        let objective = super::planning::score_candidate(
+            sample.len(),
+            output_bytes,
+            elapsed,
+            0,
+            super::planning::ObjectiveWeights::for_preset(
+                self.config.performance.compression_preset,
+            ),
+        );
         Ok(BlockSizeScore {
             block_size: chunk_size,
-            throughput_bps: sample.len() as f64 / elapsed,
+            throughput_bps,
             output_bytes,
+            objective_score: objective.total,
         })
     }
 
     pub fn prepare_file(&self, path: &Path, block_size: usize) -> Result<PreparedInput> {
-        let scanner = InputScanner::new(block_size);
-        let batches = scanner.scan_file(path)?;
+        let scanner = InputScanner::with_chunking_policy(ChunkingPolicy::for_preset(
+            block_size,
+            self.config.performance.compression_preset,
+        ));
+        let mut batches = scanner.scan_file(path)?;
+        let planner_started = Instant::now();
+        let dictionaries = DictionaryCatalog::from_batches(&batches, MAX_DICTIONARY_BYTES)?;
+        let summary = apply_chunk_plans(
+            &mut batches,
+            self.config.compression_algo,
+            self.config.performance.compression_preset,
+            scanner.chunking_policy(),
+            &dictionaries,
+        )?;
+        record_planner_telemetry(&summary, planner_started.elapsed());
         let input_bytes_total = batches.iter().map(|batch| batch.len() as u64).sum();
         Ok(PreparedInput {
             source_kind: ArchiveSourceKind::File,
             batches,
             input_bytes_total,
+            dictionaries,
+            planner_summary: Some(self.planner_summary(&summary)),
         })
     }
 }
@@ -1200,33 +1314,26 @@ pub fn record_result_to_writer<W: Write>(
 pub fn process_batch(
     batch: Batch,
     _pool: &BufferPool,
-    compression: CompressionAlgo,
-    compression_preset: CompressionPreset,
+    _compression: CompressionAlgo,
     raw_fallback_enabled: bool,
+    dictionaries: &DictionaryCatalog,
     processing_totals: &ProcessingThroughputTotals,
     scratch: &mut WorkerScratchArena,
 ) -> Result<CompressedBlock> {
-    let pre_proc =
-        crate::preprocessing::get_preprocessing_strategy(batch.file_type_hint, compression);
     let source = batch.data();
-    let metadata = batch.preprocessing_metadata.as_ref();
-    let (preprocessed, preprocessing_elapsed) = if matches!(pre_proc, PreProcessingStrategy::None) {
-        (None, Duration::ZERO)
-    } else {
-        let preprocessing_started = Instant::now();
-        (
-            Some(crate::preprocessing::apply_preprocessing_with_metadata(
-                source, &pre_proc, metadata,
-            )?),
-            preprocessing_started.elapsed(),
-        )
-    };
-    let compression_input = preprocessed.as_deref().unwrap_or(source);
+    let preprocessing_elapsed = Duration::ZERO;
+    let compression_input = source;
+    let plan = batch.compression_plan;
+    let dictionary = dictionaries.get(plan.dict_id);
 
     let compression_started = Instant::now();
-    let compressed = crate::compression::apply_compression_with_scratch(
-        compression_input,
-        compression,
+    let compressed = apply_compression_request_with_scratch(
+        CompressionRequest {
+            data: compression_input,
+            algo: plan.algo,
+            preset: plan.preset,
+            dictionary,
+        },
         scratch.compression(),
     )?;
     let compression_elapsed = compression_started.elapsed();
@@ -1243,11 +1350,13 @@ pub fn process_batch(
         compressed
     };
 
-    Ok(CompressedBlock::with_compression_meta(
+    Ok(CompressedBlock::with_chunk_encoding(
         batch.id,
+        batch.stream_id,
         data,
-        pre_proc,
-        CompressionMeta::new(compression, compression_preset, raw_passthrough),
+        crate::PreProcessingStrategy::None,
+        plan,
+        raw_passthrough,
         batch.len() as u64,
     ))
 }
@@ -1301,4 +1410,30 @@ fn collect_directory_sample(
         }
     }
     Ok(sample)
+}
+
+fn collect_directory_dictionary_batches(
+    discovery: &directory::DirectoryDiscovery,
+    file_formats: &[FileFormat],
+    max_bytes_per_file: usize,
+) -> Result<Vec<Batch>> {
+    let mut batches = Vec::new();
+    for (index, (file, format)) in discovery
+        .files
+        .iter()
+        .zip(file_formats.iter().copied())
+        .enumerate()
+    {
+        let sample = collect_file_sample(&file.full_path, max_bytes_per_file)?;
+        if sample.is_empty() {
+            continue;
+        }
+        batches.push(Batch::with_hint(
+            index,
+            &file.full_path,
+            Bytes::from(sample),
+            format,
+        ));
+    }
+    Ok(batches)
 }
