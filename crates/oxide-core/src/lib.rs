@@ -34,9 +34,9 @@ pub use format::{
     ArchiveReader, ArchiveWriter, BlockHeader, BlockIterator, CHUNK_DESCRIPTOR_SIZE,
     CORE_SECTION_COUNT, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT, FEATURE_DEDUP_REFERENCES,
     FOOTER_SIZE, Footer, FormatDetector, GLOBAL_HEADER_SIZE, GlobalHeader, OXZ_MAGIC, OXZ_VERSION,
-    ReorderBuffer, SECTION_TABLE_ENTRY_SIZE, SectionTableEntry, SectionType,
+    ReorderBuffer, SECTION_TABLE_ENTRY_SIZE, SectionTableEntry, SectionType, StoredDictionary,
 };
-pub use io::{BoundaryMode, InputScanner, MmapInput};
+pub use io::{BoundaryMode, ChunkingMode, ChunkingPolicy, InputScanner, MmapInput};
 pub use pipeline::{
     ArchivePipeline, ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions,
 };
@@ -52,7 +52,7 @@ pub use telemetry::{
     TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
 };
 pub use types::{
-    AudioStrategy, Batch, BatchData, BinaryStrategy, CompressedBlock, CompressionAlgo,
-    CompressionMeta, CompressionPreset, FileFormat, ImageStrategy, PreProcessingStrategy, Result,
-    TextStrategy,
+    AudioStrategy, Batch, BatchData, BinaryStrategy, ChunkEncodingPlan, CompressedBlock,
+    CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat, ImageStrategy,
+    PreProcessingStrategy, Result, TextStrategy,
 };

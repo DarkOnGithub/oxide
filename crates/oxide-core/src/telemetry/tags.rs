@@ -16,6 +16,8 @@ pub const PROFILE_COMPRESSION: &str = "oxide.profile.compression";
 pub const PROFILE_PREPROCESSING: &str = "oxide.profile.preprocessing";
 /// Profiling target for OXZ format operations.
 pub const PROFILE_OXZ: &str = "oxide.profile.oxz";
+/// Profiling target for adaptive planning operations.
+pub const PROFILE_PLANNER: &str = "oxide.profile.planner";
 
 /// Global system-level tag shared by all profiling events.
 pub const TAG_SYSTEM: &str = "system";
@@ -39,6 +41,8 @@ pub const TAG_COMPRESSION: &str = "compression";
 pub const TAG_PREPROCESSING: &str = "preprocessing";
 /// Logical tag for OXZ format subsystem events.
 pub const TAG_OXZ: &str = "oxz";
+/// Logical tag for archive planner events.
+pub const TAG_PLANNER: &str = "planner";
 
 /// Counter for the number of times a memory map was successfully opened.
 pub const METRIC_MMAP_OPEN_COUNT: &str = "oxide.mmap.open.count";
@@ -124,6 +128,8 @@ pub const METRIC_OXZ_WRITE_CHUNK_DESCRIPTOR_COUNT: &str = "oxide.oxz.write.chunk
 pub const METRIC_OXZ_READ_SECTION_TABLE_COUNT: &str = "oxide.oxz.read.section_table.count";
 /// Counter for OXZ section table writes.
 pub const METRIC_OXZ_WRITE_SECTION_TABLE_COUNT: &str = "oxide.oxz.write.section_table.count";
+/// Counter for archive planner runs.
+pub const METRIC_PLANNER_RUN_COUNT: &str = "oxide.planner.run.count";
 
 /// Histogram for memory map open latency in microseconds.
 pub const METRIC_MMAP_OPEN_LATENCY_US: &str = "oxide.mmap.open.latency_us";
@@ -209,11 +215,27 @@ pub const METRIC_OXZ_WRITE_SECTION_TABLE_LATENCY_US: &str =
 pub const METRIC_OXZ_READ_CHUNK_INDEX_LATENCY_US: &str = "oxide.oxz.read.chunk_index.latency_us";
 /// Histogram for OXZ chunk index write latency in microseconds.
 pub const METRIC_OXZ_WRITE_CHUNK_INDEX_LATENCY_US: &str = "oxide.oxz.write.chunk_index.latency_us";
+/// Histogram for OXZ dictionary store read latency in microseconds.
+pub const METRIC_OXZ_READ_DICTIONARY_STORE_LATENCY_US: &str =
+    "oxide.oxz.read.dictionary_store.latency_us";
+/// Histogram for OXZ dictionary store write latency in microseconds.
+pub const METRIC_OXZ_WRITE_DICTIONARY_STORE_LATENCY_US: &str =
+    "oxide.oxz.write.dictionary_store.latency_us";
 /// Histogram for OXZ payload metadata calculation latency in microseconds.
 pub const METRIC_OXZ_WRITE_PAYLOAD_INDEX_LATENCY_US: &str =
     "oxide.oxz.write.payload_meta.latency_us";
 /// Histogram for OXZ full container finalization latency in microseconds.
 pub const METRIC_OXZ_WRITE_CONTAINER_LATENCY_US: &str = "oxide.oxz.write.container.latency_us";
+/// Histogram for planner run latency in microseconds.
+pub const METRIC_PLANNER_RUN_LATENCY_US: &str = "oxide.planner.run.latency_us";
+/// Histogram for planned chunk count per archive.
+pub const METRIC_PLANNER_CHUNK_COUNT: &str = "oxide.planner.chunk.count";
+/// Histogram for average planned chunk bytes.
+pub const METRIC_PLANNER_CHUNK_BYTES: &str = "oxide.planner.chunk.bytes";
+/// Histogram for planner dictionary count per archive.
+pub const METRIC_PLANNER_DICTIONARY_COUNT: &str = "oxide.planner.dictionary.count";
+/// Histogram for planner dictionary bytes per archive.
+pub const METRIC_PLANNER_DICTIONARY_BYTES: &str = "oxide.planner.dictionary.bytes";
 
 /// Gauge for the current process Resident Set Size (RSS) in bytes.
 pub const METRIC_MEMORY_PROCESS_RSS_BYTES: &str = "oxide.memory.process.rss_bytes";

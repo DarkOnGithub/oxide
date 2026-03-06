@@ -5,7 +5,7 @@ use oxide_core::{
     ArchiveReader, ArchiveWriter, BlockHeader, BufferPool, CHUNK_DESCRIPTOR_SIZE,
     CORE_SECTION_COUNT, CompressionAlgo, CompressionMeta, CompressionPreset, Footer,
     GLOBAL_HEADER_SIZE, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
-    ReorderBuffer, SECTION_TABLE_ENTRY_SIZE, TextStrategy,
+    ReorderBuffer, SECTION_TABLE_ENTRY_SIZE, StoredDictionary, TextStrategy,
 };
 
 fn block(
@@ -231,6 +231,29 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
         .collect::<Result<Vec<_>, _>>()?;
 
     assert_eq!(ids, vec![0, 1, 2]);
+    Ok(())
+}
+
+#[test]
+fn archive_reader_exposes_dictionary_store() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = Arc::new(BufferPool::new(128, 8));
+    let dictionaries = vec![StoredDictionary::new(1, b"shared-prefix".to_vec())?];
+    let mut writer =
+        ArchiveWriter::with_dictionaries(Vec::new(), Arc::clone(&pool), dictionaries.clone());
+    writer.write_global_header(1)?;
+
+    let mut payload = block(
+        0,
+        b"payload",
+        PreProcessingStrategy::None,
+        CompressionAlgo::Lz4,
+    );
+    payload.dict_id = 1;
+    writer.write_block(&payload)?;
+
+    let archive = writer.write_footer()?;
+    let reader = ArchiveReader::new(Cursor::new(archive))?;
+    assert_eq!(reader.dictionary(1), Some(dictionaries[0].data.as_slice()));
     Ok(())
 }
 

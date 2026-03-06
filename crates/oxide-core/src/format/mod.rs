@@ -11,5 +11,5 @@ pub use oxz::{
     ArchiveReader, ArchiveWriter, BlockHeader, BlockIterator, CHUNK_DESCRIPTOR_SIZE,
     CORE_SECTION_COUNT, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT, FEATURE_DEDUP_REFERENCES,
     FOOTER_SIZE, Footer, GLOBAL_HEADER_SIZE, GlobalHeader, OXZ_MAGIC, OXZ_VERSION, ReorderBuffer,
-    SECTION_TABLE_ENTRY_SIZE, SectionTableEntry, SectionType,
+    SECTION_TABLE_ENTRY_SIZE, SectionTableEntry, SectionType, StoredDictionary,
 };

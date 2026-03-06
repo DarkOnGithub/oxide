@@ -257,7 +257,11 @@ impl Extractor {
 
                 while let Ok(task) = local_task_rx.recv() {
                     let decode_started = Instant::now();
-                    let decoded = decode_block_payload(task.header, task.block_data);
+                    let decoded = decode_block_payload(
+                        task.header,
+                        task.block_data,
+                        task.dictionary.as_deref(),
+                    );
                     let busy_elapsed = decode_started.elapsed();
                     busy += busy_elapsed;
                     local_runtime.record_worker_task(worker_id, busy_elapsed);
@@ -279,8 +283,15 @@ impl Extractor {
         }
         drop(result_tx);
 
+        let dictionary_bytes_total = archive
+            .section_table()
+            .iter()
+            .find(|entry| entry.section_type == crate::SectionType::DictionaryStore)
+            .map(|entry| entry.length as usize)
+            .unwrap_or(0);
         let mut archive_bytes_total =
-            container_prefix_bytes(block_capacity as u32) + FOOTER_SIZE as u64;
+            container_prefix_bytes(block_capacity as u32, dictionary_bytes_total)
+                + FOOTER_SIZE as u64;
         let mut submitted = 0usize;
         let mut received = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
@@ -327,11 +338,15 @@ impl Extractor {
             }
 
             let submit_started = Instant::now();
+            let dictionary = archive
+                .dictionary(header.dict_id)
+                .map(|bytes| bytes.to_vec());
             task_tx
                 .send(DecodeTask {
                     index: submitted,
                     header,
                     block_data,
+                    dictionary,
                 })
                 .map_err(|_| {
                     crate::OxideError::CompressionError(
@@ -607,12 +622,20 @@ pub fn join_decode_workers(
     Ok(workers)
 }
 
-pub fn decode_block_payload(header: BlockHeader, block_data: Vec<u8>) -> Result<Vec<u8>> {
+pub fn decode_block_payload(
+    header: BlockHeader,
+    block_data: Vec<u8>,
+    dictionary: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     let compression_meta = header.compression_meta()?;
     let decoded = if compression_meta.raw_passthrough {
         block_data
     } else {
-        crate::compression::reverse_compression(&block_data, compression_meta.algo)?
+        crate::compression::reverse_compression_request(crate::compression::DecompressionRequest {
+            data: &block_data,
+            algo: compression_meta.algo,
+            dictionary,
+        })?
     };
     let strategy = header.strategy()?;
     let restored = crate::preprocessing::reverse_preprocessing(&decoded, &strategy)?;

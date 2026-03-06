@@ -611,6 +611,22 @@ fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn st
         report.extensions.get("archive.output_input_ratio"),
         Some(ReportValue::F64(_))
     ));
+    assert!(matches!(
+        report.extensions.get("planner.mode"),
+        Some(ReportValue::Text(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("planner.chunking_mode"),
+        Some(ReportValue::Text(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("planner.dictionary_count"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("planner.dictionary_bytes"),
+        Some(ReportValue::U64(_))
+    ));
 
     let (restored, _) = pipeline.extract_archive(
         Cursor::new(run.writer),

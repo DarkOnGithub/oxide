@@ -170,13 +170,14 @@ const COPY_KERNEL_METRICS: [&str; CopyKernel::COUNT] = [
 pub(super) fn decompress_block(
     input: &[u8],
     expected_size: usize,
+    dictionary: Option<&[u8]>,
 ) -> core::result::Result<Vec<u8>, DecodeError> {
     if input.is_empty() {
         return Err(DecodeError::ExpectedAnotherByte);
     }
 
     let mut output = vec![0u8; expected_size];
-    let mut decoder = BlockDecoder::new(input, output.as_mut_slice());
+    let mut decoder = BlockDecoder::new(input, output.as_mut_slice(), dictionary);
     decoder.decode()?;
     decoder.ensure_output_complete()?;
     decoder.stats.emit();
@@ -186,16 +187,18 @@ pub(super) fn decompress_block(
 struct BlockDecoder<'a> {
     input: &'a [u8],
     output: &'a mut [u8],
+    dictionary: &'a [u8],
     input_pos: usize,
     output_pos: usize,
     stats: DecodeStats,
 }
 
 impl<'a> BlockDecoder<'a> {
-    fn new(input: &'a [u8], output: &'a mut [u8]) -> Self {
+    fn new(input: &'a [u8], output: &'a mut [u8], dictionary: Option<&'a [u8]>) -> Self {
         Self {
             input,
             output,
+            dictionary: dictionary.unwrap_or(&[]),
             input_pos: 0,
             output_pos: 0,
             stats: DecodeStats::default(),
@@ -258,7 +261,7 @@ impl<'a> BlockDecoder<'a> {
         self.input_pos += 2;
 
         let offset = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
-        if offset == 0 || offset > self.output_pos {
+        if offset == 0 || offset > self.output_pos.saturating_add(self.dictionary.len()) {
             return Err(DecodeError::OffsetOutOfBounds);
         }
 
@@ -348,13 +351,31 @@ impl<'a> BlockDecoder<'a> {
             });
         }
 
-        let kernel = unsafe {
-            // SAFETY: offset was validated against output_pos and output_end is in bounds.
-            copy::copy_match(
-                self.output.as_mut_ptr().add(self.output_pos),
-                offset,
-                match_len,
-            )
+        let kernel = if offset <= self.output_pos {
+            unsafe {
+                // SAFETY: offset was validated against output_pos and output_end is in bounds.
+                copy::copy_match(
+                    self.output.as_mut_ptr().add(self.output_pos),
+                    offset,
+                    match_len,
+                )
+            }
+        } else {
+            let dictionary_prefix = offset - self.output_pos;
+            if dictionary_prefix > self.dictionary.len() {
+                return Err(DecodeError::OffsetOutOfBounds);
+            }
+            let dict_start = self.dictionary.len() - dictionary_prefix;
+            for written in 0..match_len {
+                let byte = if written < dictionary_prefix {
+                    self.dictionary[dict_start + written]
+                } else {
+                    let source_index = self.output_pos + written - offset;
+                    self.output[source_index]
+                };
+                self.output[self.output_pos + written] = byte;
+            }
+            CopyKernel::Overlap
         };
         self.output_pos = output_end;
         self.stats.record_match(match_len, kernel);

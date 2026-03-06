@@ -313,14 +313,17 @@ impl ChunkDescriptor {
         let encoded_len = u32::try_from(block.data.len())
             .map_err(|_| OxideError::InvalidFormat("encoded length exceeds u32 range"))?;
 
-        Ok(Self::new_with_compression_meta(
+        let mut descriptor = Self::new_with_compression_meta(
             chunk_id,
             raw_len,
             encoded_len,
             block.pre_proc.clone(),
             block.compression_meta(),
             block.crc32,
-        ))
+        );
+        descriptor.stream_id = block.stream_id;
+        descriptor.dict_id = block.dict_id;
+        Ok(descriptor)
     }
 
     /// Writes the descriptor to a writer.

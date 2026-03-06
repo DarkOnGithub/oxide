@@ -264,6 +264,7 @@ pub fn build_stats_extensions(
     writer_queue_peak: usize,
     stage_timings: StageTimings,
     processing_snapshot: ProcessingThroughputSnapshot,
+    planner_summary: Option<&PlannerArchiveSummary>,
 ) -> BTreeMap<String, StatValue> {
     let mut extensions = BTreeMap::new();
     let compress_busy_us = runtime
@@ -390,6 +391,60 @@ pub fn build_stats_extensions(
         "pipeline.writer_queue_peak".to_string(),
         StatValue::U64(writer_queue_peak as u64),
     );
+    if let Some(summary) = planner_summary {
+        extensions.insert(
+            "planner.mode".to_string(),
+            StatValue::Text(format!("{:?}", summary.mode)),
+        );
+        extensions.insert(
+            "planner.chunking_mode".to_string(),
+            StatValue::Text(summary.chunking_mode.to_string()),
+        );
+        extensions.insert(
+            "planner.superchunk_size".to_string(),
+            StatValue::U64(summary.superchunk_size as u64),
+        );
+        extensions.insert(
+            "planner.chunk_count".to_string(),
+            StatValue::U64(summary.chunk_count as u64),
+        );
+        extensions.insert(
+            "planner.chunk_bytes_avg".to_string(),
+            StatValue::F64(summary.avg_chunk_bytes),
+        );
+        extensions.insert(
+            "planner.chunk_bytes_min".to_string(),
+            StatValue::U64(summary.min_chunk_bytes as u64),
+        );
+        extensions.insert(
+            "planner.chunk_bytes_max".to_string(),
+            StatValue::U64(summary.max_chunk_bytes as u64),
+        );
+        extensions.insert(
+            "planner.dictionary_count".to_string(),
+            StatValue::U64(summary.dictionary_count as u64),
+        );
+        extensions.insert(
+            "planner.dictionary_bytes".to_string(),
+            StatValue::U64(summary.dictionary_bytes as u64),
+        );
+        extensions.insert(
+            "planner.chunks_with_dictionaries".to_string(),
+            StatValue::U64(summary.chunks_with_dictionaries),
+        );
+        extensions.insert(
+            "planner.preset.fast_chunks".to_string(),
+            StatValue::U64(summary.preset_chunk_counts[0]),
+        );
+        extensions.insert(
+            "planner.preset.default_chunks".to_string(),
+            StatValue::U64(summary.preset_chunk_counts[1]),
+        );
+        extensions.insert(
+            "planner.preset.high_chunks".to_string(),
+            StatValue::U64(summary.preset_chunk_counts[2]),
+        );
+    }
     extensions.insert(
         "stage.discovery_us".to_string(),
         StatValue::U64(stage_timings.discovery.as_micros().min(u64::MAX as u128) as u64),
