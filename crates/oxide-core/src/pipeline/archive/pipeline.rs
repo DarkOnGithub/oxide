@@ -77,6 +77,27 @@ impl ArchivePipeline {
         archiver.archive_file_path_with(path, writer, &options, sink)
     }
 
+    /// Reads an input file and writes an OXZ archive directly to a seekable output.
+    pub fn archive_file_seekable<P, W>(
+        &self,
+        path: P,
+        writer: W,
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ArchiveRun<W>>
+    where
+        P: AsRef<Path>,
+        W: Write + Seek,
+    {
+        let path = path.as_ref();
+        tracing::info!(path = %path.display(), "starting seekable file archival");
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
+        let config = self.config();
+        let archiver = Archiver::new(&config);
+        archiver.archive_file_path_seekable_with(path, writer, &options, sink)
+    }
+
     /// Archives either a single file or a directory tree.
     pub fn archive_path<P, W>(
         &self,
@@ -109,6 +130,38 @@ impl ArchivePipeline {
         }
     }
 
+    /// Archives either a single file or a directory tree to a seekable destination.
+    pub fn archive_path_seekable<P, W>(
+        &self,
+        path: P,
+        writer: W,
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ArchiveRun<W>>
+    where
+        P: AsRef<Path>,
+        W: Write + Seek + Send + 'static,
+    {
+        let path = path.as_ref();
+        tracing::info!(path = %path.display(), "starting seekable path archival");
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
+        let metadata = fs::metadata(path)?;
+        if metadata.is_file() {
+            let config = self.config();
+            let archiver = Archiver::new(&config);
+            archiver.archive_file_path_seekable_with(path, writer, &options, sink)
+        } else if metadata.is_dir() {
+            let config = self.config();
+            let archiver = Archiver::new(&config);
+            archiver.archive_directory_streaming_seekable_with(path, writer, &options, sink)
+        } else {
+            Err(crate::OxideError::InvalidFormat(
+                "path must be a file or directory",
+            ))
+        }
+    }
+
     /// Archives a directory tree as a single OXZ payload.
     pub fn archive_directory<P, W>(
         &self,
@@ -128,6 +181,27 @@ impl ArchivePipeline {
         let config = self.config();
         let archiver = Archiver::new(&config);
         archiver.archive_directory_streaming_with(path, writer, &options, sink)
+    }
+
+    /// Archives a directory tree directly to a seekable destination.
+    pub fn archive_directory_seekable<P, W>(
+        &self,
+        dir_path: P,
+        writer: W,
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ArchiveRun<W>>
+    where
+        P: AsRef<Path>,
+        W: Write + Seek + Send + 'static,
+    {
+        let path = dir_path.as_ref();
+        tracing::info!(path = %path.display(), "starting seekable directory archival");
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
+        let config = self.config();
+        let archiver = Archiver::new(&config);
+        archiver.archive_directory_streaming_seekable_with(path, writer, &options, sink)
     }
 
     pub fn max_inflight_blocks(

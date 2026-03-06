@@ -2,10 +2,10 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use oxide_core::{
-    ArchiveReader, ArchiveWriter, BlockHeader, BufferPool, CHUNK_DESCRIPTOR_SIZE,
-    CORE_SECTION_COUNT, CompressionAlgo, CompressionMeta, CompressionPreset, Footer,
-    GLOBAL_HEADER_SIZE, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
-    ReorderBuffer, SECTION_TABLE_ENTRY_SIZE, StoredDictionary, TextStrategy,
+    ArchiveReader, ArchiveWriter, BlockHeader, BufferPool, CompressionAlgo, CompressionMeta,
+    CompressionPreset, Footer, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
+    ReorderBuffer, SeekableArchiveWriter, StoredDictionary, TextStrategy, CHUNK_DESCRIPTOR_SIZE,
+    CORE_SECTION_COUNT, GLOBAL_HEADER_SIZE, SECTION_TABLE_ENTRY_SIZE,
 };
 
 fn block(
@@ -146,8 +146,8 @@ fn footer_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn archive_writer_and_reader_support_random_and_sequential_access()
--> Result<(), Box<dyn std::error::Error>> {
+fn archive_writer_and_reader_support_random_and_sequential_access(
+) -> Result<(), Box<dyn std::error::Error>> {
     let pool = Arc::new(BufferPool::new(128, 8));
     let mut writer = ArchiveWriter::new(Vec::new(), Arc::clone(&pool));
     writer.write_global_header(3)?;
@@ -231,6 +231,41 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
         .collect::<Result<Vec<_>, _>>()?;
 
     assert_eq!(ids, vec![0, 1, 2]);
+    Ok(())
+}
+
+#[test]
+fn seekable_archive_writer_streams_payload_and_round_trips(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = Arc::new(BufferPool::new(128, 8));
+    let cursor = Cursor::new(Vec::new());
+    let mut writer = SeekableArchiveWriter::new(cursor, Arc::clone(&pool));
+    writer.write_global_header(3)?;
+    writer.write_block(&block(
+        0,
+        b"alpha",
+        PreProcessingStrategy::None,
+        CompressionAlgo::Lz4,
+    ))?;
+    writer.write_block(&block(
+        1,
+        b"beta",
+        PreProcessingStrategy::Text(TextStrategy::Bwt),
+        CompressionAlgo::Lz4,
+    ))?;
+    writer.write_block(&block(
+        2,
+        b"gamma",
+        PreProcessingStrategy::Image(ImageStrategy::Paeth),
+        CompressionAlgo::Lz4,
+    ))?;
+
+    let archive = writer.write_footer()?.into_inner();
+    let mut reader = ArchiveReader::new(Cursor::new(archive))?;
+    assert_eq!(reader.block_count(), 3);
+    let (header, payload) = reader.read_block(1)?;
+    assert_eq!(header.chunk_id, 1);
+    assert_eq!(payload, b"beta");
     Ok(())
 }
 
