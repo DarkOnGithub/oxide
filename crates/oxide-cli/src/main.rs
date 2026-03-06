@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
+use std::fmt::Display;
 use std::fs::File;
+use std::io::IsTerminal;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use oxide_core::telemetry::tags;
+use oxide_core::telemetry::{HistogramSnapshot, TelemetrySnapshot};
 use oxide_core::{
     ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReport, ArchiveSourceKind,
     BufferPool, CompressionAlgo, CompressionPreset, ExtractReport, PipelinePerformanceOptions,
@@ -270,22 +272,42 @@ fn archive_command(
 
     let mut live_rates = LiveRateStats::default();
     let discovery_started = Instant::now();
-    eprintln!("discovering input and planning blocks...");
+    let interactive_progress = io::stderr().is_terminal();
+    if interactive_progress {
+        eprintln!(
+            "{}",
+            paint(
+                StreamTarget::Stderr,
+                "2",
+                "[scan] discovering input and planning blocks..."
+            )
+        );
+    }
     let mut sink = ArchiveCliSink {
         live_rates: &mut live_rates,
         discovery_started,
         discovery_reported: false,
+        interactive: interactive_progress,
     };
     let run = pipeline.archive_path(&input, output_file, telemetry_options, Some(&mut sink))?;
 
-    if !sink.discovery_reported {
+    if interactive_progress && !sink.discovery_reported {
         eprintln!(
-            "discovery complete in {}, starting workers...",
-            format_duration(discovery_started.elapsed())
+            "{}",
+            paint(
+                StreamTarget::Stderr,
+                "2",
+                &format!(
+                    "[ready] discovery complete in {}, starting workers...",
+                    format_duration(discovery_started.elapsed())
+                )
+            )
         );
     }
 
-    eprintln!();
+    if interactive_progress {
+        eprintln!();
+    }
     print_archive_report_summary(
         &input,
         &output_path,
@@ -345,6 +367,7 @@ struct ArchiveCliSink<'a> {
     live_rates: &'a mut LiveRateStats,
     discovery_started: Instant,
     discovery_reported: bool,
+    interactive: bool,
 }
 
 impl TelemetrySink for ArchiveCliSink<'_> {
@@ -353,11 +376,22 @@ impl TelemetrySink for ArchiveCliSink<'_> {
             return;
         };
 
+        if !self.interactive {
+            return;
+        }
+
         if !self.discovery_reported {
             self.discovery_reported = true;
             eprintln!(
-                "discovery complete in {}, starting workers...",
-                format_duration(self.discovery_started.elapsed())
+                "{}",
+                paint(
+                    StreamTarget::Stderr,
+                    "2",
+                    &format!(
+                        "[ready] discovery complete in {}, starting workers...",
+                        format_duration(self.discovery_started.elapsed())
+                    )
+                )
             );
         }
 
@@ -385,18 +419,25 @@ impl TelemetrySink for ArchiveCliSink<'_> {
             .filter(|worker| worker.tasks_completed > 0 || worker.busy > Duration::ZERO)
             .count();
 
+        let prefix = paint(
+            StreamTarget::Stderr,
+            "1;36",
+            &format!("[archive {progress:5.1}%]"),
+        );
+
         let line = format!(
-            "\r\x1b[2K{progress:5.1}% {}/{} rd {} wr {} cmp/core {} cmp/wall {} eta {} p{} w{}/{}",
+            "\r\x1b[2K{prefix} blocks {}/{} | read {} | write {} | cmp {} | wall {} | ratio {:.3}x | queue {} | workers {}/{} | eta {}",
             snapshot.blocks_completed,
             snapshot.blocks_total,
             format_live_rate(read_instant_bps),
             format_live_rate(write_instant_bps),
             format_live_rate(snapshot.compression_avg_bps),
             format_live_rate(snapshot.compression_wall_avg_bps),
-            format_duration(eta),
+            snapshot.output_input_ratio,
             snapshot.blocks_pending,
             active_workers,
             snapshot.runtime.workers.len(),
+            format_duration(eta),
         );
         eprint!("{line}");
         let _ = io::stderr().flush();
@@ -415,6 +456,9 @@ impl TelemetrySink for ExtractCliSink {
         let TelemetryEvent::ExtractProgress(progress) = event else {
             return;
         };
+        if !io::stderr().is_terminal() {
+            return;
+        }
         let elapsed_secs = progress.elapsed.as_secs_f64().max(1e-6);
         let read_avg_bps = progress.archive_bytes_completed as f64 / elapsed_secs;
         let delta_bytes = progress
@@ -435,14 +479,29 @@ impl TelemetrySink for ExtractCliSink {
         } else {
             100.0
         };
+        let active_workers = progress
+            .runtime
+            .workers
+            .iter()
+            .filter(|worker| worker.tasks_completed > 0 || worker.busy > Duration::ZERO)
+            .count();
+        let prefix = paint(
+            StreamTarget::Stderr,
+            "1;36",
+            &format!("[extract {percent:5.1}%]"),
+        );
         let line = format!(
-            "\r\x1b[2K[extract {percent:6.2}%] blocks {}/{} | archive read {} | decoded {} | rd avg {}/s inst {}/s",
+            "\r\x1b[2K{prefix} blocks {}/{} | archive {} | decoded {} | read {} | inst {} | decode {} | ratio {:.3}x | workers {}/{}",
             progress.blocks_completed,
             progress.blocks_total,
             format_bytes(progress.archive_bytes_completed),
             format_bytes(progress.decoded_bytes_completed),
-            format_rate(read_avg_bps),
-            format_rate(read_instant_bps),
+            format_live_rate(read_avg_bps),
+            format_live_rate(read_instant_bps),
+            format_live_rate(progress.decode_avg_bps),
+            progress.decode_archive_ratio,
+            active_workers,
+            progress.runtime.workers.len(),
         );
         eprint!("{line}");
         let _ = io::stderr().flush();
@@ -506,40 +565,38 @@ fn print_extract_report_summary(archive_path: &Path, output_path: &Path, report:
         ArchiveSourceKind::Directory => "directory",
     };
 
-    println!("extract complete");
-    println!("  archive: {}", archive_path.display());
-    println!("  output: {} ({source_kind})", output_path.display());
-    println!("  elapsed: {}", format_duration(report.elapsed));
-    println!(
-        "  archive bytes read: {}",
-        format_bytes(report.archive_bytes_total)
+    print_report_title("Extract Complete");
+    print_report_section("Overview");
+    print_report_value("archive", archive_path.display());
+    print_report_value(
+        "output",
+        format!("{} ({source_kind})", output_path.display()),
     );
-    println!(
-        "  decoded bytes: {}",
-        format_bytes(report.decoded_bytes_total)
+    print_report_value("elapsed", format_duration(report.elapsed));
+    print_report_value("archive bytes", format_bytes(report.archive_bytes_total));
+    print_report_value("decoded bytes", format_bytes(report.decoded_bytes_total));
+    print_report_value("output bytes", format_bytes(report.output_bytes_total));
+    print_report_value(
+        "output/archive ratio",
+        format!("{:.3}x", report.output_archive_ratio),
     );
-    println!(
-        "  output bytes: {}",
-        format_bytes(report.output_bytes_total)
-    );
-    println!(
-        "  output/archive ratio: {:.3}x",
-        report.output_archive_ratio
-    );
-    println!(
-        "  read throughput avg: {}/s",
-        format_rate(report.read_avg_bps)
-    );
-    println!(
-        "  decode throughput avg: {}/s",
-        format_rate(report.decode_avg_bps)
-    );
-    println!(
-        "  output throughput avg: {}/s",
-        format_rate(report.output_avg_bps)
-    );
-    println!("  blocks: {}", report.blocks_total);
+    print_report_value("blocks", report.blocks_total);
 
+    print_report_section("Throughput");
+    print_report_value(
+        "read average",
+        format!("{}/s", format_rate(report.read_avg_bps)),
+    );
+    print_report_value(
+        "decode average",
+        format!("{}/s", format_rate(report.decode_avg_bps)),
+    );
+    print_report_value(
+        "output average",
+        format!("{}/s", format_rate(report.output_avg_bps)),
+    );
+
+    print_report_section("Runtime");
     print_worker_runtime(&report.workers);
     print_thread_stage_summary(
         &report.main_thread,
@@ -554,12 +611,12 @@ fn print_extract_report_summary(archive_path: &Path, output_path: &Path, report:
     );
 
     if let Some(effective_cores) = extension_f64(&report.extensions, "runtime.effective_cores") {
-        println!("  effective decode cores: {effective_cores:.2}");
+        print_report_value("effective decode cores", format!("{effective_cores:.2}"));
     }
     if let Some(decode_busy_us) = extension_u64(&report.extensions, "runtime.decode_busy_us") {
-        println!(
-            "  total decode busy time: {}",
-            format_duration(Duration::from_micros(decode_busy_us))
+        print_report_value(
+            "total decode busy time",
+            format_duration(Duration::from_micros(decode_busy_us)),
         );
     }
 
@@ -586,133 +643,140 @@ fn print_archive_report_summary(
         ArchiveSourceKind::Directory => "directory",
     };
 
-    println!("archive complete");
-    println!("  source: {} ({source_kind})", input.display());
-    println!("  output: {}", output.display());
-    println!("  compression metadata: {:?}", compression);
-    println!("  planner mode: {}", planner_mode_label(planner_mode));
-    println!("  elapsed: {}", format_duration(report.elapsed));
-    println!("  input bytes: {}", format_bytes(report.input_bytes_total));
-    println!(
-        "  output bytes: {}",
-        format_bytes(report.output_bytes_total)
+    print_report_title("Archive Complete");
+    print_report_section("Overview");
+    print_report_value("source", format!("{} ({source_kind})", input.display()));
+    print_report_value("output", output.display());
+    print_report_value("compression", format!("{:?}", compression));
+    print_report_value("planner mode", planner_mode_label(planner_mode));
+    print_report_value("elapsed", format_duration(report.elapsed));
+    print_report_value("input bytes", format_bytes(report.input_bytes_total));
+    print_report_value("output bytes", format_bytes(report.output_bytes_total));
+    print_report_value(
+        "output/input ratio",
+        format!("{:.3}x", report.output_input_ratio),
     );
-    println!("  expansion ratio: {:.3}x", report.output_input_ratio);
-    println!(
-        "  read throughput avg: {}/s",
-        format_rate(report.read_avg_bps)
+    print_report_value(
+        "blocks",
+        format!(
+            "{} total (avg block {})",
+            report.blocks_total,
+            format_bytes(avg_block)
+        ),
     );
-    println!(
-        "  read throughput peak (live): {}/s",
-        format_rate(peak_read_bps)
+
+    print_report_section("Throughput");
+    print_report_value(
+        "read average",
+        format!("{}/s", format_rate(report.read_avg_bps)),
     );
-    println!(
-        "  write throughput avg: {}/s",
-        format_rate(report.write_avg_bps)
+    print_report_value(
+        "read peak (live)",
+        format!("{}/s", format_rate(peak_read_bps)),
     );
-    println!(
-        "  write throughput peak (live): {}/s",
-        format_rate(peak_write_bps)
+    print_report_value(
+        "write average",
+        format!("{}/s", format_rate(report.write_avg_bps)),
+    );
+    print_report_value(
+        "write peak (live)",
+        format!("{}/s", format_rate(peak_write_bps)),
     );
     if let Some(preprocessing_avg_bps) =
         extension_f64(&report.extensions, "throughput.preprocessing_avg_bps")
     {
-        println!(
-            "  preprocessing throughput avg (core-normalized): {}/s",
-            format_rate(preprocessing_avg_bps)
+        print_report_value(
+            "preprocessing avg (core)",
+            format!("{}/s", format_rate(preprocessing_avg_bps)),
         );
     }
     if let Some(preprocessing_wall_avg_bps) =
         extension_f64(&report.extensions, "throughput.preprocessing_wall_avg_bps")
     {
-        println!(
-            "  preprocessing throughput avg (wall-clock): {}/s",
-            format_rate(preprocessing_wall_avg_bps)
+        print_report_value(
+            "preprocessing avg (wall)",
+            format!("{}/s", format_rate(preprocessing_wall_avg_bps)),
         );
     }
     if let Some(compression_avg_bps) =
         extension_f64(&report.extensions, "throughput.compression_avg_bps")
     {
-        println!(
-            "  compression throughput avg (core-normalized): {}/s",
-            format_rate(compression_avg_bps)
+        print_report_value(
+            "compression avg (core)",
+            format!("{}/s", format_rate(compression_avg_bps)),
         );
     }
     if let Some(compression_wall_avg_bps) =
         extension_f64(&report.extensions, "throughput.compression_wall_avg_bps")
     {
-        println!(
-            "  compression throughput avg (wall-clock): {}/s",
-            format_rate(compression_wall_avg_bps)
+        print_report_value(
+            "compression avg (wall)",
+            format!("{}/s", format_rate(compression_wall_avg_bps)),
         );
     }
     if let Some(preprocessing_compression_avg_bps) = extension_f64(
         &report.extensions,
         "throughput.preprocessing_compression_avg_bps",
     ) {
-        println!(
-            "  preprocessing+compression throughput avg (core-normalized): {}/s",
-            format_rate(preprocessing_compression_avg_bps)
+        print_report_value(
+            "prep+compression avg (core)",
+            format!("{}/s", format_rate(preprocessing_compression_avg_bps)),
         );
     }
     if let Some(preprocessing_compression_wall_avg_bps) = extension_f64(
         &report.extensions,
         "throughput.preprocessing_compression_wall_avg_bps",
     ) {
-        println!(
-            "  preprocessing+compression throughput avg (wall-clock): {}/s",
-            format_rate(preprocessing_compression_wall_avg_bps)
+        print_report_value(
+            "prep+compression avg (wall)",
+            format!("{}/s", format_rate(preprocessing_compression_wall_avg_bps)),
         );
     }
-    println!(
-        "  blocks: {} total (avg block {})",
-        report.blocks_total,
-        format_bytes(avg_block),
-    );
 
+    print_report_section("Runtime");
     print_worker_runtime(&report.workers);
     if let Some(effective_cores) = extension_f64(&report.extensions, "runtime.effective_cores") {
-        println!("  effective compression cores: {effective_cores:.2}");
+        print_report_value(
+            "effective compression cores",
+            format!("{effective_cores:.2}"),
+        );
     }
     if let Some(compress_busy_us) = extension_u64(&report.extensions, "runtime.compress_busy_us") {
-        println!(
-            "  total compression busy time: {}",
-            format_duration(Duration::from_micros(compress_busy_us))
+        print_report_value(
+            "total compression busy time",
+            format_duration(Duration::from_micros(compress_busy_us)),
         );
     }
     if let Some(preprocessing_busy_us) =
         extension_u64(&report.extensions, "runtime.preprocessing_busy_us")
     {
-        println!(
-            "  preprocessing busy time: {}",
-            format_duration(Duration::from_micros(preprocessing_busy_us))
+        print_report_value(
+            "preprocessing busy time",
+            format_duration(Duration::from_micros(preprocessing_busy_us)),
         );
     }
     if let Some(compression_busy_us) =
         extension_u64(&report.extensions, "runtime.compression_busy_us")
     {
-        println!(
-            "  compression stage busy time: {}",
-            format_duration(Duration::from_micros(compression_busy_us))
+        print_report_value(
+            "compression stage busy time",
+            format_duration(Duration::from_micros(compression_busy_us)),
         );
     }
     if let Some(max_inflight_blocks) =
         extension_u64(&report.extensions, "pipeline.max_inflight_blocks")
     {
-        println!("  max in-flight blocks: {max_inflight_blocks}");
+        print_report_value("max in-flight blocks", max_inflight_blocks);
     }
     if let Some(max_inflight_bytes) =
         extension_u64(&report.extensions, "pipeline.max_inflight_bytes")
     {
-        println!(
-            "  max in-flight bytes: {}",
-            format_bytes(max_inflight_bytes)
-        );
+        print_report_value("max in-flight bytes", format_bytes(max_inflight_bytes));
     }
     if let Some(pending_write_peak) =
         extension_u64(&report.extensions, "pipeline.pending_write_peak")
     {
-        println!("  reorder pending peak: {pending_write_peak}");
+        print_report_value("reorder pending peak", pending_write_peak);
     }
 
     print_thread_stage_summary(
@@ -728,9 +792,12 @@ fn print_archive_report_summary(
     );
 
     let pool = buffer_pool.metrics();
-    println!(
-        "  buffer pool: created {} | recycled {} | dropped {}",
-        pool.created, pool.recycled, pool.dropped
+    print_report_value(
+        "buffer pool",
+        format!(
+            "created {} | recycled {} | dropped {}",
+            pool.created, pool.recycled, pool.dropped
+        ),
     );
     print_telemetry_summary(report.telemetry.as_ref());
 }
@@ -749,19 +816,23 @@ fn print_worker_runtime(workers: &[WorkerReport]) {
         .min()
         .unwrap_or(0);
 
-    println!(
-        "  scheduler: {worker_count} workers | task balance min/max {min_tasks}/{max_tasks} | total tasks {total_tasks}"
+    print_report_value(
+        "scheduler",
+        format!(
+            "{worker_count} workers | task balance min/max {min_tasks}/{max_tasks} | total tasks {total_tasks}"
+        ),
     );
-    println!("  worker runtime:");
     for worker in workers {
-        println!(
-            "    w{:02} tasks {:>6} | uptime {:>8} | busy {:>8} | idle {:>8} | util {:>6.2}%",
-            worker.worker_id,
-            worker.tasks_completed,
-            format_duration(worker.uptime),
-            format_duration(worker.busy),
-            format_duration(worker.idle),
-            worker.utilization * 100.0,
+        print_report_value(
+            &format!("worker {:02}", worker.worker_id),
+            format!(
+                "tasks {:>6} | util {:>6.2}% | busy {:>8} | idle {:>8} | uptime {:>8}",
+                worker.tasks_completed,
+                worker.utilization * 100.0,
+                format_duration(worker.busy),
+                format_duration(worker.idle),
+                format_duration(worker.uptime),
+            ),
         );
     }
 }
@@ -771,15 +842,18 @@ fn print_thread_stage_summary(thread: &ThreadReport, order: &[(&str, &str)]) {
     for (stage_key, label) in order {
         let value_us = thread.stage_us.get(*stage_key).copied().unwrap_or(0);
         if value_us > 0 {
-            pieces.push(format!("{label} {:.2}ms", value_us as f64 / 1000.0));
+            pieces.push(format!(
+                "{label} {}",
+                format_duration_compact(Duration::from_micros(value_us))
+            ));
         }
     }
     if !pieces.is_empty() {
-        println!("  stage timings: {}", pieces.join(" | "));
+        print_report_value("stage timings", pieces.join(" | "));
     }
 }
 
-fn print_telemetry_summary(snapshot: Option<&oxide_core::telemetry::TelemetrySnapshot>) {
+fn print_telemetry_summary(snapshot: Option<&TelemetrySnapshot>) {
     let Some(snapshot) = snapshot else {
         return;
     };
@@ -788,26 +862,208 @@ fn print_telemetry_summary(snapshot: Option<&oxide_core::telemetry::TelemetrySna
         return;
     }
 
-    println!(
-        "  telemetry: counters {} | gauges {} | histograms {}",
-        snapshot.counters.len(),
-        snapshot.gauges.len(),
-        snapshot.histograms.len(),
+    print_report_section("Telemetry");
+    print_report_value(
+        "metrics",
+        format!(
+            "{} counters | {} gauges | {} histograms",
+            snapshot.counters.len(),
+            snapshot.gauges.len(),
+            snapshot.histograms.len(),
+        ),
     );
-    if let Some(task_count) = snapshot.counter(tags::METRIC_WORKER_TASK_COUNT) {
-        println!("  telemetry worker tasks: {task_count}");
+
+    let counters = telemetry_scalar_rows(&snapshot.counters);
+    let gauges = telemetry_scalar_rows(&snapshot.gauges);
+    let histograms = telemetry_histogram_rows(&snapshot.histograms);
+
+    print_metric_group("counters", &counters);
+    print_metric_group("gauges", &gauges);
+    print_metric_group("histograms", &histograms);
+}
+
+const REPORT_LABEL_WIDTH: usize = 28;
+const TELEMETRY_LABEL_WIDTH: usize = 32;
+
+#[derive(Clone, Copy)]
+enum StreamTarget {
+    Stdout,
+    Stderr,
+}
+
+fn print_report_title(title: &str) {
+    println!(
+        "{}",
+        paint(StreamTarget::Stdout, "1;32", &format!("== {title} =="))
+    );
+}
+
+fn print_report_section(title: &str) {
+    println!();
+    println!(
+        "{}",
+        paint(StreamTarget::Stdout, "1;36", &format!("-- {title} --"))
+    );
+}
+
+fn print_report_value(label: &str, value: impl Display) {
+    println!("  {label:<REPORT_LABEL_WIDTH$} {value}");
+}
+
+fn print_metric_group(title: &str, rows: &[(String, String)]) {
+    if rows.is_empty() {
+        return;
     }
-    if let Some(queue_depth) = snapshot.gauge(tags::METRIC_WORKER_QUEUE_DEPTH) {
-        println!("  telemetry queue depth: {queue_depth}");
+
+    println!(
+        "  {}",
+        paint(StreamTarget::Stdout, "1;33", &format!("[{title}]"))
+    );
+    for (label, value) in rows {
+        println!("    {label:<TELEMETRY_LABEL_WIDTH$} {value}");
     }
-    if let Some(active_workers) = snapshot.gauge(tags::METRIC_WORKER_ACTIVE_COUNT) {
-        println!("  telemetry active workers: {active_workers}");
+}
+
+fn telemetry_scalar_rows(values: &BTreeMap<String, u64>) -> Vec<(String, String)> {
+    values
+        .iter()
+        .map(|(name, value)| {
+            (
+                telemetry_metric_label(name),
+                format_telemetry_scalar(name, *value),
+            )
+        })
+        .collect()
+}
+
+fn telemetry_histogram_rows(values: &BTreeMap<String, HistogramSnapshot>) -> Vec<(String, String)> {
+    values
+        .iter()
+        .map(|(name, histogram)| {
+            (
+                telemetry_metric_label(name),
+                format_histogram_summary(name, *histogram),
+            )
+        })
+        .collect()
+}
+
+fn telemetry_metric_label(name: &str) -> String {
+    let trimmed = name.strip_prefix("oxide.").unwrap_or(name);
+
+    if let Some(base) = trimmed.strip_suffix(".count") {
+        return humanize_metric_name(base);
     }
-    if let Some(scratch_bytes) = snapshot.gauge(tags::METRIC_WORKER_SCRATCH_BYTES) {
-        println!(
-            "  telemetry worker scratch: {}",
-            format_bytes(scratch_bytes)
-        );
+    if let Some(base) = trimmed.strip_suffix(".hist") {
+        return humanize_metric_name(base);
+    }
+    if let Some(base) = trimmed.strip_suffix(".latency_us") {
+        return format!("{} latency", humanize_metric_name(base));
+    }
+    if let Some(base) = trimmed.strip_suffix(".us") {
+        return format!("{} time", humanize_metric_name(base));
+    }
+
+    humanize_metric_name(trimmed)
+}
+
+fn humanize_metric_name(name: &str) -> String {
+    name.replace('.', " ").replace('_', " ")
+}
+
+fn format_telemetry_scalar(name: &str, value: u64) -> String {
+    if is_duration_metric(name) {
+        format_duration_compact(Duration::from_micros(value))
+    } else if is_bytes_metric(name) {
+        format_bytes(value)
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_histogram_summary(name: &str, histogram: HistogramSnapshot) -> String {
+    format!(
+        "samples {} | mean {} | min {} | max {}",
+        histogram.count,
+        format_telemetry_mean(name, histogram.mean),
+        format_telemetry_scalar(name, histogram.min),
+        format_telemetry_scalar(name, histogram.max),
+    )
+}
+
+fn format_telemetry_mean(name: &str, value: f64) -> String {
+    if !value.is_finite() || value <= 0.0 {
+        return if is_bytes_metric(name) {
+            "0 B".to_string()
+        } else if is_duration_metric(name) {
+            "0us".to_string()
+        } else {
+            "0".to_string()
+        };
+    }
+
+    if is_duration_metric(name) {
+        format_duration_compact(Duration::from_secs_f64(value / 1_000_000.0))
+    } else if is_bytes_metric(name) {
+        format_bytes_f64(value)
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+fn is_bytes_metric(name: &str) -> bool {
+    name.contains("bytes")
+}
+
+fn is_duration_metric(name: &str) -> bool {
+    name.ends_with(".us") || name.ends_with("_us")
+}
+
+fn format_bytes_f64(bytes: f64) -> String {
+    if !bytes.is_finite() || bytes <= 0.0 {
+        return "0 B".to_string();
+    }
+
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+fn format_duration_compact(duration: Duration) -> String {
+    let secs = duration.as_secs_f64();
+    if secs >= 60.0 {
+        format_duration(duration)
+    } else if secs >= 1.0 {
+        format!("{secs:.2}s")
+    } else if secs >= 0.001 {
+        format!("{:.2}ms", secs * 1_000.0)
+    } else {
+        format!("{:.0}us", secs * 1_000_000.0)
+    }
+}
+
+fn paint(target: StreamTarget, code: &str, text: &str) -> String {
+    if stream_is_terminal(target) {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+fn stream_is_terminal(target: StreamTarget) -> bool {
+    match target {
+        StreamTarget::Stdout => io::stdout().is_terminal(),
+        StreamTarget::Stderr => io::stderr().is_terminal(),
     }
 }
 
