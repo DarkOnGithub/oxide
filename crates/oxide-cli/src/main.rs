@@ -873,9 +873,12 @@ fn print_telemetry_summary(snapshot: Option<&TelemetrySnapshot>) {
         ),
     );
 
-    let counters = telemetry_scalar_rows(&snapshot.counters);
-    let gauges = telemetry_scalar_rows(&snapshot.gauges);
-    let histograms = telemetry_histogram_rows(&snapshot.histograms);
+    let hotspot_rows = telemetry_hotspot_rows(snapshot);
+    print_metric_group("hotspots", &hotspot_rows);
+
+    let counters = telemetry_scalar_rows(&snapshot.counters, true);
+    let gauges = telemetry_scalar_rows(&snapshot.gauges, true);
+    let histograms = telemetry_histogram_rows(&snapshot.histograms, true);
 
     print_metric_group("counters", &counters);
     print_metric_group("gauges", &gauges);
@@ -924,31 +927,109 @@ fn print_metric_group(title: &str, rows: &[(String, String)]) {
     }
 }
 
-fn telemetry_scalar_rows(values: &BTreeMap<String, u64>) -> Vec<(String, String)> {
+fn telemetry_hotspot_rows(snapshot: &TelemetrySnapshot) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+
+    for (name, value) in &snapshot.counters {
+        if is_duration_metric(name) {
+            rows.push((
+                raw_telemetry_metric_label(name),
+                format_telemetry_scalar(name, *value),
+                *value as f64,
+            ));
+        }
+    }
+
+    for (name, value) in &snapshot.gauges {
+        if is_duration_metric(name) {
+            rows.push((
+                raw_telemetry_metric_label(name),
+                format_telemetry_scalar(name, *value),
+                *value as f64,
+            ));
+        }
+    }
+
+    for (name, histogram) in &snapshot.histograms {
+        if is_duration_metric(name) {
+            rows.push((
+                format!("{}.mean", raw_telemetry_metric_label(name)),
+                format_telemetry_mean(name, histogram.mean),
+                histogram.mean,
+            ));
+            rows.push((
+                format!("{}.max", raw_telemetry_metric_label(name)),
+                format_telemetry_scalar(name, histogram.max),
+                histogram.max as f64,
+            ));
+            rows.push((
+                format!("{}.total", raw_telemetry_metric_label(name)),
+                format_telemetry_scalar(name, histogram.total),
+                histogram.total as f64,
+            ));
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        right
+            .2
+            .total_cmp(&left.2)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    rows.truncate(12);
+    rows.into_iter()
+        .map(|(label, value, _)| (label, value))
+        .collect()
+}
+
+fn telemetry_scalar_rows(
+    values: &BTreeMap<String, u64>,
+    raw_labels: bool,
+) -> Vec<(String, String)> {
     values
         .iter()
         .map(|(name, value)| {
             (
-                telemetry_metric_label(name),
+                telemetry_metric_label(name, raw_labels),
                 format_telemetry_scalar(name, *value),
             )
         })
         .collect()
 }
 
-fn telemetry_histogram_rows(values: &BTreeMap<String, HistogramSnapshot>) -> Vec<(String, String)> {
-    values
-        .iter()
-        .map(|(name, histogram)| {
-            (
-                telemetry_metric_label(name),
-                format_histogram_summary(name, *histogram),
-            )
-        })
-        .collect()
+fn telemetry_histogram_rows(
+    values: &BTreeMap<String, HistogramSnapshot>,
+    raw_labels: bool,
+) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    for (name, histogram) in values {
+        let label = telemetry_metric_label(name, raw_labels);
+        rows.push((format!("{label}.count"), histogram.count.to_string()));
+        rows.push((
+            format!("{label}.total"),
+            format_telemetry_scalar(name, histogram.total),
+        ));
+        rows.push((
+            format!("{label}.mean"),
+            format_telemetry_mean(name, histogram.mean),
+        ));
+        rows.push((
+            format!("{label}.min"),
+            format_telemetry_scalar(name, histogram.min),
+        ));
+        rows.push((
+            format!("{label}.max"),
+            format_telemetry_scalar(name, histogram.max),
+        ));
+    }
+    rows
 }
 
-fn telemetry_metric_label(name: &str) -> String {
+fn telemetry_metric_label(name: &str, raw: bool) -> String {
+    if raw {
+        return raw_telemetry_metric_label(name);
+    }
+
     let trimmed = name.strip_prefix("oxide.").unwrap_or(name);
 
     if let Some(base) = trimmed.strip_suffix(".count") {
@@ -967,6 +1048,10 @@ fn telemetry_metric_label(name: &str) -> String {
     humanize_metric_name(trimmed)
 }
 
+fn raw_telemetry_metric_label(name: &str) -> String {
+    name.to_string()
+}
+
 fn humanize_metric_name(name: &str) -> String {
     name.replace('.', " ").replace('_', " ")
 }
@@ -979,16 +1064,6 @@ fn format_telemetry_scalar(name: &str, value: u64) -> String {
     } else {
         value.to_string()
     }
-}
-
-fn format_histogram_summary(name: &str, histogram: HistogramSnapshot) -> String {
-    format!(
-        "samples {} | mean {} | min {} | max {}",
-        histogram.count,
-        format_telemetry_mean(name, histogram.mean),
-        format_telemetry_scalar(name, histogram.min),
-        format_telemetry_scalar(name, histogram.max),
-    )
 }
 
 fn format_telemetry_mean(name: &str, value: f64) -> String {
