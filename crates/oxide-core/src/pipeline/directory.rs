@@ -540,7 +540,7 @@ fn decode_path(payload: &[u8], cursor: &mut usize) -> Result<String> {
     Ok(rel_path)
 }
 
-fn join_safe(root: &Path, rel_path: &str) -> Result<PathBuf> {
+pub(super) fn join_safe(root: &Path, rel_path: &str) -> Result<PathBuf> {
     let rel = Path::new(rel_path);
     if rel.is_absolute() {
         return Err(crate::OxideError::InvalidFormat(

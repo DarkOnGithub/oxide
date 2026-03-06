@@ -329,3 +329,5 @@ TSWLatexianTemp*
 .opencode/
 *.oxz
 dataset/
+datasets/
+temp/

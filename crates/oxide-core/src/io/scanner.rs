@@ -18,6 +18,7 @@ use symphonia::core::probe::Hint;
 
 use crate::format::FormatDetector;
 use crate::io::MmapInput;
+use crate::io::chunking::{ChunkingMode, ChunkingPolicy, find_content_defined_cut};
 use crate::preprocessing::{
     AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat,
     PreprocessingMetadata,
@@ -75,20 +76,28 @@ fn next_aligned_after(start: usize, alignment: usize) -> usize {
 ///
 #[derive(Debug, Clone)]
 pub struct InputScanner {
-    target_block_size: usize,
+    chunking_policy: ChunkingPolicy,
 }
 
 impl InputScanner {
     /// Creates a new scanner with a target block size.
     pub fn new(target_block_size: usize) -> Self {
-        Self {
-            target_block_size: target_block_size.max(1),
-        }
+        Self::with_chunking_policy(ChunkingPolicy::fixed(target_block_size))
+    }
+
+    /// Creates a new scanner with an explicit chunking policy.
+    pub fn with_chunking_policy(chunking_policy: ChunkingPolicy) -> Self {
+        Self { chunking_policy }
     }
 
     /// Returns configured target block size.
     pub fn target_block_size(&self) -> usize {
-        self.target_block_size
+        self.chunking_policy.target_size
+    }
+
+    /// Returns the configured chunking policy.
+    pub fn chunking_policy(&self) -> ChunkingPolicy {
+        self.chunking_policy
     }
 
     /// Scans a file into ordered batches.
@@ -182,8 +191,8 @@ impl InputScanner {
         let boundary_mode = scan_detection.boundary_mode;
         self.record_mode(boundary_mode);
 
-        let estimated_batches =
-            len.saturating_add(self.target_block_size - 1) / self.target_block_size;
+        let estimated_batches = len.saturating_add(self.chunking_policy.target_size - 1)
+            / self.chunking_policy.target_size;
         let mut batches = Vec::with_capacity(estimated_batches.max(1));
         let mut start = 0usize;
         let source_path = path.to_path_buf();
@@ -202,6 +211,8 @@ impl InputScanner {
                 data: batch_data,
                 file_type_hint: format,
                 preprocessing_metadata: scan_detection.preprocessing_metadata,
+                stream_id: 0,
+                compression_plan: crate::ChunkEncodingPlan::default(),
             });
             start = end;
             id += 1;
@@ -265,36 +276,87 @@ impl InputScanner {
             return len;
         }
 
-        let target = start.saturating_add(self.target_block_size).min(len);
+        let policy = self.chunking_policy;
+        let target = start.saturating_add(policy.target_size).min(len);
+        let min_cut = start.saturating_add(policy.min_size).min(len);
+        let max_cut = policy.upper_bound(start, len);
         match mode {
             BoundaryMode::TextNewline => {
-                if target >= len {
-                    len
-                } else {
-                    // Search ahead from target to keep chunks near target size while still
-                    // snapping text boundaries to line ends when possible.
-                    let search_end = target.saturating_add(self.target_block_size).min(len);
-                    if let Some(offset) = memchr(b'\n', &data[target..search_end]) {
-                        target + offset + 1
-                    } else {
-                        target
-                    }
-                }
+                self.find_text_boundary(data, start, min_cut, target, max_cut)
             }
             BoundaryMode::ImageRows { row_bytes } => {
-                self.find_aligned_boundary(start, target, len, *row_bytes)
+                self.find_aligned_boundary(start, min_cut, target, max_cut, len, *row_bytes)
             }
             BoundaryMode::AudioFrames { frame_bytes } => {
-                self.find_aligned_boundary(start, target, len, *frame_bytes)
+                self.find_aligned_boundary(start, min_cut, target, max_cut, len, *frame_bytes)
             }
-            BoundaryMode::Raw => target,
+            BoundaryMode::Raw => self.find_raw_boundary(data, start, min_cut, target, max_cut),
         }
+    }
+
+    fn find_text_boundary(
+        &self,
+        data: &[u8],
+        start: usize,
+        min_cut: usize,
+        target: usize,
+        max_cut: usize,
+    ) -> usize {
+        if target >= data.len() {
+            return data.len();
+        }
+
+        if let Some(offset) = memchr(b'\n', &data[target..max_cut]) {
+            let newline_cut = target + offset + 1;
+            if newline_cut >= min_cut {
+                return newline_cut;
+            }
+        }
+
+        if matches!(self.chunking_policy.mode, ChunkingMode::Adaptive) {
+            if let Some(cut) = find_content_defined_cut(
+                data,
+                start,
+                min_cut,
+                max_cut,
+                self.chunking_policy.cdc_mask,
+            ) {
+                return cut;
+            }
+        }
+
+        target.min(max_cut)
+    }
+
+    fn find_raw_boundary(
+        &self,
+        data: &[u8],
+        start: usize,
+        min_cut: usize,
+        target: usize,
+        max_cut: usize,
+    ) -> usize {
+        if matches!(self.chunking_policy.mode, ChunkingMode::Adaptive) {
+            if let Some(cut) = find_content_defined_cut(
+                data,
+                start,
+                min_cut,
+                max_cut,
+                self.chunking_policy.cdc_mask,
+            ) {
+                return cut;
+            }
+        }
+
+        target.min(max_cut)
     }
 
     fn find_aligned_boundary(
         &self,
         start: usize,
+        min_cut: usize,
         target: usize,
+        max_cut: usize,
         len: usize,
         alignment: usize,
     ) -> usize {
@@ -302,12 +364,29 @@ impl InputScanner {
             return target;
         }
 
-        let aligned = align_down(target, alignment);
-        if aligned > start {
+        if matches!(self.chunking_policy.mode, ChunkingMode::Fixed) {
+            let aligned = align_down(target, alignment);
+            if aligned > start {
+                return aligned;
+            }
+
+            let next = next_aligned_after(start, alignment).min(len);
+            if next > start {
+                return next;
+            }
+
+            return start.saturating_add(1).min(len);
+        }
+
+        let bounded_target = target.min(max_cut).min(len);
+        let aligned = align_down(bounded_target, alignment);
+        if aligned >= min_cut && aligned > start {
             return aligned;
         }
 
-        let next = next_aligned_after(start, alignment).min(len);
+        let next = next_aligned_after(bounded_target, alignment)
+            .min(max_cut)
+            .min(len);
         if next > start {
             next
         } else {

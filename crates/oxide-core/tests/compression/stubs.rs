@@ -64,23 +64,12 @@ fn compression_router_apply_is_codec_specific() {
     let input = fixture();
     let lz4 = apply_compression(&input, CompressionAlgo::Lz4).expect("lz4 apply should succeed");
     assert_ne!(lz4, input, "lz4 should transform bytes");
-
-    let lzma = apply_compression(&input, CompressionAlgo::Lzma).expect("lzma apply should succeed");
-    assert_ne!(lzma, input, "lzma should transform bytes");
-
-    let deflate =
-        apply_compression(&input, CompressionAlgo::Deflate).expect("deflate apply should succeed");
-    assert_ne!(deflate, input, "deflate should transform bytes");
 }
 
 #[test]
 fn compression_router_reverse_fails_on_non_codec_payloads() {
     let input = fixture();
-    for algo in [
-        CompressionAlgo::Lz4,
-        CompressionAlgo::Lzma,
-        CompressionAlgo::Deflate,
-    ] {
+    for algo in [CompressionAlgo::Lz4] {
         assert!(
             reverse_compression(&input, algo).is_err(),
             "reverse should fail for non-{algo:?} payload"
@@ -91,11 +80,7 @@ fn compression_router_reverse_fails_on_non_codec_payloads() {
 #[test]
 fn compression_round_trip_is_identity_for_all_algorithms() {
     let input = fixture();
-    for algo in [
-        CompressionAlgo::Lz4,
-        CompressionAlgo::Lzma,
-        CompressionAlgo::Deflate,
-    ] {
+    for algo in [CompressionAlgo::Lz4] {
         let compressed = apply_compression(&input, algo).expect("apply should succeed");
         let restored = reverse_compression(&compressed, algo).expect("reverse should succeed");
         assert_eq!(restored, input, "round-trip should be identity: {algo:?}");

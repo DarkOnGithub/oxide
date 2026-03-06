@@ -1107,14 +1107,7 @@ impl App {
                 }
             }
             ActiveField::Compression => {
-                self.compression = match (self.compression, direction >= 0) {
-                    (CompressionAlgo::Lz4, true) => CompressionAlgo::Lzma,
-                    (CompressionAlgo::Lz4, false) => CompressionAlgo::Deflate,
-                    (CompressionAlgo::Lzma, true) => CompressionAlgo::Deflate,
-                    (CompressionAlgo::Lzma, false) => CompressionAlgo::Lz4,
-                    (CompressionAlgo::Deflate, true) => CompressionAlgo::Lz4,
-                    (CompressionAlgo::Deflate, false) => CompressionAlgo::Lzma,
-                };
+                self.compression = CompressionAlgo::Lz4;
             }
             _ => {}
         }
