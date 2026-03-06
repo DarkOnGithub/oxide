@@ -16,4 +16,4 @@ pub use headers::{
 };
 pub use reader::{ArchiveReader, BlockIterator};
 pub use reorder::ReorderBuffer;
-pub use writer::ArchiveWriter;
+pub use writer::{ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter};

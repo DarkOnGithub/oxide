@@ -78,7 +78,7 @@ enum Commands {
         #[arg(long, default_value = "64M", value_parser = parse_size)]
         stream_read_buffer: usize,
 
-        /// Number of directory producer threads (currently supports 1..=2).
+        /// Total number of directory producer threads, including prefetch helpers.
         #[arg(long, default_value_t = 1)]
         producer_threads: usize,
 
@@ -236,7 +236,7 @@ fn archive_command(
 
     let buffer_pool = Arc::new(BufferPool::new(pool_capacity.max(1), pool_buffers.max(1)));
     let mut performance = PipelinePerformanceOptions::default();
-    let producer_threads = producer_threads.clamp(1, 2);
+    let producer_threads = producer_threads.max(1);
     let physical_cores = num_cpus::get_physical().max(1);
     let reserved_threads = producer_threads.saturating_add(1);
     let auto_workers = physical_cores.saturating_sub(reserved_threads).max(1);
@@ -289,7 +289,8 @@ fn archive_command(
         discovery_reported: false,
         interactive: interactive_progress,
     };
-    let run = pipeline.archive_path(&input, output_file, telemetry_options, Some(&mut sink))?;
+    let run =
+        pipeline.archive_path_seekable(&input, output_file, telemetry_options, Some(&mut sink))?;
 
     if interactive_progress && !sink.discovery_reported {
         eprintln!(

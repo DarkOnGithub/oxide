@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::CompressionPreset;
 use crate::buffer::BufferPool;
 use crate::types::CompressionAlgo;
+use crate::CompressionPreset;
 
 /// Indicates whether the archive source is a single file or a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ pub struct PipelinePerformanceOptions {
     pub preserve_directory_format_boundaries: bool,
     /// Timeout used when waiting for worker results.
     pub result_wait_timeout: Duration,
-    /// Number of directory producer threads (currently supports 1..=2).
+    /// Total number of directory producer threads, including prefetch helpers.
     pub producer_threads: usize,
     /// File-size threshold above which directory input uses mmap fast-path.
     pub directory_mmap_threshold_bytes: usize,
