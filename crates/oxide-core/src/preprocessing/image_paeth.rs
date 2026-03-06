@@ -1,5 +1,5 @@
 use crate::preprocessing::utils;
-use crate::{OxideError, Result};
+use crate::Result;
 
 /// Converts raw image bytes into RGB pixels for Paeth predictor processing.
 pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec<[u8; 3]>> {
@@ -7,7 +7,7 @@ pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec
 }
 
 /// Applies a Paeth row predictor filter.
-pub fn apply(data: &[u8], metadata: Option<&utils::ImageMetadata>) -> Result<Vec<u8>> {
+pub fn apply(data: &[u8], _metadata: Option<&utils::ImageMetadata>) -> Result<Vec<u8>> {
     Ok(data.to_vec())
 }
 
