@@ -1,0 +1,35 @@
+cargo run -p oxide-cli --release -- archive ./datasets \                                                                    18:40:53
+  -o ./output-lzma.oxz \
+  --compression lzma \
+  --block-size 16M \
+  --workers 10 \
+  --inflight-bytes 1G \
+  --stream-read-buffer 128M \
+  --producer-threads 2 \
+  --directory-mmap-threshold 16M \
+  --writer-queue-blocks 2048 \
+  --result-wait-ms 0
+
+cargo run -p oxide-cli --release -- archive ./datasets \
+  -o ./output-lz4.oxz \
+  --compression lz4 \
+  --block-size 2M \
+  --workers 10 \
+  --inflight-bytes 1G \
+  --stream-read-buffer 128M \
+  --producer-threads 2 \
+  --directory-mmap-threshold 16M \
+  --writer-queue-blocks 2048 \
+  --result-wait-ms 0
+
+cargo run -p oxide-cli --release -- archive ./datasets \
+  -o ./output-deflate.oxz \
+  --compression deflate \
+  --block-size 1M \
+  --workers 10 \
+  --inflight-bytes 1G \
+  --stream-read-buffer 128M \
+  --producer-threads 2 \
+  --directory-mmap-threshold 16M \
+  --writer-queue-blocks 2048 \
+  --result-wait-ms 2

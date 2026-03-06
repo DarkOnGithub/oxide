@@ -66,7 +66,7 @@ fn extract_path_report_includes_worker_and_main_thread_metrics()
     let file = write_fixture(&data)?;
 
     let pool = Arc::new(BufferPool::new(32 * 1024, 64));
-    let pipeline = build_pipeline(16 * 1024, 3, pool, CompressionAlgo::Deflate);
+    let pipeline = build_pipeline(16 * 1024, 3, pool, CompressionAlgo::Lz4);
     let archive = pipeline
         .archive_path(
             file.path(),

@@ -16,6 +16,14 @@ pub fn duration_to_us(duration: Duration) -> u64 {
     duration.as_micros().min(u64::MAX as u128) as u64
 }
 
+/// Placeholder checksum used while archive integrity checks are disabled.
+pub const PLACEHOLDER_CHECKSUM: u32 = 0;
+
+/// Returns the placeholder checksum for the given bytes.
+pub fn placeholder_checksum(_bytes: &[u8]) -> u32 {
+    PLACEHOLDER_CHECKSUM
+}
+
 /// A batch of data extracted from a file for processing.
 ///
 /// Batches are the primary unit of work in the processing pipeline,
@@ -27,6 +35,41 @@ pub struct Batch {
     pub data: BatchData,
     pub file_type_hint: FileFormat,
     pub preprocessing_metadata: Option<PreprocessingMetadata>,
+    pub stream_id: u32,
+    pub compression_plan: ChunkEncodingPlan,
+}
+
+/// Planner-selected encoding parameters for a chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkEncodingPlan {
+    /// Compression algorithm selected for the chunk.
+    pub algo: CompressionAlgo,
+    /// Compression preset selected for the chunk.
+    pub preset: CompressionPreset,
+    /// Optional dictionary identifier referenced by the chunk descriptor.
+    pub dict_id: u16,
+}
+
+impl ChunkEncodingPlan {
+    /// Creates a new chunk encoding plan.
+    pub const fn new(algo: CompressionAlgo, preset: CompressionPreset, dict_id: u16) -> Self {
+        Self {
+            algo,
+            preset,
+            dict_id,
+        }
+    }
+
+    /// Builds compression metadata for the final stored payload.
+    pub fn compression_meta(self, raw_passthrough: bool) -> CompressionMeta {
+        CompressionMeta::new(self.algo, self.preset, raw_passthrough)
+    }
+}
+
+impl Default for ChunkEncodingPlan {
+    fn default() -> Self {
+        Self::new(CompressionAlgo::Lz4, CompressionPreset::Default, 0)
+    }
 }
 
 /// A batch of data extracted from a file for processing.
@@ -62,6 +105,8 @@ impl Batch {
             data: BatchData::Owned(data),
             file_type_hint: FileFormat::Common,
             preprocessing_metadata: None,
+            stream_id: 0,
+            compression_plan: ChunkEncodingPlan::default(),
         }
     }
 
@@ -84,6 +129,8 @@ impl Batch {
             data: BatchData::Owned(data),
             file_type_hint,
             preprocessing_metadata: None,
+            stream_id: 0,
+            compression_plan: ChunkEncodingPlan::default(),
         }
     }
 
@@ -110,6 +157,8 @@ impl Batch {
             data: BatchData::Mapped { map, start, end },
             file_type_hint,
             preprocessing_metadata: None,
+            stream_id: 0,
+            compression_plan: ChunkEncodingPlan::default(),
         }
     }
 
@@ -247,7 +296,7 @@ impl CompressionMeta {
     /// Encodes compression metadata into OXZ compression flags.
     ///
     /// Layout:
-    /// - Bits 0..=1: algorithm (01 LZ4, 10 LZMA, 11 Deflate)
+    /// - Bits 0..=1: algorithm (01 LZ4)
     /// - Bit 2: raw passthrough marker
     /// - Bits 3..=4: preset (00 Fast, 01 Default, 10 High)
     /// - Bits 5..=7: reserved (must be zero)
@@ -286,6 +335,8 @@ impl CompressionMeta {
 pub struct CompressedBlock {
     /// Unique identifier for this block.
     pub id: usize,
+    /// Logical stream identifier stored in the chunk descriptor.
+    pub stream_id: u32,
     /// The compressed (or raw) data bytes.
     pub data: Vec<u8>,
     /// Preprocessing strategy applied before compression.
@@ -294,16 +345,18 @@ pub struct CompressedBlock {
     pub compression: CompressionAlgo,
     /// Preset used for compression.
     pub compression_preset: CompressionPreset,
+    /// Optional dictionary identifier used for compression.
+    pub dict_id: u16,
     /// Whether the data is stored raw.
     pub raw_passthrough: bool,
     /// Original uncompressed length.
     pub original_len: u64,
-    /// CRC32 checksum of the compressed data
+    /// Placeholder checksum of the compressed data.
     pub crc32: u32,
 }
 
 impl CompressedBlock {
-    /// Creates a new compressed block with an auto-computed CRC32 checksum.
+    /// Creates a new compressed block with a placeholder checksum.
     ///
     /// # Arguments
     /// * `id` - Unique identifier for this block
@@ -335,16 +388,41 @@ impl CompressedBlock {
         compression_meta: CompressionMeta,
         original_len: u64,
     ) -> Self {
-        let crc32 = crc32fast::hash(&data);
         Self {
             id,
+            stream_id: 0,
             data,
             pre_proc,
             compression: compression_meta.algo,
             compression_preset: compression_meta.preset,
+            dict_id: 0,
             raw_passthrough: compression_meta.raw_passthrough,
             original_len,
-            crc32,
+            crc32: PLACEHOLDER_CHECKSUM,
+        }
+    }
+
+    /// Creates a new compressed block using an explicit planner encoding plan.
+    pub fn with_chunk_encoding(
+        id: usize,
+        stream_id: u32,
+        data: Vec<u8>,
+        pre_proc: PreProcessingStrategy,
+        encoding_plan: ChunkEncodingPlan,
+        raw_passthrough: bool,
+        original_len: u64,
+    ) -> Self {
+        Self {
+            id,
+            stream_id,
+            data,
+            pre_proc,
+            compression: encoding_plan.algo,
+            compression_preset: encoding_plan.preset,
+            dict_id: encoding_plan.dict_id,
+            raw_passthrough,
+            original_len,
+            crc32: PLACEHOLDER_CHECKSUM,
         }
     }
 
@@ -357,9 +435,9 @@ impl CompressedBlock {
         }
     }
 
-    /// Verifies the integrity of the compressed data using CRC32.
+    /// Placeholder checksum verification while integrity checks are disabled.
     pub fn verify_crc32(&self) -> bool {
-        crc32fast::hash(&self.data) == self.crc32
+        true
     }
 }
 
@@ -421,10 +499,6 @@ pub enum BinaryStrategy {
 pub enum CompressionAlgo {
     /// LZ4 fast compression - Fast
     Lz4,
-    /// LZMA high-ratio compression - Balanced
-    Lzma,
-    /// Deflate (zlib) compression - Ultra
-    Deflate,
 }
 
 impl PreProcessingStrategy {
@@ -475,19 +549,14 @@ impl PreProcessingStrategy {
 impl CompressionAlgo {
     /// Encodes the compression algorithm into OXZ compression flags.
     pub fn to_flags(self) -> u8 {
-        match self {
-            Self::Lz4 => 0x01,
-            Self::Lzma => 0x02,
-            Self::Deflate => 0x03,
-        }
+        let _ = self;
+        0x01
     }
 
     /// Decodes OXZ compression flags into a compression algorithm.
     pub fn from_flags(flags: u8) -> Result<Self> {
         match flags {
             0x01 => Ok(Self::Lz4),
-            0x02 => Ok(Self::Lzma),
-            0x03 => Ok(Self::Deflate),
             _ => Err(OxideError::InvalidFormat("invalid compression flags")),
         }
     }

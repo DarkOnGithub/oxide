@@ -1,8 +1,12 @@
-use core::fmt;
 use core::mem::size_of;
 use core::ptr;
 
-use crate::{OxideError, Result};
+use crate::{CompressionPreset, OxideError, Result};
+
+#[path = "lz4/copy.rs"]
+mod copy;
+#[path = "lz4/decode.rs"]
+mod decode;
 
 const MIN_MATCH: usize = 4;
 const LAST_LITERALS: usize = 5;
@@ -11,13 +15,54 @@ const HASH_LOG: u32 = 12;
 const HASH_SIZE: usize = 1 << HASH_LOG;
 const HASH_SEED: u32 = 2_654_435_761;
 const MAX_OFFSET: usize = u16::MAX as usize;
-const SKIP_STRENGTH: usize = 6;
+const MAX_DICTIONARY_BYTES: usize = MAX_OFFSET;
+
+#[derive(Debug, Default)]
+pub(crate) struct Lz4Scratch {
+    table: Vec<u32>,
+    history: Vec<u8>,
+}
+
+impl Lz4Scratch {
+    fn prepare_table(table: &mut Vec<u32>) {
+        if table.len() != HASH_SIZE {
+            table.resize(HASH_SIZE, 0);
+        }
+        table.fill(0);
+    }
+
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.table.capacity().saturating_mul(size_of::<u32>()) + self.history.capacity()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompressionTuning {
+    skip_strength: usize,
+}
+
+impl CompressionTuning {
+    fn for_preset(preset: CompressionPreset) -> Self {
+        match preset {
+            CompressionPreset::Fast => Self { skip_strength: 8 },
+            CompressionPreset::Default => Self { skip_strength: 6 },
+            CompressionPreset::High => Self { skip_strength: 4 },
+        }
+    }
+}
 
 /// Compresses data using the LZ4 algorithm.
-///
-/// Returns a byte vector starting with a 4-byte little-endian original size
-/// followed by the LZ4 block.
 pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
+    let mut scratch = Lz4Scratch::default();
+    apply_with_scratch(data, CompressionPreset::Default, None, &mut scratch)
+}
+
+pub(crate) fn apply_with_scratch(
+    data: &[u8],
+    preset: CompressionPreset,
+    dictionary: Option<&[u8]>,
+    scratch: &mut Lz4Scratch,
+) -> Result<Vec<u8>> {
     if data.len() > u32::MAX as usize {
         return Err(OxideError::CompressionError(
             "lz4 input exceeds 32-bit size prefix".to_string(),
@@ -26,14 +71,34 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
 
     let mut output = Vec::with_capacity(4 + max_compressed_size(data.len()));
     output.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    compress_block(data, &mut output);
+
+    let tuning = CompressionTuning::for_preset(preset);
+    let dictionary = dictionary.filter(|dictionary| !dictionary.is_empty());
+    if let Some(dictionary) = dictionary {
+        let prefix = trim_dictionary(dictionary);
+        scratch.history.clear();
+        scratch
+            .history
+            .reserve(prefix.len().saturating_add(data.len()));
+        scratch.history.extend_from_slice(prefix);
+        scratch.history.extend_from_slice(data);
+        let history = scratch.history.as_slice();
+        let table = &mut scratch.table;
+        compress_block(history, prefix.len(), &mut output, table, tuning);
+    } else {
+        let table = &mut scratch.table;
+        compress_block(data, 0, &mut output, table, tuning);
+    }
+
     Ok(output)
 }
 
 /// Decompresses data using the LZ4 algorithm.
-///
-/// Expects a 4-byte little-endian size prefix followed by the LZ4 block.
 pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
+    reverse_with_dictionary(data, None)
+}
+
+pub(crate) fn reverse_with_dictionary(data: &[u8], dictionary: Option<&[u8]>) -> Result<Vec<u8>> {
     if data.len() < 4 {
         return Err(OxideError::DecompressionError(
             "lz4 decode failed: missing 4-byte size prefix".to_string(),
@@ -41,7 +106,7 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
     }
 
     let expected_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    decompress_block(&data[4..], expected_size)
+    decode::decompress_block(&data[4..], expected_size, dictionary)
         .map_err(|err| OxideError::DecompressionError(format!("lz4 decode failed: {err}")))
 }
 
@@ -50,21 +115,29 @@ fn max_compressed_size(input_len: usize) -> usize {
     input_len + (input_len / 255) + 16
 }
 
-fn compress_block(input: &[u8], output: &mut Vec<u8>) {
-    if input.len() < MFLIMIT + 1 {
-        emit_last_literals(output, input, 0);
+fn compress_block(
+    history: &[u8],
+    input_start: usize,
+    output: &mut Vec<u8>,
+    table: &mut Vec<u32>,
+    tuning: CompressionTuning,
+) {
+    let input_len = history.len().saturating_sub(input_start);
+    if input_len < MFLIMIT + 1 {
+        emit_last_literals(output, history, input_start);
         return;
     }
 
-    let mut table = [0u32; HASH_SIZE];
-    let mut anchor = 0usize;
-    let mut search_pos = 1usize;
-    let mflimit = input.len() - MFLIMIT;
-    let match_limit = input.len() - LAST_LITERALS;
+    Lz4Scratch::prepare_table(table);
+    seed_dictionary_table(history, input_start, table);
+    let mut anchor = input_start;
+    let mut search_pos = input_start + 1;
+    let mflimit = history.len() - MFLIMIT;
+    let match_limit = history.len() - LAST_LITERALS;
 
     'main: while search_pos <= mflimit {
         let mut current = search_pos;
-        let mut search_match_nb = 1usize << SKIP_STRENGTH;
+        let mut search_match_nb = 1usize << tuning.skip_strength;
 
         loop {
             if current > mflimit {
@@ -72,8 +145,8 @@ fn compress_block(input: &[u8], output: &mut Vec<u8>) {
             }
 
             let current_ptr = unsafe {
-                // SAFETY: current <= mflimit means current + 4 <= input.len().
-                input.as_ptr().add(current)
+                // SAFETY: current <= mflimit means current + 4 <= history.len().
+                history.as_ptr().add(current)
             };
             let sequence = unsafe {
                 // SAFETY: current_ptr points to at least 4 readable bytes.
@@ -90,8 +163,8 @@ fn compress_block(input: &[u8], output: &mut Vec<u8>) {
 
                 if offset <= MAX_OFFSET {
                     let candidate_ptr = unsafe {
-                        // SAFETY: candidate came from earlier valid positions hashed with >=4 bytes.
-                        input.as_ptr().add(candidate)
+                        // SAFETY: candidate came from a previously inserted position.
+                        history.as_ptr().add(candidate)
                     };
                     let candidate_seq = unsafe {
                         // SAFETY: candidate_ptr points to at least 4 readable bytes.
@@ -101,7 +174,7 @@ fn compress_block(input: &[u8], output: &mut Vec<u8>) {
                     if sequence == candidate_seq {
                         while current > anchor
                             && candidate > 0
-                            && input[current - 1] == input[candidate - 1]
+                            && history[current - 1] == history[candidate - 1]
                         {
                             current -= 1;
                             candidate -= 1;
@@ -111,10 +184,10 @@ fn compress_block(input: &[u8], output: &mut Vec<u8>) {
                         let mut match_end = current + MIN_MATCH;
                         let candidate_end = candidate + MIN_MATCH;
                         match_end +=
-                            count_match_bytes(input, match_end, candidate_end, match_limit);
+                            count_match_bytes(history, match_end, candidate_end, match_limit);
 
                         let match_len = match_end - current;
-                        emit_sequence(output, input, anchor, literal_len, offset, match_len);
+                        emit_sequence(output, history, anchor, literal_len, offset, match_len);
 
                         anchor = match_end;
                         if anchor > mflimit {
@@ -124,8 +197,8 @@ fn compress_block(input: &[u8], output: &mut Vec<u8>) {
                         let insert_pos = anchor.saturating_sub(2);
                         if insert_pos <= mflimit {
                             let hash = hash_sequence(unsafe {
-                                // SAFETY: insert_pos <= mflimit means insert_pos + 4 <= input.len().
-                                load_u32(input.as_ptr().add(insert_pos))
+                                // SAFETY: insert_pos <= mflimit means insert_pos + 4 <= history.len().
+                                load_u32(history.as_ptr().add(insert_pos))
                             });
                             table[hash] = (insert_pos as u32) + 1;
                         }
@@ -136,12 +209,36 @@ fn compress_block(input: &[u8], output: &mut Vec<u8>) {
                 }
             }
 
-            current += search_match_nb >> SKIP_STRENGTH;
+            current += search_match_nb >> tuning.skip_strength;
             search_match_nb += 1;
         }
     }
 
-    emit_last_literals(output, input, anchor);
+    emit_last_literals(output, history, anchor);
+}
+
+fn seed_dictionary_table(history: &[u8], input_start: usize, table: &mut [u32]) {
+    if input_start == 0 {
+        return;
+    }
+
+    let seed_start = input_start.saturating_sub(MAX_OFFSET);
+    let seed_end = input_start.saturating_sub(MIN_MATCH - 1);
+    for position in seed_start..seed_end {
+        let hash = hash_sequence(unsafe {
+            // SAFETY: seed_end is capped so position + 4 <= history.len().
+            load_u32(history.as_ptr().add(position))
+        });
+        table[hash] = (position as u32) + 1;
+    }
+}
+
+fn trim_dictionary(dictionary: &[u8]) -> &[u8] {
+    if dictionary.len() > MAX_DICTIONARY_BYTES {
+        &dictionary[dictionary.len() - MAX_DICTIONARY_BYTES..]
+    } else {
+        dictionary
+    }
 }
 
 #[inline]
@@ -311,201 +408,4 @@ unsafe fn load_u32(ptr: *const u8) -> u32 {
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn load_usize(ptr: *const u8) -> usize {
     ptr::read_unaligned(ptr as *const usize)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DecodeError {
-    ExpectedAnotherByte,
-    LiteralOutOfBounds,
-    OffsetOutOfBounds,
-    OutputTooSmall { expected: usize, actual: usize },
-    LengthOverflow,
-    DecodedSizeMismatch { expected: usize, actual: usize },
-}
-
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ExpectedAnotherByte => f.write_str("expected another byte, found none"),
-            Self::LiteralOutOfBounds => f.write_str("literal is out of bounds of the input"),
-            Self::OffsetOutOfBounds => {
-                f.write_str("the offset to copy is not contained in the decompressed buffer")
-            }
-            Self::OutputTooSmall { expected, actual } => {
-                write!(
-                    f,
-                    "provided output is too small for the decompressed data, actual {actual}, expected {expected}"
-                )
-            }
-            Self::LengthOverflow => f.write_str("decoded length overflows platform usize"),
-            Self::DecodedSizeMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "decoded size mismatch, expected {expected} bytes, got {actual}"
-                )
-            }
-        }
-    }
-}
-
-fn decompress_block(
-    input: &[u8],
-    expected_size: usize,
-) -> core::result::Result<Vec<u8>, DecodeError> {
-    if input.is_empty() {
-        return Err(DecodeError::ExpectedAnotherByte);
-    }
-
-    let mut output: Vec<u8> = Vec::with_capacity(expected_size);
-    unsafe {
-        // SAFETY: we only read from already-decoded regions and fully validate writes before copying.
-        output.set_len(expected_size);
-    }
-
-    let mut input_pos = 0usize;
-    let mut output_pos = 0usize;
-    let input_ptr = input.as_ptr();
-    let output_ptr = output.as_mut_ptr();
-
-    while input_pos < input.len() {
-        let token = input[input_pos];
-        input_pos += 1;
-
-        let mut literal_len = (token >> 4) as usize;
-        if literal_len == 15 {
-            literal_len = literal_len
-                .checked_add(read_length(input, &mut input_pos)?)
-                .ok_or(DecodeError::LengthOverflow)?;
-        }
-
-        if input_pos
-            .checked_add(literal_len)
-            .is_none_or(|end| end > input.len())
-        {
-            return Err(DecodeError::LiteralOutOfBounds);
-        }
-
-        if output_pos
-            .checked_add(literal_len)
-            .is_none_or(|end| end > expected_size)
-        {
-            return Err(DecodeError::OutputTooSmall {
-                expected: output_pos.saturating_add(literal_len),
-                actual: expected_size,
-            });
-        }
-
-        unsafe {
-            // SAFETY: both ranges were bounds-checked above and do not overlap.
-            ptr::copy_nonoverlapping(
-                input_ptr.add(input_pos),
-                output_ptr.add(output_pos),
-                literal_len,
-            );
-        }
-
-        input_pos += literal_len;
-        output_pos += literal_len;
-
-        if input_pos == input.len() {
-            return if output_pos == expected_size {
-                Ok(output)
-            } else {
-                Err(DecodeError::DecodedSizeMismatch {
-                    expected: expected_size,
-                    actual: output_pos,
-                })
-            };
-        }
-
-        if input_pos + 2 > input.len() {
-            return Err(DecodeError::ExpectedAnotherByte);
-        }
-
-        let offset = u16::from_le_bytes([input[input_pos], input[input_pos + 1]]) as usize;
-        input_pos += 2;
-
-        if offset == 0 || offset > output_pos {
-            return Err(DecodeError::OffsetOutOfBounds);
-        }
-
-        let mut match_len = (token as usize & 0x0F) + MIN_MATCH;
-        if (token & 0x0F) == 0x0F {
-            match_len = match_len
-                .checked_add(read_length(input, &mut input_pos)?)
-                .ok_or(DecodeError::LengthOverflow)?;
-        }
-
-        if output_pos
-            .checked_add(match_len)
-            .is_none_or(|end| end > expected_size)
-        {
-            return Err(DecodeError::OutputTooSmall {
-                expected: output_pos.saturating_add(match_len),
-                actual: expected_size,
-            });
-        }
-
-        unsafe {
-            // SAFETY: offset is validated against output_pos, and destination is within output.
-            copy_match(output_ptr.add(output_pos), offset, match_len);
-        }
-
-        output_pos += match_len;
-    }
-
-    if output_pos != expected_size {
-        return Err(DecodeError::DecodedSizeMismatch {
-            expected: expected_size,
-            actual: output_pos,
-        });
-    }
-
-    Ok(output)
-}
-
-#[inline]
-fn read_length(input: &[u8], input_pos: &mut usize) -> core::result::Result<usize, DecodeError> {
-    let mut len = 0usize;
-
-    loop {
-        let byte = *input
-            .get(*input_pos)
-            .ok_or(DecodeError::ExpectedAnotherByte)?;
-        *input_pos += 1;
-
-        len = len
-            .checked_add(byte as usize)
-            .ok_or(DecodeError::LengthOverflow)?;
-
-        if byte != 255 {
-            return Ok(len);
-        }
-    }
-}
-
-#[inline]
-#[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn copy_match(dst: *mut u8, offset: usize, len: usize) {
-    let src = dst.sub(offset);
-
-    if offset == 1 {
-        // RLE fast path, common for long runs.
-        let value = src.read();
-        ptr::write_bytes(dst, value, len);
-        return;
-    }
-
-    if offset >= len {
-        ptr::copy_nonoverlapping(src, dst, len);
-        return;
-    }
-
-    let mut copied = 0usize;
-    while copied < len {
-        let chunk = (len - copied).min(offset);
-        let from = dst.add(copied).sub(offset);
-        ptr::copy_nonoverlapping(from, dst.add(copied), chunk);
-        copied += chunk;
-    }
 }

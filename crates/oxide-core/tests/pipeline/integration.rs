@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader, BufferPool,
-    CompressionAlgo, ExtractProgressEvent, PreProcessingStrategy, ReportValue, RunTelemetryOptions,
-    TelemetryEvent, TelemetrySink,
+    CompressionAlgo, ExtractProgressEvent, FOOTER_SIZE, GLOBAL_HEADER_SIZE, PreProcessingStrategy,
+    ReportValue, RunTelemetryOptions, SECTION_TABLE_ENTRY_SIZE, TelemetryEvent, TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -146,8 +146,8 @@ fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller()
         let compression = header.compression_meta()?;
         if compression.raw_passthrough {
             raw_blocks += 1;
-            assert_eq!(header.compressed_size, header.original_size);
-            assert_eq!(payload.len(), header.original_size as usize);
+            assert_eq!(header.encoded_len, header.raw_len);
+            assert_eq!(payload.len(), header.raw_len as usize);
         }
     }
     assert!(raw_blocks > 0);
@@ -164,7 +164,7 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 64));
-    let pipeline = build_pipeline(8 * 1024, 4, buffer_pool, CompressionAlgo::Deflate);
+    let pipeline = build_pipeline(8 * 1024, 4, buffer_pool, CompressionAlgo::Lz4);
     let archive = pipeline
         .archive_file(
             file.path(),
@@ -177,8 +177,8 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     for (expected, block) in reader.iter_blocks().enumerate() {
         let (header, payload) = block?;
-        assert_eq!(header.block_id, expected as u64);
-        assert_eq!(payload.len(), header.compressed_size as usize);
+        assert_eq!(header.chunk_id, expected as u64);
+        assert_eq!(payload.len(), header.encoded_len as usize);
     }
 
     Ok(())
@@ -206,7 +206,7 @@ fn pipeline_records_preprocessing_strategy_in_block_headers()
 
     assert_eq!(header.strategy()?, PreProcessingStrategy::None);
     assert_eq!(header.compression()?, CompressionAlgo::Lz4);
-    assert_eq!(payload.len(), header.compressed_size as usize);
+    assert_eq!(payload.len(), header.encoded_len as usize);
 
     Ok(())
 }
@@ -221,7 +221,7 @@ fn pipeline_reaches_buffer_pool_steady_state() -> Result<(), Box<dyn std::error:
         512 * 1024,
         1,
         Arc::clone(&buffer_pool),
-        CompressionAlgo::Lzma,
+        CompressionAlgo::Lz4,
     );
 
     let _archive = pipeline.archive_file(
@@ -253,15 +253,11 @@ fn directory_archive_roundtrip_restores_tree() -> Result<(), Box<dyn std::error:
     write_directory_file(&source, "top.txt", b"top-level")?;
     write_directory_file(&source, "nested/a.bin", &[1, 2, 3, 4, 5])?;
     write_directory_file(&source, "nested/deeper/b.txt", b"deep-content")?;
+    write_directory_file(&source, "nested/empty.bin", b"")?;
     std::fs::create_dir_all(source.path().join("empty/leaf"))?;
 
     let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 128));
-    let pipeline = build_pipeline(
-        16 * 1024,
-        4,
-        Arc::clone(&buffer_pool),
-        CompressionAlgo::Deflate,
-    );
+    let pipeline = build_pipeline(16 * 1024, 4, Arc::clone(&buffer_pool), CompressionAlgo::Lz4);
 
     let archive = pipeline
         .archive_directory(
@@ -289,6 +285,10 @@ fn directory_archive_roundtrip_restores_tree() -> Result<(), Box<dyn std::error:
     assert_eq!(
         std::fs::read(out.path().join("nested/deeper/b.txt"))?,
         b"deep-content"
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("nested/empty.bin"))?,
+        Vec::<u8>::new()
     );
     assert!(out.path().join("empty/leaf").is_dir());
 
@@ -344,7 +344,7 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
         )?
         .writer;
     let reader = ArchiveReader::new(Cursor::new(archive))?;
-    assert_eq!(reader.global_header().flags & 1, 1);
+    assert_eq!(u32::from(reader.global_header().feature_bits) & 1, 1);
     Ok(())
 }
 
@@ -390,7 +390,7 @@ fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
-    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Deflate);
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
 
     let archive = pipeline
         .archive_path(
@@ -411,6 +411,19 @@ fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>
 
     assert_eq!(report.source_kind, oxide_core::ArchiveSourceKind::File);
     assert_eq!(std::fs::read(out_file)?, data);
+    assert!(matches!(
+        report.extensions.get("pipeline.decode_task_queue_capacity"),
+        Some(ReportValue::U64(value)) if *value > 0
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.decode_result_queue_peak"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.reorder_pending_limit"),
+        Some(ReportValue::U64(value)) if *value > 0
+    ));
+    assert!(report.main_thread.stage_us.contains_key("ordered_write"));
     Ok(())
 }
 
@@ -444,6 +457,66 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
         std::fs::read(out_dir.join("nested/data.bin"))?,
         vec![9, 8, 7]
     );
+    assert!(matches!(
+        report.extensions.get("extract.directory_entries"),
+        Some(ReportValue::U64(2))
+    ));
+    assert!(report.main_thread.stage_us.contains_key("directory_decode"));
+    assert!(report.main_thread.stage_us.contains_key("output_write"));
+    Ok(())
+}
+
+#[test]
+fn extract_archive_ignores_footer_crc_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(96 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let mut archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let footer_crc_offset = archive.len() - FOOTER_SIZE + 4;
+    archive[footer_crc_offset] ^= 0x5A;
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, data);
+
+    Ok(())
+}
+
+#[test]
+fn extract_archive_ignores_payload_checksum_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(96 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let mut archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let payload_entry_index = 5usize;
+    let payload_checksum_offset =
+        GLOBAL_HEADER_SIZE + (payload_entry_index * SECTION_TABLE_ENTRY_SIZE) + 20;
+    archive[payload_checksum_offset] ^= 0xA5;
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, data);
+
     Ok(())
 }
 
@@ -453,7 +526,7 @@ fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn st
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 64));
-    let pipeline = build_pipeline(16 * 1024, 4, buffer_pool, CompressionAlgo::Deflate);
+    let pipeline = build_pipeline(16 * 1024, 4, buffer_pool, CompressionAlgo::Lz4);
     let mut sink = CollectProgress::default();
 
     let run = pipeline.archive_path(
@@ -537,6 +610,22 @@ fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn st
     assert!(matches!(
         report.extensions.get("archive.output_input_ratio"),
         Some(ReportValue::F64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("planner.mode"),
+        Some(ReportValue::Text(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("planner.chunking_mode"),
+        Some(ReportValue::Text(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("planner.dictionary_count"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("planner.dictionary_bytes"),
+        Some(ReportValue::U64(_))
     ));
 
     let (restored, _) = pipeline.extract_archive(

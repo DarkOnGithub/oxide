@@ -7,7 +7,7 @@
 //! ## Key Components
 //!
 //! - **Pipeline**: Orchestrates the scanning, processing, and writing of archives.
-//! - **Compression**: Implementation of various compression algorithms (LZ4, LZMA, Deflate).
+//! - **Compression**: LZ4 codec implementation and dispatch.
 //! - **Preprocessing**: Format-aware data transformations to improve compression ratios.
 //! - **IO**: Efficient I/O operations, including memory-mapped files and smart scanners.
 //! - **Telemetry**: Comprehensive instrumentation for monitoring and profiling.
@@ -27,15 +27,16 @@ pub use buffer::{BufferPool, PoolMetricsSnapshot, PooledBuffer};
 pub use compression::{apply_compression, reverse_compression};
 pub use core::{
     PoolRuntimeSnapshot, WorkStealingQueue, WorkStealingWorker, WorkerPool, WorkerPoolHandle,
-    WorkerRuntimeSnapshot,
+    WorkerRuntimeSnapshot, WorkerScratchArena,
 };
 pub use error::OxideError;
 pub use format::{
-    ArchiveReader, ArchiveWriter, BLOCK_HEADER_SIZE, BlockHeader, BlockIterator,
-    DEFAULT_REORDER_PENDING_LIMIT, FOOTER_SIZE, Footer, FormatDetector, GLOBAL_HEADER_SIZE,
-    GlobalHeader, OXZ_MAGIC, OXZ_VERSION, ReorderBuffer,
+    ArchiveReader, ArchiveWriter, BlockHeader, BlockIterator, CHUNK_DESCRIPTOR_SIZE,
+    CORE_SECTION_COUNT, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT, FEATURE_DEDUP_REFERENCES,
+    FOOTER_SIZE, Footer, FormatDetector, GLOBAL_HEADER_SIZE, GlobalHeader, OXZ_MAGIC, OXZ_VERSION,
+    ReorderBuffer, SECTION_TABLE_ENTRY_SIZE, SectionTableEntry, SectionType, StoredDictionary,
 };
-pub use io::{BoundaryMode, InputScanner, MmapInput};
+pub use io::{BoundaryMode, ChunkingMode, ChunkingPolicy, InputScanner, MmapInput};
 pub use pipeline::{
     ArchivePipeline, ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions,
 };
@@ -51,7 +52,7 @@ pub use telemetry::{
     TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
 };
 pub use types::{
-    AudioStrategy, Batch, BatchData, BinaryStrategy, CompressedBlock, CompressionAlgo,
-    CompressionMeta, CompressionPreset, FileFormat, ImageStrategy, PreProcessingStrategy, Result,
-    TextStrategy,
+    AudioStrategy, Batch, BatchData, BinaryStrategy, ChunkEncodingPlan, CompressedBlock,
+    CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat, ImageStrategy,
+    PreProcessingStrategy, Result, TextStrategy,
 };

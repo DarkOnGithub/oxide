@@ -8,9 +8,30 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 
 use crate::OxideError;
 use crate::buffer::BufferPool;
+use crate::compression::CompressionScratchArena;
 use crate::core::work_stealing::{WorkStealingQueue, WorkStealingWorker};
 use crate::telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 use crate::types::{Batch, CompressedBlock, CompressionAlgo, Result};
+
+/// Worker-local reusable scratch allocations.
+#[derive(Debug, Default)]
+pub struct WorkerScratchArena {
+    compression: CompressionScratchArena,
+}
+
+impl WorkerScratchArena {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn compression(&mut self) -> &mut CompressionScratchArena {
+        &mut self.compression
+    }
+
+    pub fn allocated_bytes(&self) -> usize {
+        self.compression.allocated_bytes()
+    }
+}
 
 /// Parallel worker pool backed by a work-stealing queue.
 pub struct WorkerPool {
@@ -61,7 +82,13 @@ impl WorkerPool {
     /// Spawns worker threads and returns a handle for submission and collection.
     pub fn spawn<F>(&self, processor: F) -> WorkerPoolHandle
     where
-        F: Fn(usize, Batch, &BufferPool, CompressionAlgo) -> Result<CompressedBlock>
+        F: Fn(
+                usize,
+                Batch,
+                &BufferPool,
+                CompressionAlgo,
+                &mut WorkerScratchArena,
+            ) -> Result<CompressedBlock>
             + Send
             + Sync
             + 'static,
@@ -364,12 +391,24 @@ fn run_worker_loop<F>(
     processor: Arc<F>,
     results_tx: Sender<Result<CompressedBlock>>,
 ) where
-    F: Fn(usize, Batch, &BufferPool, CompressionAlgo) -> Result<CompressedBlock> + Send + Sync,
+    F: Fn(
+            usize,
+            Batch,
+            &BufferPool,
+            CompressionAlgo,
+            &mut WorkerScratchArena,
+        ) -> Result<CompressedBlock>
+        + Send
+        + Sync,
 {
     let worker_started_us = state.started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
     state.worker_started_offsets_us[worker.id()]
         .store(worker_started_us.saturating_add(1), Ordering::Release);
     let mut idle_wait = IDLE_WAIT_MIN;
+    let mut scratch = WorkerScratchArena::new();
+    state
+        .telemetry
+        .on_worker_scratch_ready(worker.id(), scratch.allocated_bytes());
 
     loop {
         if let Some(batch) = worker.steal() {
@@ -386,6 +425,7 @@ fn run_worker_loop<F>(
                     batch,
                     &state.buffer_pool,
                     state.compression_algo,
+                    &mut scratch,
                 )
             })) {
                 Ok(result) => result,
@@ -393,6 +433,10 @@ fn run_worker_loop<F>(
                     "worker task panicked while processing batch".to_string(),
                 )),
             };
+
+            state
+                .telemetry
+                .on_worker_scratch_sample(worker.id(), scratch.allocated_bytes());
 
             let elapsed = started_at.elapsed();
             let elapsed_us = elapsed.as_micros().min(u64::MAX as u128) as u64;
