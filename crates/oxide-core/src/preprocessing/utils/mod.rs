@@ -471,5 +471,3 @@ fn sign_extend_24(value: i32) -> i32 {
         value
     }
 }
-
-

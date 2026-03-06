@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use oxide_core::telemetry::tags;
 use oxide_core::{
     ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReport, ArchiveSourceKind,
-    BufferPool, CompressionAlgo, ExtractReport, PipelinePerformanceOptions, ReportValue,
-    RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
+    BufferPool, CompressionAlgo, CompressionPreset, ExtractReport, PipelinePerformanceOptions,
+    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
 };
 
 #[derive(Parser)]
@@ -47,6 +47,10 @@ enum Commands {
         /// Compression mode metadata to store.
         #[arg(long, value_enum, default_value_t = CompressionArg::Lz4)]
         compression: CompressionArg,
+
+        /// Planner mode controlling adaptive chunking and per-chunk preset selection.
+        #[arg(long, value_enum, default_value_t = PlannerModeArg::Fast)]
+        planner_mode: PlannerModeArg,
 
         /// Enable block-size autotuning for large inputs.
         #[arg(long, default_value_t = false)]
@@ -119,10 +123,27 @@ enum CompressionArg {
     Lz4,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PlannerModeArg {
+    Fast,
+    Balanced,
+    MaxRatio,
+}
+
 impl From<CompressionArg> for CompressionAlgo {
     fn from(value: CompressionArg) -> Self {
         match value {
             CompressionArg::Lz4 => CompressionAlgo::Lz4,
+        }
+    }
+}
+
+impl From<PlannerModeArg> for CompressionPreset {
+    fn from(value: PlannerModeArg) -> Self {
+        match value {
+            PlannerModeArg::Fast => CompressionPreset::Fast,
+            PlannerModeArg::Balanced => CompressionPreset::Default,
+            PlannerModeArg::MaxRatio => CompressionPreset::High,
         }
     }
 }
@@ -145,6 +166,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             block_size,
             workers,
             compression,
+            planner_mode,
             autotune,
             pool_capacity,
             pool_buffers,
@@ -162,6 +184,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             block_size,
             workers,
             compression.into(),
+            planner_mode.into(),
             autotune,
             pool_capacity,
             pool_buffers,
@@ -191,6 +214,7 @@ fn archive_command(
     block_size: usize,
     workers: usize,
     compression: CompressionAlgo,
+    planner_mode: CompressionPreset,
     autotune: bool,
     pool_capacity: usize,
     pool_buffers: usize,
@@ -220,6 +244,7 @@ fn archive_command(
         workers.max(1)
     };
     performance.autotune_enabled = autotune;
+    performance.compression_preset = planner_mode;
     performance.max_inflight_bytes = inflight_bytes.max(1);
     performance.directory_stream_read_buffer_size = stream_read_buffer.max(1);
     performance.producer_threads = producer_threads;
@@ -265,6 +290,7 @@ fn archive_command(
         &input,
         &output_path,
         compression,
+        planner_mode,
         &run.report,
         live_rates.peak_read_bps,
         live_rates.peak_write_bps,
@@ -544,6 +570,7 @@ fn print_archive_report_summary(
     input: &Path,
     output: &Path,
     compression: CompressionAlgo,
+    planner_mode: CompressionPreset,
     report: &ArchiveReport,
     peak_read_bps: f64,
     peak_write_bps: f64,
@@ -563,6 +590,7 @@ fn print_archive_report_summary(
     println!("  source: {} ({source_kind})", input.display());
     println!("  output: {}", output.display());
     println!("  compression metadata: {:?}", compression);
+    println!("  planner mode: {}", planner_mode_label(planner_mode));
     println!("  elapsed: {}", format_duration(report.elapsed));
     println!("  input bytes: {}", format_bytes(report.input_bytes_total));
     println!(
@@ -821,6 +849,14 @@ fn default_extract_output_path(input: &Path) -> PathBuf {
     let mut fallback = input.as_os_str().to_os_string();
     fallback.push(".out");
     PathBuf::from(fallback)
+}
+
+fn planner_mode_label(mode: CompressionPreset) -> &'static str {
+    match mode {
+        CompressionPreset::Fast => "fast",
+        CompressionPreset::Default => "balanced",
+        CompressionPreset::High => "max-ratio",
+    }
 }
 
 fn parse_size(value: &str) -> Result<usize, String> {

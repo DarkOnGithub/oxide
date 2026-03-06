@@ -1,5 +1,5 @@
-use oxide_core::preprocessing::utils::*;
 use oxide_core::OxideError;
+use oxide_core::preprocessing::utils::*;
 
 #[test]
 fn converts_bgra_to_rgb_using_metadata() {

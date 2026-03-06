@@ -146,5 +146,3 @@ impl<W: OrderedChunkWriter> BoundedReorderWriter<W> {
         self.reorder.pending_len()
     }
 }
-
-
