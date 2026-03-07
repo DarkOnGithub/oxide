@@ -66,7 +66,7 @@ def convert_image_to_bmp_inplace(input_path):
 
 def main():
     # Configuration - in-place conversion
-    datasets_dir = Path("/home/user/rust/oxide/datasets")
+    datasets_dir = Path("./datasets")
     MAX_IMAGE_SIZE_BYTES = 500 * 1024 * 1024  # 0.5 GB limit for images
     
     print("=" * 60)
