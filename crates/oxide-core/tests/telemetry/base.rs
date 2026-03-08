@@ -6,9 +6,7 @@ mod telemetry_enabled_tests {
     use oxide_core::format::FormatDetector;
     use oxide_core::telemetry;
     use oxide_core::telemetry::tags;
-    use oxide_core::{
-        BufferPool, DefaultWorkerTelemetry, InputScanner, MmapInput, WorkerTelemetry,
-    };
+    use oxide_core::{DefaultWorkerTelemetry, InputScanner, MmapInput, WorkerTelemetry};
     use tempfile::NamedTempFile;
 
     use crate::shared::TELEMETRY_TEST_MUTEX;
@@ -27,48 +25,19 @@ mod telemetry_enabled_tests {
 
         let mmap = MmapInput::open(file.path())?;
         let _ = mmap.slice(0, 5)?;
-        let _ = mmap.as_bytes()?;
 
         let _ = FormatDetector::detect(b"this is plain text");
         let scanner = InputScanner::new(8);
         let batches = scanner.scan_file(file.path())?;
         assert!(!batches.is_empty());
 
-        let pool = BufferPool::new(64, 1);
-        {
-            let _first = pool.acquire();
-        }
-        {
-            let _second = pool.acquire();
-        }
-
         let snapshot = telemetry::snapshot();
-        assert!(snapshot.counter(tags::METRIC_MMAP_OPEN_COUNT).unwrap_or(0) >= 2);
-        assert!(snapshot.counter(tags::METRIC_MMAP_SLICE_COUNT).unwrap_or(0) >= 2);
-        assert!(
-            snapshot
-                .counter(tags::METRIC_FORMAT_DETECT_COUNT)
-                .unwrap_or(0)
-                >= 2
-        );
-        assert_eq!(
-            snapshot.counter(tags::METRIC_BUFFER_ACQUIRE_CREATED_COUNT),
-            Some(1)
-        );
-        assert_eq!(
-            snapshot.counter(tags::METRIC_BUFFER_ACQUIRE_RECYCLED_COUNT),
-            Some(1)
-        );
         assert_eq!(snapshot.counter(tags::METRIC_SCANNER_SCAN_COUNT), Some(1));
-        assert_eq!(
-            snapshot.counter(tags::METRIC_SCANNER_MODE_TEXT_COUNT),
-            Some(1)
-        );
 
         let open_hist = snapshot
             .histogram(tags::METRIC_MMAP_OPEN_LATENCY_US)
             .expect("mmap open histogram missing");
-        assert!(open_hist.count >= 2);
+        assert!(open_hist.count >= 1);
 
         let detect_hist = snapshot
             .histogram(tags::METRIC_FORMAT_DETECT_LATENCY_US)
@@ -78,13 +47,6 @@ mod telemetry_enabled_tests {
             .histogram(tags::METRIC_SCANNER_SCAN_LATENCY_US)
             .expect("scanner scan histogram missing");
         assert_eq!(scanner_hist.count, 1);
-
-        assert!(
-            snapshot
-                .gauge(tags::METRIC_MEMORY_POOL_ESTIMATED_BYTES)
-                .unwrap_or(0)
-                > 0
-        );
 
         Ok(())
     }
@@ -136,14 +98,6 @@ mod telemetry_enabled_tests {
         assert_eq!(snapshot.gauge(tags::METRIC_WORKER_QUEUE_DEPTH), Some(7));
         assert_eq!(snapshot.gauge(tags::METRIC_WORKER_ACTIVE_COUNT), Some(0));
         assert_eq!(snapshot.counter(tags::METRIC_WORKER_TASK_COUNT), Some(2));
-        assert_eq!(
-            snapshot.counter(tags::METRIC_WORKER_SCRATCH_INIT_COUNT),
-            Some(1)
-        );
-        assert_eq!(
-            snapshot.gauge(tags::METRIC_WORKER_SCRATCH_BYTES),
-            Some(4096)
-        );
 
         let task_hist = snapshot
             .histogram(tags::METRIC_WORKER_TASK_LATENCY_US)
@@ -151,10 +105,6 @@ mod telemetry_enabled_tests {
         assert_eq!(task_hist.count, 2);
         assert!(task_hist.max >= task_hist.min);
 
-        let scratch_hist = snapshot
-            .histogram(tags::METRIC_WORKER_SCRATCH_BYTES_HIST)
-            .expect("worker scratch histogram missing");
-        assert_eq!(scratch_hist.count, 2);
     }
 }
 
@@ -170,11 +120,11 @@ mod telemetry_disabled_tests {
     fn telemetry_api_is_noop_without_feature() {
         telemetry::reset();
 
-        telemetry::increment_counter(tags::METRIC_WORKER_TASK_COUNT, 7, &[]);
-        telemetry::record_histogram(tags::METRIC_WORKER_TASK_LATENCY_US, 11, &[]);
-        telemetry::set_gauge(tags::METRIC_WORKER_QUEUE_DEPTH, 3, &[]);
-        telemetry::add_gauge(tags::METRIC_WORKER_QUEUE_DEPTH, 2, &[]);
-        telemetry::sub_gauge_saturating(tags::METRIC_WORKER_QUEUE_DEPTH, 10, &[]);
+        telemetry::increment_counter(tags::METRIC_WORKER_TASK_COUNT, 7);
+        telemetry::record_histogram(tags::METRIC_WORKER_TASK_LATENCY_US, 11);
+        telemetry::set_gauge(tags::METRIC_WORKER_QUEUE_DEPTH, 3);
+        telemetry::add_gauge(tags::METRIC_WORKER_QUEUE_DEPTH, 2);
+        telemetry::sub_gauge_saturating(tags::METRIC_WORKER_QUEUE_DEPTH, 10);
         let _ = telemetry::sample_process_memory();
 
         let worker_telemetry = DefaultWorkerTelemetry;

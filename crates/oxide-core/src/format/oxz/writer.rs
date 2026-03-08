@@ -2,7 +2,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::telemetry::{self, profile, tags};
+use crate::telemetry::{profile, tags};
 use crate::types::{duration_to_us, placeholder_checksum, PLACEHOLDER_CHECKSUM};
 use crate::{BufferPool, CompressedBlock, OxideError, Result};
 
@@ -27,7 +27,6 @@ struct FinalizedSections {
     manifest_bytes: Vec<u8>,
     chunk_index_elapsed_us: u64,
     dictionary_store_elapsed_us: u64,
-    payload_elapsed_us: u64,
     section_table_elapsed_us: u64,
 }
 
@@ -242,7 +241,7 @@ impl<W: Write> ArchiveWriter<W> {
                 .checked_add(chunk.data.len() as u64)
                 .ok_or(OxideError::InvalidFormat("payload length overflow"))?;
         }
-        let payload_elapsed_us = duration_to_us(payload_started.elapsed());
+        let _payload_elapsed_us = duration_to_us(payload_started.elapsed());
 
         let sections = finalize_sections(
             self.pending_chunks.iter().map(|chunk| chunk.descriptor),
@@ -250,7 +249,6 @@ impl<W: Write> ArchiveWriter<W> {
             &self.manifest_bytes,
             payload_len,
             self.feature_bits,
-            payload_elapsed_us,
         )?;
 
         self.write_tracked_bytes(&sections.header_bytes)?;
@@ -442,9 +440,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
 
         let feature_bits = u16::try_from(flags)
             .map_err(|_| OxideError::InvalidFormat("feature bits exceed v1 header width"))?;
-        let dictionary_store_started = Instant::now();
         let dictionary_store_bytes = encode_dictionary_store(&self.dictionaries)?;
-        let dictionary_store_elapsed_us = duration_to_us(dictionary_store_started.elapsed());
         let payload_offset = payload_offset_bytes(
             block_count,
             dictionary_store_bytes.len(),
@@ -459,12 +455,6 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         self.pending_descriptors.reserve(block_count as usize);
         self.payload_offset = payload_offset;
         self.payload_len = 0;
-
-        telemetry::record_histogram(
-            tags::METRIC_OXZ_WRITE_DICTIONARY_STORE_LATENCY_US,
-            dictionary_store_elapsed_us,
-            &[("subsystem", "oxz"), ("op", "prepare_dictionary_store")],
-        );
 
         Ok(())
     }
@@ -540,14 +530,12 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         )?;
 
         let finalize_started = Instant::now();
-        let payload_elapsed_us = 0;
         let sections = finalize_sections(
             self.pending_descriptors.iter().copied(),
             &self.dictionaries,
             &self.manifest_bytes,
             self.payload_len,
             self.feature_bits,
-            payload_elapsed_us,
         )?;
 
         self.writer.seek(SeekFrom::Start(0))?;
@@ -691,7 +679,6 @@ fn finalize_sections<I>(
     manifest_bytes: &[u8],
     payload_len: u64,
     feature_bits: u16,
-    payload_elapsed_us: u64,
 ) -> Result<FinalizedSections>
 where
     I: IntoIterator<Item = ChunkDescriptor>,
@@ -791,28 +778,12 @@ where
         manifest_bytes,
         chunk_index_elapsed_us,
         dictionary_store_elapsed_us,
-        payload_elapsed_us,
         section_table_elapsed_us,
     })
 }
 
 fn record_stage_telemetry(elapsed: std::time::Duration) {
     let elapsed_us = duration_to_us(elapsed);
-    telemetry::increment_counter(
-        tags::METRIC_OXZ_WRITE_BLOCK_COUNT,
-        1,
-        &[("subsystem", "oxz"), ("op", "stage_chunk")],
-    );
-    telemetry::increment_counter(
-        tags::METRIC_OXZ_WRITE_CHUNK_DESCRIPTOR_COUNT,
-        1,
-        &[("subsystem", "oxz"), ("op", "stage_chunk_descriptor")],
-    );
-    telemetry::record_histogram(
-        tags::METRIC_OXZ_WRITE_BLOCK_LATENCY_US,
-        elapsed_us,
-        &[("subsystem", "oxz"), ("op", "stage_chunk")],
-    );
     profile::event(
         tags::PROFILE_OXZ,
         &[tags::TAG_OXZ],
@@ -825,36 +796,6 @@ fn record_stage_telemetry(elapsed: std::time::Duration) {
 
 fn record_finalize_telemetry(sections: &FinalizedSections, finalize_elapsed: std::time::Duration) {
     let finalize_elapsed_us = duration_to_us(finalize_elapsed);
-    telemetry::increment_counter(
-        tags::METRIC_OXZ_WRITE_SECTION_TABLE_COUNT,
-        1,
-        &[("subsystem", "oxz"), ("op", "write_section_table")],
-    );
-    telemetry::record_histogram(
-        tags::METRIC_OXZ_WRITE_SECTION_TABLE_LATENCY_US,
-        sections.section_table_elapsed_us,
-        &[("subsystem", "oxz"), ("op", "write_section_table")],
-    );
-    telemetry::record_histogram(
-        tags::METRIC_OXZ_WRITE_CHUNK_INDEX_LATENCY_US,
-        sections.chunk_index_elapsed_us,
-        &[("subsystem", "oxz"), ("op", "write_chunk_index")],
-    );
-    telemetry::record_histogram(
-        tags::METRIC_OXZ_WRITE_DICTIONARY_STORE_LATENCY_US,
-        sections.dictionary_store_elapsed_us,
-        &[("subsystem", "oxz"), ("op", "write_dictionary_store")],
-    );
-    telemetry::record_histogram(
-        tags::METRIC_OXZ_WRITE_PAYLOAD_INDEX_LATENCY_US,
-        sections.payload_elapsed_us,
-        &[("subsystem", "oxz"), ("op", "write_payload_meta")],
-    );
-    telemetry::record_histogram(
-        tags::METRIC_OXZ_WRITE_CONTAINER_LATENCY_US,
-        finalize_elapsed_us,
-        &[("subsystem", "oxz"), ("op", "finalize_container")],
-    );
     profile::event(
         tags::PROFILE_OXZ,
         &[tags::TAG_OXZ],

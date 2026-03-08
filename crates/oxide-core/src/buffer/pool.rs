@@ -5,13 +5,13 @@ use std::time::Instant;
 
 use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 
-use crate::telemetry;
 #[cfg(feature = "profiling")]
 use crate::telemetry::profile;
+#[cfg(feature = "profiling")]
 use crate::telemetry::tags;
 
 #[cfg(feature = "profiling")]
-const PROFILE_TAG_STACK_BUFFER: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_BUFFER];
+const PROFILE_TAG_STACK_BUFFER: [&str; 1] = [tags::TAG_BUFFER];
 
 /// A pool of reusable byte buffers to reduce allocation overhead.
 ///
@@ -65,33 +65,10 @@ impl BufferPool {
                 let capacity = buffer.capacity();
                 buffer.clear();
                 self.metrics.recycled.fetch_add(1, Ordering::Relaxed);
-                telemetry::increment_counter(
-                    tags::METRIC_BUFFER_ACQUIRE_RECYCLED_COUNT,
-                    1,
-                    &[
-                        ("subsystem", "buffer"),
-                        ("op", "acquire"),
-                        ("result", "recycled"),
-                    ],
-                );
-                telemetry::sub_gauge_saturating(
-                    tags::METRIC_MEMORY_POOL_ESTIMATED_BYTES,
-                    capacity as u64,
-                    &[("subsystem", "buffer"), ("op", "acquire")],
-                );
                 ("recycled", capacity, buffer)
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
                 self.metrics.created.fetch_add(1, Ordering::Relaxed);
-                telemetry::increment_counter(
-                    tags::METRIC_BUFFER_ACQUIRE_CREATED_COUNT,
-                    1,
-                    &[
-                        ("subsystem", "buffer"),
-                        ("op", "acquire"),
-                        ("result", "created"),
-                    ],
-                );
                 let capacity = self.default_capacity;
                 (
                     "created",
@@ -100,14 +77,10 @@ impl BufferPool {
                 )
             }
         };
-        let elapsed_us = started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
-        telemetry::record_histogram(
-            tags::METRIC_BUFFER_ACQUIRE_LATENCY_US,
-            elapsed_us,
-            &[("subsystem", "buffer"), ("op", "acquire")],
-        );
         #[cfg(not(feature = "profiling"))]
-        let _ = (result, capacity);
+        let _ = (started_at, result, capacity);
+        #[cfg(feature = "profiling")]
+        let elapsed_us = started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
         #[cfg(feature = "profiling")]
         profile::event(
             tags::PROFILE_BUFFER,
@@ -219,28 +192,17 @@ impl DerefMut for PooledBuffer {
 
 impl Drop for PooledBuffer {
     fn drop(&mut self) {
+        #[cfg(feature = "profiling")]
         let started_at = Instant::now();
         let buffer = std::mem::take(&mut self.buffer);
+        #[cfg(feature = "profiling")]
         let capacity = buffer.capacity();
         if let Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) =
             self.recycler.try_send(buffer)
         {
             self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
-            telemetry::increment_counter(
-                tags::METRIC_BUFFER_RECYCLE_DROPPED_COUNT,
-                1,
-                &[
-                    ("subsystem", "buffer"),
-                    ("op", "recycle"),
-                    ("result", "dropped"),
-                ],
-            );
+            #[cfg(feature = "profiling")]
             let elapsed_us = started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
-            telemetry::record_histogram(
-                tags::METRIC_BUFFER_RECYCLE_LATENCY_US,
-                elapsed_us,
-                &[("subsystem", "buffer"), ("op", "recycle")],
-            );
             #[cfg(feature = "profiling")]
             profile::event(
                 tags::PROFILE_BUFFER,
@@ -263,26 +225,8 @@ impl Drop for PooledBuffer {
                 );
             }
         } else {
-            telemetry::increment_counter(
-                tags::METRIC_BUFFER_RECYCLE_OK_COUNT,
-                1,
-                &[
-                    ("subsystem", "buffer"),
-                    ("op", "recycle"),
-                    ("result", "recycled"),
-                ],
-            );
-            telemetry::add_gauge(
-                tags::METRIC_MEMORY_POOL_ESTIMATED_BYTES,
-                capacity as u64,
-                &[("subsystem", "buffer"), ("op", "recycle")],
-            );
+            #[cfg(feature = "profiling")]
             let elapsed_us = started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
-            telemetry::record_histogram(
-                tags::METRIC_BUFFER_RECYCLE_LATENCY_US,
-                elapsed_us,
-                &[("subsystem", "buffer"), ("op", "recycle")],
-            );
             #[cfg(feature = "profiling")]
             profile::event(
                 tags::PROFILE_BUFFER,

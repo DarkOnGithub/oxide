@@ -1,8 +1,6 @@
 use core::fmt;
 use core::ptr;
 
-use crate::telemetry::{self, tags};
-
 use super::copy::{self, CopyKernel};
 use super::MIN_MATCH;
 
@@ -83,89 +81,21 @@ const fn build_token_table() -> [TokenEntry; 256] {
 }
 
 #[derive(Debug, Default)]
-struct DecodeStats {
-    table_tokens: u64,
-    length_extensions: u64,
-    literal_bytes: u64,
-    match_bytes: u64,
-    kernel_counts: [u64; CopyKernel::COUNT],
-}
+struct DecodeStats;
 
 impl DecodeStats {
     #[inline]
-    fn record_token(&mut self) {
-        self.table_tokens = self.table_tokens.saturating_add(1);
-    }
+    fn record_token(&mut self) {}
 
     #[inline]
-    fn record_length_extension(&mut self) {
-        self.length_extensions = self.length_extensions.saturating_add(1);
-    }
+    fn record_length_extension(&mut self) {}
 
     #[inline]
-    fn record_literals(&mut self, len: usize) {
-        self.literal_bytes = self.literal_bytes.saturating_add(len as u64);
-    }
+    fn record_literals(&mut self, _len: usize) {}
 
     #[inline]
-    fn record_match(&mut self, len: usize, kernel: CopyKernel) {
-        self.match_bytes = self.match_bytes.saturating_add(len as u64);
-        let slot = &mut self.kernel_counts[kernel.index()];
-        *slot = slot.saturating_add(1);
-    }
-
-    fn emit(&self) {
-        let labels = [("algo", "lz4"), ("stage", "decode")];
-
-        if self.table_tokens > 0 {
-            telemetry::increment_counter(
-                tags::METRIC_COMPRESSION_DECODE_TABLE_TOKEN_COUNT,
-                self.table_tokens,
-                &labels,
-            );
-        }
-
-        if self.length_extensions > 0 {
-            telemetry::increment_counter(
-                tags::METRIC_COMPRESSION_DECODE_LENGTH_EXTENSION_COUNT,
-                self.length_extensions,
-                &labels,
-            );
-        }
-
-        if self.literal_bytes > 0 {
-            telemetry::record_histogram(
-                tags::METRIC_COMPRESSION_DECODE_LITERAL_BYTES,
-                self.literal_bytes,
-                &labels,
-            );
-        }
-
-        if self.match_bytes > 0 {
-            telemetry::record_histogram(
-                tags::METRIC_COMPRESSION_DECODE_MATCH_BYTES,
-                self.match_bytes,
-                &labels,
-            );
-        }
-
-        for (idx, metric) in COPY_KERNEL_METRICS.iter().enumerate() {
-            let count = self.kernel_counts[idx];
-            if count > 0 {
-                telemetry::increment_counter(*metric, count, &labels);
-            }
-        }
-    }
+    fn record_match(&mut self, _len: usize, _kernel: CopyKernel) {}
 }
-
-const COPY_KERNEL_METRICS: [&str; CopyKernel::COUNT] = [
-    tags::METRIC_COMPRESSION_DECODE_COPY_RLE_COUNT,
-    tags::METRIC_COMPRESSION_DECODE_COPY_REPEAT2_COUNT,
-    tags::METRIC_COMPRESSION_DECODE_COPY_REPEAT4_COUNT,
-    tags::METRIC_COMPRESSION_DECODE_COPY_REPEAT8_COUNT,
-    tags::METRIC_COMPRESSION_DECODE_COPY_NON_OVERLAP_COUNT,
-    tags::METRIC_COMPRESSION_DECODE_COPY_OVERLAP_COUNT,
-];
 
 pub(super) fn decompress_block(
     input: &[u8],
@@ -180,7 +110,6 @@ pub(super) fn decompress_block(
     let mut decoder = BlockDecoder::new(input, output.as_mut_slice(), dictionary);
     decoder.decode()?;
     decoder.ensure_output_complete()?;
-    decoder.stats.emit();
     Ok(output)
 }
 

@@ -12,7 +12,7 @@ use crate::telemetry::tags;
 use crate::types::{BatchData, Result};
 use crate::OxideError;
 
-const PROFILE_TAG_STACK_MMAP: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_MMAP];
+const PROFILE_TAG_STACK_MMAP: [&str; 1] = [tags::TAG_MMAP];
 
 /// Memory-mapped file input for efficient large file access.
 ///
@@ -69,16 +69,7 @@ impl MmapInput {
         })();
 
         let elapsed_us = profile::elapsed_us(started_at);
-        telemetry::increment_counter(
-            tags::METRIC_MMAP_OPEN_COUNT,
-            1,
-            &[("subsystem", "mmap"), ("op", "open")],
-        );
-        telemetry::record_histogram(
-            tags::METRIC_MMAP_OPEN_LATENCY_US,
-            elapsed_us,
-            &[("subsystem", "mmap"), ("op", "open")],
-        );
+        telemetry::record_histogram(tags::METRIC_MMAP_OPEN_LATENCY_US, elapsed_us);
         telemetry::sample_process_memory();
 
         match &result {
@@ -219,17 +210,6 @@ impl MmapInput {
         })();
 
         let elapsed_us = profile::elapsed_us(started_at);
-        telemetry::increment_counter(
-            tags::METRIC_MMAP_SLICE_COUNT,
-            1,
-            &[("subsystem", "mmap"), ("op", "slice")],
-        );
-        telemetry::record_histogram(
-            tags::METRIC_MMAP_SLICE_LATENCY_US,
-            elapsed_us,
-            &[("subsystem", "mmap"), ("op", "slice")],
-        );
-
         match &result {
             Ok(_bytes) => {
                 profile::event(

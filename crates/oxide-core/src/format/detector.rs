@@ -6,7 +6,7 @@ use crate::telemetry::tags;
 use crate::types::FileFormat;
 use infer::MatcherType;
 
-const PROFILE_TAG_STACK_FORMAT: [&str; 2] = [tags::TAG_SYSTEM, tags::TAG_FORMAT];
+const PROFILE_TAG_STACK_FORMAT: [&str; 1] = [tags::TAG_FORMAT];
 
 const TEXT_SAMPLE_LIMIT: usize = 16 * 1024;
 const UTF8_RATIO_THRESHOLD: f32 = 0.85;
@@ -64,16 +64,7 @@ impl FormatDetector {
         };
 
         let elapsed_us = profile::elapsed_us(started_at);
-        telemetry::increment_counter(
-            tags::METRIC_FORMAT_DETECT_COUNT,
-            1,
-            &[("subsystem", "format"), ("op", "detect")],
-        );
-        telemetry::record_histogram(
-            tags::METRIC_FORMAT_DETECT_LATENCY_US,
-            elapsed_us,
-            &[("subsystem", "format"), ("op", "detect")],
-        );
+        telemetry::record_histogram(tags::METRIC_FORMAT_DETECT_LATENCY_US, elapsed_us);
 
         profile::event(
             tags::PROFILE_FORMAT,

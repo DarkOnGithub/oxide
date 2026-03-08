@@ -24,40 +24,9 @@ mod profile_tag_stack_tests {
 
         profile::set_enabled_tags(&[tags::TAG_MMAP, tags::TAG_BUFFER]);
 
-        assert!(profile::is_tag_stack_enabled(&[
-            tags::TAG_SYSTEM,
-            tags::TAG_MMAP
-        ]));
-        assert!(profile::is_tag_stack_enabled(&[
-            tags::TAG_SYSTEM,
-            tags::TAG_BUFFER
-        ]));
-        assert!(!profile::is_tag_stack_enabled(&[
-            tags::TAG_SYSTEM,
-            tags::TAG_FORMAT
-        ]));
-
-        profile::enable_all_tags();
-    }
-
-    #[test]
-    fn system_tag_can_enable_shared_events() {
-        let _guard = PROFILE_TAG_MUTEX.lock().expect("profile tag lock poisoned");
-
-        profile::set_enabled_tags(&[tags::TAG_SYSTEM]);
-
-        assert!(profile::is_tag_stack_enabled(&[
-            tags::TAG_SYSTEM,
-            tags::TAG_MMAP
-        ]));
-        assert!(profile::is_tag_stack_enabled(&[
-            tags::TAG_SYSTEM,
-            tags::TAG_FORMAT
-        ]));
-        assert!(profile::is_tag_stack_enabled(&[
-            tags::TAG_SYSTEM,
-            tags::TAG_BUFFER
-        ]));
+        assert!(profile::is_tag_stack_enabled(&[tags::TAG_MMAP]));
+        assert!(profile::is_tag_stack_enabled(&[tags::TAG_BUFFER]));
+        assert!(!profile::is_tag_stack_enabled(&[tags::TAG_FORMAT]));
 
         profile::enable_all_tags();
     }
@@ -74,15 +43,12 @@ mod profile_tag_stack_disabled_tests {
         profile::reload_enabled_tags_from_env();
         profile::enable_all_tags();
 
-        assert!(!profile::is_tag_stack_enabled(&[tags::TAG_SYSTEM]));
-        assert!(!profile::is_tag_stack_enabled(&[
-            tags::TAG_SYSTEM,
-            tags::TAG_BUFFER
-        ]));
+        assert!(!profile::is_tag_stack_enabled(&[tags::TAG_MMAP]));
+        assert!(!profile::is_tag_stack_enabled(&[tags::TAG_BUFFER]));
 
         profile::event(
             tags::PROFILE_BUFFER,
-            &[tags::TAG_SYSTEM, tags::TAG_BUFFER],
+            &[tags::TAG_BUFFER],
             "noop",
             "ok",
             1,

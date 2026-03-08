@@ -63,10 +63,8 @@ impl TelemetrySnapshot {
 }
 
 /// Increments a named counter by `value`.
-///
-/// Labels are currently unused in the internal registry but preserved for API compatibility.
 #[inline]
-pub fn increment_counter(name: &'static str, value: u64, _labels: &[(&str, &str)]) {
+pub fn increment_counter(name: &'static str, value: u64) {
     #[cfg(feature = "telemetry")]
     registry::increment_counter(name, value);
 
@@ -75,7 +73,7 @@ pub fn increment_counter(name: &'static str, value: u64, _labels: &[(&str, &str)
 
 /// Records a histogram sample.
 #[inline]
-pub fn record_histogram(name: &'static str, value: u64, _labels: &[(&str, &str)]) {
+pub fn record_histogram(name: &'static str, value: u64) {
     #[cfg(feature = "telemetry")]
     registry::record_histogram(name, value);
 
@@ -84,7 +82,7 @@ pub fn record_histogram(name: &'static str, value: u64, _labels: &[(&str, &str)]
 
 /// Sets a gauge to an absolute value.
 #[inline]
-pub fn set_gauge(name: &'static str, value: u64, _labels: &[(&str, &str)]) {
+pub fn set_gauge(name: &'static str, value: u64) {
     #[cfg(feature = "telemetry")]
     registry::set_gauge(name, value);
 
@@ -93,7 +91,7 @@ pub fn set_gauge(name: &'static str, value: u64, _labels: &[(&str, &str)]) {
 
 /// Adds `delta` to a gauge.
 #[inline]
-pub fn add_gauge(name: &'static str, delta: u64, _labels: &[(&str, &str)]) {
+pub fn add_gauge(name: &'static str, delta: u64) {
     #[cfg(feature = "telemetry")]
     registry::add_gauge(name, delta);
 
@@ -102,7 +100,7 @@ pub fn add_gauge(name: &'static str, delta: u64, _labels: &[(&str, &str)]) {
 
 /// Subtracts `delta` from a gauge with floor at zero.
 #[inline]
-pub fn sub_gauge_saturating(name: &'static str, delta: u64, _labels: &[(&str, &str)]) {
+pub fn sub_gauge_saturating(name: &'static str, delta: u64) {
     #[cfg(feature = "telemetry")]
     registry::sub_gauge_saturating(name, delta);
 
@@ -114,18 +112,10 @@ pub fn sample_process_memory() -> ProcessMemorySample {
     let sample = memory::sample_process_memory();
 
     if let Some(rss) = sample.rss_bytes {
-        set_gauge(
-            tags::METRIC_MEMORY_PROCESS_RSS_BYTES,
-            rss,
-            &[("subsystem", "memory"), ("op", "sample")],
-        );
+        set_gauge(tags::METRIC_MEMORY_PROCESS_RSS_BYTES, rss);
     }
     if let Some(virtual_bytes) = sample.virtual_bytes {
-        set_gauge(
-            tags::METRIC_MEMORY_PROCESS_VIRTUAL_BYTES,
-            virtual_bytes,
-            &[("subsystem", "memory"), ("op", "sample")],
-        );
+        set_gauge(tags::METRIC_MEMORY_PROCESS_VIRTUAL_BYTES, virtual_bytes);
     }
 
     sample

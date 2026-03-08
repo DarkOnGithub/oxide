@@ -11,21 +11,6 @@ pub(super) enum CopyKernel {
     Overlap,
 }
 
-impl CopyKernel {
-    pub(super) const COUNT: usize = 6;
-
-    pub(super) const fn index(self) -> usize {
-        match self {
-            Self::Rle => 0,
-            Self::Repeat2 => 1,
-            Self::Repeat4 => 2,
-            Self::Repeat8 => 3,
-            Self::NonOverlapping => 4,
-            Self::Overlap => 5,
-        }
-    }
-}
-
 #[inline]
 #[allow(unsafe_op_in_unsafe_fn)]
 pub(super) unsafe fn copy_match(dst: *mut u8, offset: usize, len: usize) -> CopyKernel {
