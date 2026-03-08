@@ -3,4 +3,7 @@ pub mod directory;
 pub mod types;
 
 pub use archive::ArchivePipeline;
-pub use types::{ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions};
+pub use types::{
+    ArchiveEntryKind, ArchiveListingEntry, ArchivePipelineConfig, ArchiveSourceKind,
+    PipelinePerformanceOptions,
+};

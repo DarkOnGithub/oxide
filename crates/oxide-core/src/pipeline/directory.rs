@@ -8,7 +8,7 @@ use jwalk::WalkDir;
 use crate::format::FormatDetector;
 use crate::types::{Batch, FileFormat, Result};
 
-use super::types::ArchiveSourceKind;
+use super::types::{ArchiveEntryKind, ArchiveListingEntry, ArchiveSourceKind};
 
 pub(super) const DIRECTORY_BUNDLE_MAGIC: [u8; 4] = *b"OXDB";
 pub(super) const DIRECTORY_BUNDLE_VERSION: u16 = 1;
@@ -262,6 +262,29 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
         files,
         input_bytes_total,
     })
+}
+
+pub(super) fn manifest_from_discovery(
+    discovery: &DirectoryDiscovery,
+) -> crate::format::ArchiveManifest {
+    let mut entries = Vec::with_capacity(discovery.directories.len() + discovery.files.len());
+    entries.extend(
+        discovery
+            .directories
+            .iter()
+            .cloned()
+            .map(|path| ArchiveListingEntry {
+                path,
+                kind: ArchiveEntryKind::Directory,
+                size: 0,
+            }),
+    );
+    entries.extend(discovery.files.iter().map(|file| ArchiveListingEntry {
+        path: file.rel_path.clone(),
+        kind: ArchiveEntryKind::File,
+        size: file.size,
+    }));
+    crate::format::ArchiveManifest::new(entries)
 }
 
 fn accumulate_bundle_size(current: u64, path_len: usize) -> Result<u64> {

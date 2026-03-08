@@ -3,10 +3,10 @@ use super::super::types::StatValue;
 use super::types::*;
 use crate::core::PoolRuntimeSnapshot;
 use crate::telemetry::{
-    self, ArchiveProgressEvent, ArchiveReport, ExtractProgressEvent, ExtractReport, ReportValue,
-    RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport, profile, tags,
+    self, profile, tags, ArchiveProgressEvent, ArchiveReport, ExtractProgressEvent, ExtractReport,
+    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
 };
-use crate::types::{CompressionPreset, duration_to_us};
+use crate::types::{duration_to_us, CompressionPreset};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 

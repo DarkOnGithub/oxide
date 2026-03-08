@@ -7,7 +7,7 @@ use crate::types::{duration_to_us, placeholder_checksum, PLACEHOLDER_CHECKSUM};
 use crate::{BufferPool, CompressedBlock, OxideError, Result};
 
 use super::{
-    encode_dictionary_store, ChunkDescriptor, Footer, GlobalHeader, ReorderBuffer,
+    encode_dictionary_store, ArchiveManifest, ChunkDescriptor, Footer, GlobalHeader, ReorderBuffer,
     SectionTableEntry, SectionType, StoredDictionary, CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT,
     DEFAULT_REORDER_PENDING_LIMIT, GLOBAL_HEADER_SIZE, SECTION_TABLE_ENTRY_SIZE,
 };
@@ -24,6 +24,7 @@ struct FinalizedSections {
     section_table_bytes: Vec<u8>,
     chunk_index_bytes: Vec<u8>,
     dictionary_store_bytes: Vec<u8>,
+    manifest_bytes: Vec<u8>,
     chunk_index_elapsed_us: u64,
     dictionary_store_elapsed_us: u64,
     payload_elapsed_us: u64,
@@ -51,6 +52,7 @@ pub struct ArchiveWriter<W: Write> {
     writer: W,
     buffer_pool: Arc<BufferPool>,
     dictionaries: Vec<StoredDictionary>,
+    manifest_bytes: Vec<u8>,
     expected_block_count: Option<u32>,
     feature_bits: u16,
     blocks_written: u32,
@@ -67,6 +69,7 @@ pub struct SeekableArchiveWriter<W: Write + Seek> {
     buffer_pool: Arc<BufferPool>,
     dictionaries: Vec<StoredDictionary>,
     dictionary_store_bytes: Vec<u8>,
+    manifest_bytes: Vec<u8>,
     expected_block_count: Option<u32>,
     feature_bits: u16,
     blocks_written: u32,
@@ -79,7 +82,7 @@ pub struct SeekableArchiveWriter<W: Write + Seek> {
 impl<W: Write> ArchiveWriter<W> {
     /// Creates a new archive writer with the default reorder limit.
     pub fn new(writer: W, buffer_pool: Arc<BufferPool>) -> Self {
-        Self::with_dictionaries(writer, buffer_pool, Vec::new())
+        Self::with_dictionaries_and_manifest(writer, buffer_pool, Vec::new(), None)
     }
 
     /// Creates a new archive writer with explicit dictionary contents.
@@ -88,17 +91,33 @@ impl<W: Write> ArchiveWriter<W> {
         buffer_pool: Arc<BufferPool>,
         dictionaries: Vec<StoredDictionary>,
     ) -> Self {
+        Self::with_dictionaries_and_manifest(writer, buffer_pool, dictionaries, None)
+    }
+
+    pub fn with_dictionaries_and_manifest(
+        writer: W,
+        buffer_pool: Arc<BufferPool>,
+        dictionaries: Vec<StoredDictionary>,
+        manifest: Option<ArchiveManifest>,
+    ) -> Self {
         Self::with_reorder_limit_and_dictionaries(
             writer,
             buffer_pool,
             DEFAULT_REORDER_PENDING_LIMIT,
             dictionaries,
+            manifest,
         )
     }
 
     /// Creates a new archive writer with a custom reorder limit.
     pub fn with_reorder_limit(writer: W, buffer_pool: Arc<BufferPool>, max_pending: usize) -> Self {
-        Self::with_reorder_limit_and_dictionaries(writer, buffer_pool, max_pending, Vec::new())
+        Self::with_reorder_limit_and_dictionaries(
+            writer,
+            buffer_pool,
+            max_pending,
+            Vec::new(),
+            None,
+        )
     }
 
     fn with_reorder_limit_and_dictionaries(
@@ -106,11 +125,17 @@ impl<W: Write> ArchiveWriter<W> {
         buffer_pool: Arc<BufferPool>,
         max_pending: usize,
         dictionaries: Vec<StoredDictionary>,
+        manifest: Option<ArchiveManifest>,
     ) -> Self {
         Self {
             writer,
             buffer_pool,
             dictionaries,
+            manifest_bytes: manifest
+                .map(|manifest| manifest.encode())
+                .transpose()
+                .expect("manifest encoding should succeed during writer construction")
+                .unwrap_or_default(),
             expected_block_count: None,
             feature_bits: 0,
             blocks_written: 0,
@@ -222,6 +247,7 @@ impl<W: Write> ArchiveWriter<W> {
         let sections = finalize_sections(
             self.pending_chunks.iter().map(|chunk| chunk.descriptor),
             &self.dictionaries,
+            &self.manifest_bytes,
             payload_len,
             self.feature_bits,
             payload_elapsed_us,
@@ -231,6 +257,7 @@ impl<W: Write> ArchiveWriter<W> {
         self.write_tracked_bytes(&sections.section_table_bytes)?;
         self.write_tracked_bytes(&sections.chunk_index_bytes)?;
         self.write_tracked_bytes(&sections.dictionary_store_bytes)?;
+        self.write_tracked_bytes(&sections.manifest_bytes)?;
 
         let pending_chunks = std::mem::take(&mut self.pending_chunks);
         for chunk in pending_chunks {
@@ -333,7 +360,7 @@ impl<W: Write> ArchiveBlockWriter for ArchiveWriter<W> {
 impl<W: Write + Seek> SeekableArchiveWriter<W> {
     /// Creates a new seekable archive writer with the default reorder limit.
     pub fn new(writer: W, buffer_pool: Arc<BufferPool>) -> Self {
-        Self::with_dictionaries(writer, buffer_pool, Vec::new())
+        Self::with_dictionaries_and_manifest(writer, buffer_pool, Vec::new(), None)
     }
 
     /// Creates a new seekable archive writer with explicit dictionary contents.
@@ -342,17 +369,33 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         buffer_pool: Arc<BufferPool>,
         dictionaries: Vec<StoredDictionary>,
     ) -> Self {
+        Self::with_dictionaries_and_manifest(writer, buffer_pool, dictionaries, None)
+    }
+
+    pub fn with_dictionaries_and_manifest(
+        writer: W,
+        buffer_pool: Arc<BufferPool>,
+        dictionaries: Vec<StoredDictionary>,
+        manifest: Option<ArchiveManifest>,
+    ) -> Self {
         Self::with_reorder_limit_and_dictionaries(
             writer,
             buffer_pool,
             DEFAULT_REORDER_PENDING_LIMIT,
             dictionaries,
+            manifest,
         )
     }
 
     /// Creates a new seekable archive writer with a custom reorder limit.
     pub fn with_reorder_limit(writer: W, buffer_pool: Arc<BufferPool>, max_pending: usize) -> Self {
-        Self::with_reorder_limit_and_dictionaries(writer, buffer_pool, max_pending, Vec::new())
+        Self::with_reorder_limit_and_dictionaries(
+            writer,
+            buffer_pool,
+            max_pending,
+            Vec::new(),
+            None,
+        )
     }
 
     fn with_reorder_limit_and_dictionaries(
@@ -360,12 +403,18 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         buffer_pool: Arc<BufferPool>,
         max_pending: usize,
         dictionaries: Vec<StoredDictionary>,
+        manifest: Option<ArchiveManifest>,
     ) -> Self {
         Self {
             writer,
             buffer_pool,
             dictionaries,
             dictionary_store_bytes: Vec::new(),
+            manifest_bytes: manifest
+                .map(|manifest| manifest.encode())
+                .transpose()
+                .expect("manifest encoding should succeed during writer construction")
+                .unwrap_or_default(),
             expected_block_count: None,
             feature_bits: 0,
             blocks_written: 0,
@@ -396,7 +445,11 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         let dictionary_store_started = Instant::now();
         let dictionary_store_bytes = encode_dictionary_store(&self.dictionaries)?;
         let dictionary_store_elapsed_us = duration_to_us(dictionary_store_started.elapsed());
-        let payload_offset = payload_offset_bytes(block_count, dictionary_store_bytes.len())?;
+        let payload_offset = payload_offset_bytes(
+            block_count,
+            dictionary_store_bytes.len(),
+            self.manifest_bytes.len(),
+        )?;
 
         reserve_prefix(&mut self.writer, payload_offset)?;
 
@@ -491,6 +544,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         let sections = finalize_sections(
             self.pending_descriptors.iter().copied(),
             &self.dictionaries,
+            &self.manifest_bytes,
             self.payload_len,
             self.feature_bits,
             payload_elapsed_us,
@@ -501,6 +555,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         self.writer.write_all(&sections.section_table_bytes)?;
         self.writer.write_all(&sections.chunk_index_bytes)?;
         self.writer.write_all(&sections.dictionary_store_bytes)?;
+        self.writer.write_all(&sections.manifest_bytes)?;
         self.writer.seek(SeekFrom::Start(
             self.payload_offset.saturating_add(self.payload_len),
         ))?;
@@ -599,13 +654,23 @@ fn validate_completion(
     Ok(())
 }
 
-fn payload_offset_bytes(block_count: u32, dictionary_bytes: usize) -> Result<u64> {
-    let section_table_len = u64::from(CORE_SECTION_COUNT) * SECTION_TABLE_ENTRY_SIZE as u64;
+fn section_count(has_manifest: bool) -> u16 {
+    CORE_SECTION_COUNT + if has_manifest { 1 } else { 0 }
+}
+
+fn payload_offset_bytes(
+    block_count: u32,
+    dictionary_bytes: usize,
+    manifest_bytes: usize,
+) -> Result<u64> {
+    let section_table_len =
+        u64::from(section_count(manifest_bytes > 0)) * SECTION_TABLE_ENTRY_SIZE as u64;
     let chunk_index_len = u64::from(block_count) * CHUNK_DESCRIPTOR_SIZE as u64;
     (GLOBAL_HEADER_SIZE as u64)
         .checked_add(section_table_len)
         .and_then(|offset| offset.checked_add(chunk_index_len))
         .and_then(|offset| offset.checked_add(dictionary_bytes as u64))
+        .and_then(|offset| offset.checked_add(manifest_bytes as u64))
         .ok_or(OxideError::InvalidFormat("payload offset overflow"))
 }
 
@@ -623,6 +688,7 @@ fn reserve_prefix<W: Write>(writer: &mut W, bytes: u64) -> Result<()> {
 fn finalize_sections<I>(
     descriptors: I,
     dictionaries: &[StoredDictionary],
+    manifest_bytes: &[u8],
     payload_len: u64,
     feature_bits: u16,
     payload_elapsed_us: u64,
@@ -631,8 +697,11 @@ where
     I: IntoIterator<Item = ChunkDescriptor>,
 {
     let section_table_offset = GLOBAL_HEADER_SIZE as u64;
-    let header =
-        GlobalHeader::with_feature_bits(CORE_SECTION_COUNT, feature_bits, section_table_offset);
+    let header = GlobalHeader::with_feature_bits(
+        section_count(!manifest_bytes.is_empty()),
+        feature_bits,
+        section_table_offset,
+    );
 
     let chunk_index_started = Instant::now();
     let mut chunk_index_bytes = Vec::new();
@@ -645,7 +714,10 @@ where
     let dictionary_store_bytes = encode_dictionary_store(dictionaries)?;
     let dictionary_store_elapsed_us = duration_to_us(dictionary_store_started.elapsed());
 
-    let section_table_len = u64::from(CORE_SECTION_COUNT) * SECTION_TABLE_ENTRY_SIZE as u64;
+    let manifest_bytes = manifest_bytes.to_vec();
+
+    let section_table_len =
+        u64::from(section_count(!manifest_bytes.is_empty())) * SECTION_TABLE_ENTRY_SIZE as u64;
     let chunk_index_offset = section_table_offset
         .checked_add(section_table_len)
         .ok_or(OxideError::InvalidFormat("section table offset overflow"))?;
@@ -657,13 +729,18 @@ where
                 "dictionary store offset overflow",
             ))?;
     let dictionary_store_len = dictionary_store_bytes.len() as u64;
-    let payload_offset = dictionary_store_offset
+    let manifest_offset = dictionary_store_offset
         .checked_add(dictionary_store_len)
+        .ok_or(OxideError::InvalidFormat("manifest offset overflow"))?;
+    let manifest_len = manifest_bytes.len() as u64;
+    let payload_offset = manifest_offset
+        .checked_add(manifest_len)
         .ok_or(OxideError::InvalidFormat("payload offset overflow"))?;
 
     let chunk_index_checksum = placeholder_checksum(&chunk_index_bytes);
     let dictionary_store_checksum = placeholder_checksum(&dictionary_store_bytes);
-    let section_entries = [
+    let manifest_checksum = placeholder_checksum(&manifest_bytes);
+    let mut section_entries = vec![
         SectionTableEntry::new(
             SectionType::ChunkIndex,
             chunk_index_offset,
@@ -679,13 +756,21 @@ where
         SectionTableEntry::new(SectionType::EntropyTableStore, payload_offset, 0, 0),
         SectionTableEntry::new(SectionType::TransformChainTable, payload_offset, 0, 0),
         SectionTableEntry::new(SectionType::DedupReferenceTable, payload_offset, 0, 0),
-        SectionTableEntry::new(
-            SectionType::PayloadRegion,
-            payload_offset,
-            payload_len,
-            PLACEHOLDER_CHECKSUM,
-        ),
     ];
+    if !manifest_bytes.is_empty() {
+        section_entries.push(SectionTableEntry::new(
+            SectionType::ArchiveManifest,
+            manifest_offset,
+            manifest_len,
+            manifest_checksum,
+        ));
+    }
+    section_entries.push(SectionTableEntry::new(
+        SectionType::PayloadRegion,
+        payload_offset,
+        payload_len,
+        PLACEHOLDER_CHECKSUM,
+    ));
 
     let section_table_started = Instant::now();
     let mut section_table_bytes = Vec::with_capacity(
@@ -703,6 +788,7 @@ where
         section_table_bytes,
         chunk_index_bytes,
         dictionary_store_bytes,
+        manifest_bytes,
         chunk_index_elapsed_us,
         dictionary_store_elapsed_us,
         payload_elapsed_us,

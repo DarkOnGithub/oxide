@@ -31,20 +31,20 @@ pub use core::{
 };
 pub use error::OxideError;
 pub use format::{
-    ArchiveBlockWriter, ArchiveReader, ArchiveWriter, BlockHeader, BlockIterator,
-    CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT,
-    FEATURE_DEDUP_REFERENCES, FOOTER_SIZE, Footer, FormatDetector, GLOBAL_HEADER_SIZE,
-    GlobalHeader, OXZ_MAGIC, OXZ_VERSION, ReorderBuffer, SECTION_TABLE_ENTRY_SIZE,
-    SectionTableEntry, SectionType, SeekableArchiveWriter, StoredDictionary,
+    ArchiveBlockWriter, ArchiveManifest, ArchiveReader, ArchiveWriter, BlockHeader, BlockIterator,
+    ChunkDescriptor, Footer, FormatDetector, GlobalHeader, ReorderBuffer, SectionTableEntry,
+    SectionType, SeekableArchiveWriter, StoredDictionary, CHUNK_DESCRIPTOR_SIZE,
+    CORE_SECTION_COUNT, DEFAULT_REORDER_PENDING_LIMIT, FEATURE_DEDUP_REFERENCES, FOOTER_SIZE,
+    GLOBAL_HEADER_SIZE, OXZ_MAGIC, OXZ_VERSION, SECTION_TABLE_ENTRY_SIZE,
 };
 pub use io::{BoundaryMode, ChunkingMode, ChunkingPolicy, InputScanner, MmapInput};
 pub use pipeline::{
-    ArchivePipeline, ArchivePipelineConfig, ArchiveSourceKind, PipelinePerformanceOptions,
+    ArchiveEntryKind, ArchiveListingEntry, ArchivePipeline, ArchivePipelineConfig,
+    ArchiveSourceKind, PipelinePerformanceOptions,
 };
 pub use preprocessing::{
-    AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat,
-    PreprocessingMetadata, apply_preprocessing, apply_preprocessing_with_metadata,
-    reverse_preprocessing,
+    apply_preprocessing, apply_preprocessing_with_metadata, reverse_preprocessing, AudioEndian,
+    AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat, PreprocessingMetadata,
 };
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use telemetry::{
