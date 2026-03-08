@@ -10,128 +10,34 @@ use crate::types::{duration_to_us, CompressionPreset};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-pub fn record_pipeline_stage(metric: &'static str, op: &'static str, elapsed: Duration) {
-    let elapsed_us = duration_to_us(elapsed);
-    telemetry::record_histogram(metric, elapsed_us, &[("subsystem", "pipeline"), ("op", op)]);
-    profile::event(
-        tags::PROFILE_PIPELINE,
-        &[tags::TAG_SYSTEM, tags::TAG_PIPELINE],
-        op,
-        "ok",
-        elapsed_us,
-        "pipeline stage measured",
-    );
-}
-
 pub fn record_archive_run_telemetry(elapsed: Duration, stage_timings: StageTimings) {
     let elapsed_us = duration_to_us(elapsed);
-    telemetry::increment_counter(
-        tags::METRIC_PIPELINE_ARCHIVE_RUN_COUNT,
-        1,
-        &[("subsystem", "pipeline"), ("op", "archive_run")],
-    );
-    telemetry::record_histogram(
-        tags::METRIC_PIPELINE_ARCHIVE_RUN_LATENCY_US,
-        elapsed_us,
-        &[("subsystem", "pipeline"), ("op", "archive_run")],
-    );
+    telemetry::increment_counter(tags::METRIC_PIPELINE_ARCHIVE_RUN_COUNT, 1);
+    telemetry::record_histogram(tags::METRIC_PIPELINE_ARCHIVE_RUN_LATENCY_US, elapsed_us);
     profile::event(
         tags::PROFILE_PIPELINE,
-        &[tags::TAG_SYSTEM, tags::TAG_PIPELINE],
+        &[tags::TAG_PIPELINE],
         "archive_run",
         "ok",
         elapsed_us,
         "archive run completed",
     );
-
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_DISCOVERY_US,
-        "stage_discovery",
-        stage_timings.discovery,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_FORMAT_PROBE_US,
-        "stage_format_probe",
-        stage_timings.format_probe,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_PRODUCER_READ_US,
-        "stage_producer_read",
-        stage_timings.producer_read,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_SUBMIT_WAIT_US,
-        "stage_submit_wait",
-        stage_timings.submit_wait,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_RESULT_WAIT_US,
-        "stage_result_wait",
-        stage_timings.result_wait,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_WRITER_US,
-        "stage_writer",
-        stage_timings.writer,
-    );
+    let _ = stage_timings;
 }
 
 pub fn record_extract_run_telemetry(elapsed: Duration, stage_timings: ExtractStageTimings) {
     let elapsed_us = duration_to_us(elapsed);
-    telemetry::increment_counter(
-        tags::METRIC_PIPELINE_EXTRACT_RUN_COUNT,
-        1,
-        &[("subsystem", "pipeline"), ("op", "extract_run")],
-    );
-    telemetry::record_histogram(
-        tags::METRIC_PIPELINE_EXTRACT_RUN_LATENCY_US,
-        elapsed_us,
-        &[("subsystem", "pipeline"), ("op", "extract_run")],
-    );
+    telemetry::increment_counter(tags::METRIC_PIPELINE_EXTRACT_RUN_COUNT, 1);
+    telemetry::record_histogram(tags::METRIC_PIPELINE_EXTRACT_RUN_LATENCY_US, elapsed_us);
     profile::event(
         tags::PROFILE_PIPELINE,
-        &[tags::TAG_SYSTEM, tags::TAG_PIPELINE],
+        &[tags::TAG_PIPELINE],
         "extract_run",
         "ok",
         elapsed_us,
         "extract run completed",
     );
-
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_ARCHIVE_READ_US,
-        "stage_archive_read",
-        stage_timings.archive_read,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_DECODE_SUBMIT_US,
-        "stage_decode_submit",
-        stage_timings.decode_submit,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_DECODE_WAIT_US,
-        "stage_decode_wait",
-        stage_timings.decode_wait,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_MERGE_US,
-        "stage_merge",
-        stage_timings.merge,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_ORDERED_WRITE_US,
-        "stage_ordered_write",
-        stage_timings.ordered_write,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_DIRECTORY_DECODE_US,
-        "stage_directory_decode",
-        stage_timings.directory_decode,
-    );
-    record_pipeline_stage(
-        tags::METRIC_PIPELINE_STAGE_OUTPUT_WRITE_US,
-        "stage_output_write",
-        stage_timings.output_write,
-    );
+    let _ = stage_timings;
 }
 
 pub fn emit_archive_progress_if_due(

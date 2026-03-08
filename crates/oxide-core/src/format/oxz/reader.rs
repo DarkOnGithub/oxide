@@ -2,7 +2,7 @@ use std::cmp::min;
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 
-use crate::telemetry::{self, profile, tags};
+use crate::telemetry::{profile, tags};
 use crate::types::duration_to_us;
 use crate::{OxideError, Result};
 
@@ -69,26 +69,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
         reader.seek(SeekFrom::Start(footer_offset))?;
         let footer = Footer::read(&mut reader)?;
 
-        telemetry::increment_counter(
-            tags::METRIC_OXZ_READ_SECTION_TABLE_COUNT,
-            1,
-            &[("subsystem", "oxz"), ("op", "read_section_table")],
-        );
-        telemetry::record_histogram(
-            tags::METRIC_OXZ_READ_SECTION_TABLE_LATENCY_US,
-            section_table_elapsed_us,
-            &[("subsystem", "oxz"), ("op", "read_section_table")],
-        );
-        telemetry::record_histogram(
-            tags::METRIC_OXZ_READ_CHUNK_INDEX_LATENCY_US,
-            chunk_index_elapsed_us,
-            &[("subsystem", "oxz"), ("op", "read_chunk_index")],
-        );
-        telemetry::record_histogram(
-            tags::METRIC_OXZ_READ_DICTIONARY_STORE_LATENCY_US,
-            dictionary_store_elapsed_us,
-            &[("subsystem", "oxz"), ("op", "read_dictionary_store")],
-        );
         profile::event(
             tags::PROFILE_OXZ,
             &[tags::TAG_OXZ],
@@ -190,21 +170,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
         self.reader.read_exact(&mut data)?;
 
         let elapsed_us = duration_to_us(start.elapsed());
-        telemetry::increment_counter(
-            tags::METRIC_OXZ_READ_BLOCK_COUNT,
-            1,
-            &[("subsystem", "oxz"), ("op", "read_chunk")],
-        );
-        telemetry::increment_counter(
-            tags::METRIC_OXZ_READ_CHUNK_DESCRIPTOR_COUNT,
-            1,
-            &[("subsystem", "oxz"), ("op", "read_chunk_descriptor")],
-        );
-        telemetry::record_histogram(
-            tags::METRIC_OXZ_READ_BLOCK_LATENCY_US,
-            elapsed_us,
-            &[("subsystem", "oxz"), ("op", "read_chunk")],
-        );
         profile::event(
             tags::PROFILE_OXZ,
             &[tags::TAG_OXZ],

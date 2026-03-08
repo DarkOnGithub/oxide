@@ -29,7 +29,7 @@ use crate::telemetry::tags;
 use crate::types::{Batch, FileFormat, Result};
 
 /// Tag stack for scanner profiling events.
-const PROFILE_TAG_STACK_SCANNER: &[&str] = &[tags::TAG_SYSTEM, tags::TAG_SCANNER];
+const PROFILE_TAG_STACK_SCANNER: &[&str] = &[tags::TAG_SCANNER];
 const FORMAT_PROBE_LIMIT: usize = 64 * 1024;
 
 /// Boundary mode selected for chunking a file into batches.
@@ -112,16 +112,8 @@ impl InputScanner {
         let result = self.scan_file_inner(path);
 
         let elapsed_us = profile::elapsed_us(started_at);
-        telemetry::increment_counter(
-            tags::METRIC_SCANNER_SCAN_COUNT,
-            1,
-            &[("subsystem", "scanner"), ("op", "scan_file")],
-        );
-        telemetry::record_histogram(
-            tags::METRIC_SCANNER_SCAN_LATENCY_US,
-            elapsed_us,
-            &[("subsystem", "scanner"), ("op", "scan_file")],
-        );
+        telemetry::increment_counter(tags::METRIC_SCANNER_SCAN_COUNT, 1);
+        telemetry::record_histogram(tags::METRIC_SCANNER_SCAN_LATENCY_US, elapsed_us);
 
         match &result {
             Ok(_batches) => {
@@ -189,7 +181,6 @@ impl InputScanner {
         let data = mapped_data.as_slice();
         let scan_detection = self.detect_scan_detection(path, format);
         let boundary_mode = scan_detection.boundary_mode;
-        self.record_mode(boundary_mode);
 
         let estimated_batches = len.saturating_add(self.chunking_policy.target_size - 1)
             / self.chunking_policy.target_size;
@@ -516,23 +507,10 @@ impl InputScanner {
 
     /// Falls back to raw mode if the metadata detection fails.
     pub fn fallback_to_raw(&self, _reason: &'static str) -> BoundaryMode {
-        telemetry::increment_counter(
-            tags::METRIC_SCANNER_FALLBACK_COUNT,
-            1,
-            &[("subsystem", "scanner"), ("op", "fallback")],
-        );
+        telemetry::increment_counter(tags::METRIC_SCANNER_FALLBACK_COUNT, 1);
         BoundaryMode::Raw
     }
 
-    pub fn record_mode(&self, mode: BoundaryMode) {
-        let metric_tag = match mode {
-            BoundaryMode::TextNewline => tags::METRIC_SCANNER_MODE_TEXT_COUNT,
-            BoundaryMode::ImageRows { row_bytes: _ } => tags::METRIC_SCANNER_MODE_IMAGE_COUNT,
-            BoundaryMode::AudioFrames { frame_bytes: _ } => tags::METRIC_SCANNER_MODE_AUDIO_COUNT,
-            BoundaryMode::Raw => tags::METRIC_SCANNER_MODE_RAW_COUNT,
-        };
-        telemetry::increment_counter(metric_tag, 1, &[("subsystem", "scanner"), ("op", "mode")]);
-    }
 }
 
 fn audio_sample_layout_for_codec(codec: CodecType) -> Option<(AudioSampleEncoding, AudioEndian)> {

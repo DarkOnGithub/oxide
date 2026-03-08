@@ -3,8 +3,6 @@ use std::time::{Duration, Instant};
 
 use crate::compression::{apply_compression_request_with_scratch, CompressionRequest};
 use crate::io::ChunkingPolicy;
-use crate::telemetry::{self, profile, tags};
-use crate::types::duration_to_us;
 use crate::{
     Batch, ChunkEncodingPlan, CompressionAlgo, CompressionPreset, Result, WorkerScratchArena,
 };
@@ -167,44 +165,7 @@ pub fn plan_batch_encoding(
 }
 
 pub fn record_planner_telemetry(summary: &PlannerSummary, elapsed: Duration) {
-    let elapsed_us = duration_to_us(elapsed);
-    let mode = preset_label(summary.mode);
-    let chunking_mode = match summary.chunking_policy.mode {
-        crate::io::ChunkingMode::Fixed => "fixed",
-        crate::io::ChunkingMode::Adaptive => "adaptive",
-    };
-    let labels = [("mode", mode), ("chunking", chunking_mode)];
-
-    telemetry::increment_counter(tags::METRIC_PLANNER_RUN_COUNT, 1, &labels);
-    telemetry::record_histogram(tags::METRIC_PLANNER_RUN_LATENCY_US, elapsed_us, &labels);
-    telemetry::record_histogram(
-        tags::METRIC_PLANNER_CHUNK_COUNT,
-        summary.chunk_count as u64,
-        &labels,
-    );
-    telemetry::record_histogram(
-        tags::METRIC_PLANNER_CHUNK_BYTES,
-        summary.avg_chunk_bytes().round() as u64,
-        &labels,
-    );
-    telemetry::record_histogram(
-        tags::METRIC_PLANNER_DICTIONARY_COUNT,
-        summary.dictionary_count as u64,
-        &labels,
-    );
-    telemetry::record_histogram(
-        tags::METRIC_PLANNER_DICTIONARY_BYTES,
-        summary.dictionary_bytes as u64,
-        &labels,
-    );
-    profile::event(
-        tags::PROFILE_PLANNER,
-        &[tags::TAG_SYSTEM, tags::TAG_PLANNER],
-        "plan",
-        "ok",
-        elapsed_us,
-        "planner completed",
-    );
+    let _ = (summary, elapsed);
 }
 
 fn better_candidate(candidate: CandidatePlan, current: Option<CandidatePlan>) -> bool {
@@ -231,13 +192,5 @@ fn preset_rank(preset: CompressionPreset) -> u8 {
         CompressionPreset::Fast => 0,
         CompressionPreset::Default => 1,
         CompressionPreset::High => 2,
-    }
-}
-
-fn preset_label(preset: CompressionPreset) -> &'static str {
-    match preset {
-        CompressionPreset::Fast => "fast",
-        CompressionPreset::Default => "balanced",
-        CompressionPreset::High => "max_ratio",
     }
 }
