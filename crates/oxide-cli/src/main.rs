@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand, ValueEnum};
 use oxide_core::telemetry::{HistogramSnapshot, TelemetrySnapshot};
 use oxide_core::{
-    ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReport, ArchiveSourceKind,
-    BufferPool, CompressionAlgo, CompressionPreset, ExtractReport, PipelinePerformanceOptions,
-    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
+    ArchiveEntryKind, ArchiveListingEntry, ArchivePipeline, ArchivePipelineConfig,
+    ArchiveProgressEvent, ArchiveReader, ArchiveReport, ArchiveSourceKind, BufferPool,
+    CompressionAlgo, CompressionPreset, ExtractReport, PipelinePerformanceOptions, ReportValue,
+    RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
 };
 
 #[derive(Parser)]
@@ -118,6 +119,11 @@ enum Commands {
         #[arg(long, default_value_t = num_cpus::get())]
         workers: usize,
     },
+    /// Print the contents of an .oxz archive as a tree with sizes.
+    Tree {
+        /// Source archive to inspect.
+        input: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -205,6 +211,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             stats_interval_ms,
             workers,
         } => extract_command(input, output, stats_interval_ms, workers)?,
+        Commands::Tree { input } => tree_command(input)?,
     }
 
     Ok(())
@@ -330,19 +337,7 @@ fn extract_command(
     workers: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_path = output.unwrap_or_else(|| default_extract_output_path(&input));
-    let decode_workers = workers.max(1);
-    let buffer_pool = Arc::new(BufferPool::new(
-        1024 * 1024,
-        decode_workers.saturating_mul(8),
-    ));
-    let mut config = ArchivePipelineConfig::new(
-        1024 * 1024,
-        decode_workers,
-        buffer_pool,
-        CompressionAlgo::Lz4,
-    );
-    config.performance = PipelinePerformanceOptions::default();
-    let pipeline = ArchivePipeline::new(config);
+    let pipeline = build_extract_pipeline(workers);
 
     let telemetry_options = RunTelemetryOptions {
         progress_interval: Duration::from_millis(stats_interval_ms.max(50)),
@@ -362,6 +357,122 @@ fn extract_command(
 
     print_extract_report_summary(&input, &output_path, &report);
     Ok(())
+}
+
+fn tree_command(input: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let reader = ArchiveReader::new(File::open(&input)?)?;
+    let manifest = reader
+        .manifest()
+        .ok_or(oxide_core::OxideError::InvalidFormat(
+            "archive tree metadata is not present; only newly created archives are supported",
+        ))?;
+    print_archive_tree(&input, manifest.entries());
+    Ok(())
+}
+
+fn build_extract_pipeline(workers: usize) -> ArchivePipeline {
+    let decode_workers = workers.max(1);
+    let buffer_pool = Arc::new(BufferPool::new(
+        1024 * 1024,
+        decode_workers.saturating_mul(8),
+    ));
+    let mut config = ArchivePipelineConfig::new(
+        1024 * 1024,
+        decode_workers,
+        buffer_pool,
+        CompressionAlgo::Lz4,
+    );
+    config.performance = PipelinePerformanceOptions::default();
+    ArchivePipeline::new(config)
+}
+
+#[derive(Debug, Default)]
+struct TreeNode {
+    kind: Option<ArchiveEntryKind>,
+    size: u64,
+    children: BTreeMap<String, TreeNode>,
+}
+
+fn print_archive_tree(archive_path: &Path, entries: &[ArchiveListingEntry]) {
+    let root_label = archive_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| archive_path.as_os_str().to_str().unwrap_or("<archive>"));
+
+    let mut root = build_tree(entries);
+    finalize_tree_sizes(&mut root);
+    println!("{root_label} [{}]", format_bytes(root.size));
+    render_tree_children(&root, "");
+
+    let file_count = entries
+        .iter()
+        .filter(|entry| matches!(entry.kind, ArchiveEntryKind::File))
+        .count();
+    let directory_count = entries
+        .iter()
+        .filter(|entry| matches!(entry.kind, ArchiveEntryKind::Directory))
+        .count();
+    println!();
+    println!("{directory_count} directories, {file_count} files");
+}
+
+fn build_tree(entries: &[ArchiveListingEntry]) -> TreeNode {
+    let mut root = TreeNode::default();
+    for entry in entries {
+        insert_tree_entry(&mut root, entry);
+    }
+    root
+}
+
+fn insert_tree_entry(root: &mut TreeNode, entry: &ArchiveListingEntry) {
+    let mut node = root;
+    for segment in entry.path.split('/').filter(|segment| !segment.is_empty()) {
+        node = node.children.entry(segment.to_string()).or_default();
+    }
+    node.kind = Some(entry.kind);
+    node.size = entry.size;
+}
+
+fn finalize_tree_sizes(node: &mut TreeNode) -> u64 {
+    if node.children.is_empty() {
+        return node.size;
+    }
+
+    let mut total = 0u64;
+    for child in node.children.values_mut() {
+        total = total.saturating_add(finalize_tree_sizes(child));
+    }
+    if matches!(node.kind, Some(ArchiveEntryKind::File)) {
+        total = total.saturating_add(node.size);
+    }
+    node.size = total;
+    total
+}
+
+fn render_tree_children(node: &TreeNode, prefix: &str) {
+    let len = node.children.len();
+    for (index, (name, child)) in node.children.iter().enumerate() {
+        let is_last = index + 1 == len;
+        let branch = if is_last { "└──" } else { "├──" };
+        let next_prefix = if is_last {
+            format!("{prefix}    ")
+        } else {
+            format!("{prefix}│   ")
+        };
+        let label = if is_directory_node(child) {
+            format!("{name}/")
+        } else {
+            name.to_string()
+        };
+        println!("{prefix}{branch} {label} [{}]", format_bytes(child.size));
+        if is_directory_node(child) {
+            render_tree_children(child, &next_prefix);
+        }
+    }
+}
+
+fn is_directory_node(node: &TreeNode) -> bool {
+    matches!(node.kind, Some(ArchiveEntryKind::Directory)) || !node.children.is_empty()
 }
 
 struct ArchiveCliSink<'a> {

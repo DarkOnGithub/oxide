@@ -3,8 +3,8 @@ use core::ptr;
 
 use crate::telemetry::{self, tags};
 
-use super::MIN_MATCH;
 use super::copy::{self, CopyKernel};
+use super::MIN_MATCH;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DecodeError {

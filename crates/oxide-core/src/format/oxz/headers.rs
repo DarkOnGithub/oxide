@@ -20,6 +20,7 @@ pub enum SectionType {
     TransformChainTable = 4,
     DedupReferenceTable = 5,
     PayloadRegion = 6,
+    ArchiveManifest = 7,
 }
 
 impl SectionType {
@@ -31,6 +32,7 @@ impl SectionType {
             4 => Ok(Self::TransformChainTable),
             5 => Ok(Self::DedupReferenceTable),
             6 => Ok(Self::PayloadRegion),
+            7 => Ok(Self::ArchiveManifest),
             _ => Err(OxideError::InvalidFormat("unknown section type")),
         }
     }

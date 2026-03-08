@@ -7,8 +7,9 @@ use crate::types::duration_to_us;
 use crate::{OxideError, Result};
 
 use super::{
-    CHUNK_DESCRIPTOR_SIZE, ChunkDescriptor, FOOTER_SIZE, Footer, GLOBAL_HEADER_SIZE, GlobalHeader,
-    SectionTableEntry, SectionType, StoredDictionary, decode_dictionary_store,
+    decode_dictionary_store, ArchiveManifest, ChunkDescriptor, Footer, GlobalHeader,
+    SectionTableEntry, SectionType, StoredDictionary, CHUNK_DESCRIPTOR_SIZE, FOOTER_SIZE,
+    GLOBAL_HEADER_SIZE,
 };
 
 /// Reads OXZ archives and provides access to individual chunk payloads.
@@ -20,6 +21,7 @@ pub struct ArchiveReader<R: Read + Seek> {
     global_header: GlobalHeader,
     section_table: Vec<SectionTableEntry>,
     dictionaries: Vec<StoredDictionary>,
+    manifest: Option<ArchiveManifest>,
     chunk_descriptors: Vec<ChunkDescriptor>,
     chunk_offsets: Vec<u64>,
     footer: Footer,
@@ -44,6 +46,9 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let dictionary_store_started = Instant::now();
         let dictionaries = Self::read_dictionary_store(&mut reader, *dictionary_store_entry)?;
         let dictionary_store_elapsed_us = duration_to_us(dictionary_store_started.elapsed());
+        let manifest = Self::find_section(&section_table, SectionType::ArchiveManifest)
+            .map(|entry| Self::read_manifest(&mut reader, *entry))
+            .transpose()?;
 
         let chunk_index_started = Instant::now();
         let (chunk_descriptors, chunk_offsets) =
@@ -116,6 +121,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             global_header,
             section_table,
             dictionaries,
+            manifest,
             chunk_descriptors,
             chunk_offsets,
             footer,
@@ -156,6 +162,10 @@ impl<R: Read + Seek> ArchiveReader<R> {
             .iter()
             .find(|dictionary| dictionary.id == dict_id)
             .map(|dictionary| dictionary.data.as_slice())
+    }
+
+    pub fn manifest(&self) -> Option<&ArchiveManifest> {
+        self.manifest.as_ref()
     }
 
     /// Reads a specific chunk by its index.
@@ -261,10 +271,17 @@ impl<R: Read + Seek> ArchiveReader<R> {
         entries: &[SectionTableEntry],
         section_type: SectionType,
     ) -> Result<&SectionTableEntry> {
+        Self::find_section(entries, section_type)
+            .ok_or(OxideError::InvalidFormat("missing required section"))
+    }
+
+    fn find_section(
+        entries: &[SectionTableEntry],
+        section_type: SectionType,
+    ) -> Option<&SectionTableEntry> {
         entries
             .iter()
             .find(|entry| entry.section_type == section_type)
-            .ok_or(OxideError::InvalidFormat("missing required section"))
     }
 
     fn read_chunk_index(
@@ -331,6 +348,15 @@ impl<R: Read + Seek> ArchiveReader<R> {
         reader.seek(SeekFrom::Start(dictionary_store_entry.offset))?;
         reader.read_exact(&mut bytes)?;
         decode_dictionary_store(&bytes)
+    }
+
+    fn read_manifest(reader: &mut R, manifest_entry: SectionTableEntry) -> Result<ArchiveManifest> {
+        let len = usize::try_from(manifest_entry.length)
+            .map_err(|_| OxideError::InvalidFormat("manifest length exceeds usize range"))?;
+        let mut bytes = vec![0u8; len];
+        reader.seek(SeekFrom::Start(manifest_entry.offset))?;
+        reader.read_exact(&mut bytes)?;
+        ArchiveManifest::decode(&bytes)
     }
 
     fn section_data_end(entries: &[SectionTableEntry]) -> Result<u64> {

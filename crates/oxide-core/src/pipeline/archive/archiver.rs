@@ -22,8 +22,9 @@ use crate::buffer::BufferPool;
 use crate::compression::{apply_compression_request_with_scratch, CompressionRequest};
 use crate::core::{WorkerPool, WorkerPoolHandle, WorkerScratchArena};
 use crate::format::{
-    ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter, CHUNK_DESCRIPTOR_SIZE,
-    CORE_SECTION_COUNT, FOOTER_SIZE, GLOBAL_HEADER_SIZE, SECTION_TABLE_ENTRY_SIZE,
+    ArchiveBlockWriter, ArchiveManifest, ArchiveWriter, SeekableArchiveWriter,
+    CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
+    SECTION_TABLE_ENTRY_SIZE,
 };
 use crate::io::{ChunkingPolicy, InputScanner, MmapInput};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
@@ -34,8 +35,6 @@ pub const DIRECTORY_FORMAT_PROBE_LIMIT: usize = 64 * 1024;
 pub const DIRECTORY_PREFETCH_WINDOW: usize = 8;
 pub const MIN_INFLIGHT_BLOCKS: usize = 64;
 pub const MAX_INFLIGHT_BLOCKS: usize = 4096;
-pub const OXZ_SECTION_TABLE_BYTES: u64 =
-    CORE_SECTION_COUNT as u64 * SECTION_TABLE_ENTRY_SIZE as u64;
 pub const AUTOTUNE_CANDIDATE_BLOCK_SIZES: [usize; 5] = [
     256 * 1024,
     512 * 1024,
@@ -45,11 +44,17 @@ pub const AUTOTUNE_CANDIDATE_BLOCK_SIZES: [usize; 5] = [
 ];
 
 #[inline]
-pub fn container_prefix_bytes(block_count: u32, dictionary_bytes: usize) -> u64 {
+pub fn container_prefix_bytes(
+    block_count: u32,
+    dictionary_bytes: usize,
+    manifest_bytes: usize,
+) -> u64 {
+    let section_count = CORE_SECTION_COUNT as u64 + if manifest_bytes > 0 { 1 } else { 0 };
     GLOBAL_HEADER_SIZE as u64
-        + OXZ_SECTION_TABLE_BYTES
+        + section_count * SECTION_TABLE_ENTRY_SIZE as u64
         + block_count as u64 * CHUNK_DESCRIPTOR_SIZE as u64
         + dictionary_bytes as u64
+        + manifest_bytes as u64
 }
 
 pub struct Archiver<'a> {
@@ -101,8 +106,13 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries| {
-                ArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            |writer, pool, dictionaries, manifest| {
+                ArchiveWriter::with_dictionaries_and_manifest(
+                    writer,
+                    pool,
+                    dictionaries,
+                    Some(manifest),
+                )
             },
         )
     }
@@ -128,8 +138,13 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries| {
-                SeekableArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            |writer, pool, dictionaries, manifest| {
+                SeekableArchiveWriter::with_dictionaries_and_manifest(
+                    writer,
+                    pool,
+                    dictionaries,
+                    Some(manifest),
+                )
             },
         )
     }
@@ -146,8 +161,13 @@ impl<'a> Archiver<'a> {
             writer,
             options,
             sink,
-            |writer, pool, dictionaries| {
-                ArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            |writer, pool, dictionaries, manifest| {
+                ArchiveWriter::with_dictionaries_and_manifest(
+                    writer,
+                    pool,
+                    dictionaries,
+                    Some(manifest),
+                )
             },
         )
     }
@@ -164,8 +184,13 @@ impl<'a> Archiver<'a> {
             writer,
             options,
             sink,
-            |writer, pool, dictionaries| {
-                SeekableArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            |writer, pool, dictionaries, manifest| {
+                SeekableArchiveWriter::with_dictionaries_and_manifest(
+                    writer,
+                    pool,
+                    dictionaries,
+                    Some(manifest),
+                )
             },
         )
     }
@@ -181,7 +206,9 @@ impl<'a> Archiver<'a> {
     where
         W: Write + Send + 'static,
         AW: ArchiveBlockWriter<InnerWriter = W> + Send + 'static,
-        F: FnOnce(W, Arc<BufferPool>, Vec<crate::format::StoredDictionary>) -> AW + Send + 'static,
+        F: FnOnce(W, Arc<BufferPool>, Vec<crate::format::StoredDictionary>, ArchiveManifest) -> AW
+            + Send
+            + 'static,
     {
         let mut stage_timings = StageTimings::default();
 
@@ -226,8 +253,10 @@ impl<'a> Archiver<'a> {
             block_size.selected_block_size,
             self.config.performance.preserve_directory_format_boundaries,
         )?;
+        let manifest = directory::manifest_from_discovery(&discovery);
         let input_bytes_total = discovery.input_bytes_total;
         let dictionary_bytes = directory_dictionaries.total_bytes();
+        let manifest_bytes = manifest.encode()?.len();
         let total_blocks = usize::try_from(block_count)
             .map_err(|_| crate::OxideError::InvalidFormat("block count exceeds usize range"))?;
         let max_inflight_blocks = max_inflight_blocks(
@@ -269,19 +298,26 @@ impl<'a> Archiver<'a> {
         let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes(
             block_count,
             dictionary_bytes,
+            manifest_bytes,
         )));
         let writer_output_bytes_shared = Arc::clone(&writer_output_bytes);
         let writer_buffer_pool = Arc::clone(&self.config.buffer_pool);
         let writer_dictionaries = directory_dictionaries.entries().to_vec();
+        let writer_manifest = manifest.clone();
         let writer_handle = thread::spawn(move || -> Result<DirectoryWriterOutcome<W>> {
-            let mut archive_writer =
-                writer_factory(writer, writer_buffer_pool, writer_dictionaries);
+            let mut archive_writer = writer_factory(
+                writer,
+                writer_buffer_pool,
+                writer_dictionaries,
+                writer_manifest,
+            );
             archive_writer.write_global_header_with_flags(
                 block_count,
                 directory::source_kind_flags(ArchiveSourceKind::Directory),
             )?;
 
-            let mut output_bytes_written = container_prefix_bytes(block_count, dictionary_bytes);
+            let mut output_bytes_written =
+                container_prefix_bytes(block_count, dictionary_bytes, manifest_bytes);
             let mut pending_sizes = BTreeMap::<usize, usize>::new();
             let mut next_written_id = 0usize;
             let mut pending_write_peak = 0usize;
@@ -340,7 +376,8 @@ impl<'a> Archiver<'a> {
         let mut received_count = 0usize;
         let mut submitted_count = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
-        let mut output_bytes_written = container_prefix_bytes(block_count, dictionary_bytes);
+        let mut output_bytes_written =
+            container_prefix_bytes(block_count, dictionary_bytes, manifest_bytes);
         let mut raw_passthrough_blocks = 0u64;
         let mut writer_queue_peak = 0usize;
         let result_wait_timeout = self
@@ -874,8 +911,13 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries| {
-                ArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            |writer, pool, dictionaries, manifest| {
+                ArchiveWriter::with_dictionaries_and_manifest(
+                    writer,
+                    pool,
+                    dictionaries,
+                    Some(manifest),
+                )
             },
         )
     }
@@ -894,8 +936,13 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries| {
-                SeekableArchiveWriter::with_dictionaries(writer, pool, dictionaries)
+            |writer, pool, dictionaries, manifest| {
+                SeekableArchiveWriter::with_dictionaries_and_manifest(
+                    writer,
+                    pool,
+                    dictionaries,
+                    Some(manifest),
+                )
             },
         )
     }
@@ -912,10 +959,11 @@ impl<'a> Archiver<'a> {
     where
         W: Write,
         AW: ArchiveBlockWriter<InnerWriter = W>,
-        F: FnOnce(W, Arc<BufferPool>, Vec<crate::format::StoredDictionary>) -> AW,
+        F: FnOnce(W, Arc<BufferPool>, Vec<crate::format::StoredDictionary>, ArchiveManifest) -> AW,
     {
         let PreparedInput {
             source_kind,
+            manifest,
             batches,
             input_bytes_total,
             dictionaries,
@@ -925,6 +973,7 @@ impl<'a> Archiver<'a> {
         let block_count = u32::try_from(total_blocks)
             .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
         let dictionary_bytes = dictionaries.total_bytes();
+        let manifest_bytes = manifest.encode()?.len();
         let max_inflight_blocks = max_inflight_blocks(
             total_blocks,
             self.config.workers,
@@ -958,12 +1007,14 @@ impl<'a> Archiver<'a> {
             writer,
             Arc::clone(&self.config.buffer_pool),
             dictionaries.entries().to_vec(),
+            manifest,
         );
         archive_writer.write_global_header_with_flags(
             block_count,
             directory::source_kind_flags(source_kind),
         )?;
-        let mut output_bytes_written = container_prefix_bytes(block_count, dictionary_bytes);
+        let mut output_bytes_written =
+            container_prefix_bytes(block_count, dictionary_bytes, manifest_bytes);
         let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
         let mut next_write_id = 0usize;
 
@@ -1265,8 +1316,10 @@ impl<'a> Archiver<'a> {
         )?;
         record_planner_telemetry(&summary, planner_started.elapsed());
         let input_bytes_total = batches.iter().map(|batch| batch.len() as u64).sum();
+        let manifest = file_manifest(path, input_bytes_total)?;
         Ok(PreparedInput {
             source_kind: ArchiveSourceKind::File,
+            manifest,
             batches,
             input_bytes_total,
             dictionaries,
@@ -1292,6 +1345,19 @@ pub fn max_inflight_blocks(
         .min(bounded_by_bytes)
         .clamp(1, MAX_INFLIGHT_BLOCKS);
     bounded.min(total_blocks.max(1))
+}
+
+fn file_manifest(path: &Path, size: u64) -> Result<ArchiveManifest> {
+    let name = path.file_name().and_then(|value| value.to_str()).ok_or(
+        crate::OxideError::InvalidFormat(
+            "file archive requires a utf8 file name for manifest metadata",
+        ),
+    )?;
+    Ok(ArchiveManifest::new(vec![crate::ArchiveListingEntry {
+        path: name.to_string(),
+        kind: crate::ArchiveEntryKind::File,
+        size,
+    }]))
 }
 
 pub fn record_result_to_writer_queue(

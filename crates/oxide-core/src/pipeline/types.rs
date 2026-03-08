@@ -16,6 +16,26 @@ pub enum ArchiveSourceKind {
     Directory,
 }
 
+/// Indicates whether an archive listing entry is a file or directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArchiveEntryKind {
+    /// Entry is a regular file.
+    File,
+    /// Entry is a directory.
+    Directory,
+}
+
+/// Metadata for a single entry discovered while inspecting an archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveListingEntry {
+    /// Path relative to the archive root.
+    pub path: String,
+    /// Entry kind.
+    pub kind: ArchiveEntryKind,
+    /// File size in bytes. Directory entries report `0`.
+    pub size: u64,
+}
+
 /// Extensible metric value used by pipeline internals before report export.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatValue {

@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oxide_core::{
-    ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader, BufferPool,
-    CompressionAlgo, ExtractProgressEvent, PreProcessingStrategy, ReportValue, RunTelemetryOptions,
-    TelemetryEvent, TelemetrySink, FOOTER_SIZE, GLOBAL_HEADER_SIZE, SECTION_TABLE_ENTRY_SIZE,
+    ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader,
+    BufferPool, CompressionAlgo, ExtractProgressEvent, PreProcessingStrategy, ReportValue,
+    RunTelemetryOptions, TelemetryEvent, TelemetrySink, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
+    SECTION_TABLE_ENTRY_SIZE,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -494,6 +495,93 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
+fn archive_reader_exposes_directory_manifest() -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "nested/data.bin", &[9, 8, 7])?;
+    write_directory_file(&source, "nested/empty.bin", b"")?;
+    std::fs::create_dir_all(source.path().join("empty/leaf"))?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let reader = ArchiveReader::new(Cursor::new(archive))?;
+    let manifest = reader.manifest().expect("missing archive manifest");
+    assert_eq!(
+        manifest.entries(),
+        vec![
+            oxide_core::ArchiveListingEntry {
+                path: "empty".to_string(),
+                kind: ArchiveEntryKind::Directory,
+                size: 0,
+            },
+            oxide_core::ArchiveListingEntry {
+                path: "empty/leaf".to_string(),
+                kind: ArchiveEntryKind::Directory,
+                size: 0,
+            },
+            oxide_core::ArchiveListingEntry {
+                path: "nested".to_string(),
+                kind: ArchiveEntryKind::Directory,
+                size: 0,
+            },
+            oxide_core::ArchiveListingEntry {
+                path: "nested/data.bin".to_string(),
+                kind: ArchiveEntryKind::File,
+                size: 3,
+            },
+            oxide_core::ArchiveListingEntry {
+                path: "nested/empty.bin".to_string(),
+                kind: ArchiveEntryKind::File,
+                size: 0,
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn archive_reader_exposes_file_manifest() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(64 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let reader = ArchiveReader::new(Cursor::new(archive))?;
+    let manifest = reader.manifest().expect("missing archive manifest");
+    assert_eq!(
+        manifest.entries(),
+        vec![oxide_core::ArchiveListingEntry {
+            path: file
+                .path()
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("utf8 file name")
+                .to_string(),
+            kind: ArchiveEntryKind::File,
+            size: data.len() as u64,
+        }]
+    );
+    Ok(())
+}
+
+#[test]
 fn extract_archive_ignores_footer_crc_mismatch() -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(96 * 1024);
     let file = write_fixture(&data)?;
@@ -535,7 +623,12 @@ fn extract_archive_ignores_payload_checksum_mismatch() -> Result<(), Box<dyn std
             None,
         )?
         .writer;
-    let payload_entry_index = 5usize;
+    let reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+    let payload_entry_index = reader
+        .section_table()
+        .iter()
+        .position(|entry| entry.section_type == oxide_core::SectionType::PayloadRegion)
+        .expect("payload section");
     let payload_checksum_offset =
         GLOBAL_HEADER_SIZE + (payload_entry_index * SECTION_TABLE_ENTRY_SIZE) + 20;
     archive[payload_checksum_offset] ^= 0xA5;

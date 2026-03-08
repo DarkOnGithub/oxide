@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 
-use crate::compression::{CompressionRequest, apply_compression_request_with_scratch};
+use crate::compression::{apply_compression_request_with_scratch, CompressionRequest};
 use crate::io::ChunkingPolicy;
 use crate::telemetry::{self, profile, tags};
 use crate::types::duration_to_us;
@@ -13,7 +13,7 @@ pub mod dictionary;
 pub mod objective;
 
 pub use dictionary::DictionaryCatalog;
-pub use objective::{ObjectiveScore, ObjectiveWeights, score_candidate};
+pub use objective::{score_candidate, ObjectiveScore, ObjectiveWeights};
 
 pub const MAX_DICTIONARY_BYTES: usize = 16 * 1024;
 const MAX_TRIAL_BYTES: usize = 64 * 1024;

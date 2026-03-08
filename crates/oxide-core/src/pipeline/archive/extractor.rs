@@ -6,16 +6,15 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, TryRecvError, bounded};
+use crossbeam_channel::{bounded, Receiver, TryRecvError};
 
 use crate::core::WorkerRuntimeSnapshot;
-use crate::format::{ArchiveReader, BlockHeader, FOOTER_SIZE, GlobalHeader};
+use crate::format::{ArchiveReader, BlockHeader, GlobalHeader, FOOTER_SIZE};
 use crate::telemetry::{ReportValue, RunTelemetryOptions, TelemetrySink};
 use crate::types::Result;
 
 use super::super::directory;
 use super::super::types::ArchiveSourceKind;
-use super::archiver::container_prefix_bytes;
 use super::directory_restore::DirectoryRestoreWriter;
 use super::reorder_writer::{BoundedReorderWriter, OrderedChunkWriter};
 use super::telemetry::*;
@@ -283,15 +282,15 @@ impl Extractor {
         }
         drop(result_tx);
 
-        let dictionary_bytes_total = archive
+        let payload_offset = archive
             .section_table()
             .iter()
-            .find(|entry| entry.section_type == crate::SectionType::DictionaryStore)
-            .map(|entry| entry.length as usize)
-            .unwrap_or(0);
-        let mut archive_bytes_total =
-            container_prefix_bytes(block_capacity as u32, dictionary_bytes_total)
-                + FOOTER_SIZE as u64;
+            .find(|entry| entry.section_type == crate::SectionType::PayloadRegion)
+            .map(|entry| entry.offset)
+            .ok_or(crate::OxideError::InvalidFormat(
+                "missing payload region section",
+            ))?;
+        let mut archive_bytes_total = payload_offset + FOOTER_SIZE as u64;
         let mut submitted = 0usize;
         let mut received = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
