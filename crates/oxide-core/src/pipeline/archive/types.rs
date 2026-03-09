@@ -1,6 +1,5 @@
 use super::super::directory;
 use super::super::types::ArchiveSourceKind;
-use super::planning::DictionaryCatalog;
 use crate::core::{PoolRuntimeSnapshot, WorkerRuntimeSnapshot};
 use crate::format::{ArchiveManifest, BlockHeader};
 use crate::types::{duration_to_us, Batch};
@@ -13,28 +12,6 @@ pub struct PreparedInput {
     pub manifest: ArchiveManifest,
     pub batches: Vec<Batch>,
     pub input_bytes_total: u64,
-    pub dictionaries: DictionaryCatalog,
-    pub planner_summary: Option<PlannerArchiveSummary>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PlannerArchiveSummary {
-    pub mode: crate::CompressionPreset,
-    pub chunking_mode: &'static str,
-    pub superchunk_size: usize,
-    pub chunk_count: usize,
-    pub avg_chunk_bytes: f64,
-    pub min_chunk_bytes: usize,
-    pub max_chunk_bytes: usize,
-    pub dictionary_count: usize,
-    pub dictionary_bytes: usize,
-    pub chunks_with_dictionaries: u64,
-    pub preset_chunk_counts: [u64; 3],
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct BlockSizeDecision {
-    pub selected_block_size: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

@@ -17,7 +17,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 use crate::format::FormatDetector;
-use crate::io::chunking::{find_content_defined_cut, ChunkingMode, ChunkingPolicy};
+use crate::io::chunking::ChunkingPolicy;
 use crate::io::MmapInput;
 use crate::preprocessing::{
     AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat,
@@ -288,7 +288,7 @@ impl InputScanner {
     fn find_text_boundary(
         &self,
         data: &[u8],
-        start: usize,
+        _start: usize,
         min_cut: usize,
         target: usize,
         max_cut: usize,
@@ -304,50 +304,26 @@ impl InputScanner {
             }
         }
 
-        if matches!(self.chunking_policy.mode, ChunkingMode::Adaptive) {
-            if let Some(cut) = find_content_defined_cut(
-                data,
-                start,
-                min_cut,
-                max_cut,
-                self.chunking_policy.cdc_mask,
-            ) {
-                return cut;
-            }
-        }
-
         target.min(max_cut)
     }
 
     fn find_raw_boundary(
         &self,
-        data: &[u8],
-        start: usize,
-        min_cut: usize,
+        _data: &[u8],
+        _start: usize,
+        _min_cut: usize,
         target: usize,
         max_cut: usize,
     ) -> usize {
-        if matches!(self.chunking_policy.mode, ChunkingMode::Adaptive) {
-            if let Some(cut) = find_content_defined_cut(
-                data,
-                start,
-                min_cut,
-                max_cut,
-                self.chunking_policy.cdc_mask,
-            ) {
-                return cut;
-            }
-        }
-
         target.min(max_cut)
     }
 
     fn find_aligned_boundary(
         &self,
         start: usize,
-        min_cut: usize,
+        _min_cut: usize,
         target: usize,
-        max_cut: usize,
+        _max_cut: usize,
         len: usize,
         alignment: usize,
     ) -> usize {
@@ -355,34 +331,17 @@ impl InputScanner {
             return target;
         }
 
-        if matches!(self.chunking_policy.mode, ChunkingMode::Fixed) {
-            let aligned = align_down(target, alignment);
-            if aligned > start {
-                return aligned;
-            }
-
-            let next = next_aligned_after(start, alignment).min(len);
-            if next > start {
-                return next;
-            }
-
-            return start.saturating_add(1).min(len);
-        }
-
-        let bounded_target = target.min(max_cut).min(len);
-        let aligned = align_down(bounded_target, alignment);
-        if aligned >= min_cut && aligned > start {
+        let aligned = align_down(target, alignment);
+        if aligned > start {
             return aligned;
         }
 
-        let next = next_aligned_after(bounded_target, alignment)
-            .min(max_cut)
-            .min(len);
+        let next = next_aligned_after(start, alignment).min(len);
         if next > start {
-            next
-        } else {
-            start.saturating_add(1).min(len)
+            return next;
         }
+
+        start.saturating_add(1).min(len)
     }
 
     /// Detects image mode from image metadata.
