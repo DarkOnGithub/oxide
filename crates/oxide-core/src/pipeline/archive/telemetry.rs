@@ -262,18 +262,6 @@ pub fn build_stats_extensions(
         StatValue::U64(block_size.selected_block_size as u64),
     );
     extensions.insert(
-        "tuning.autotune_requested".to_string(),
-        StatValue::U64(block_size.autotune_requested as u64),
-    );
-    extensions.insert(
-        "tuning.autotune_ran".to_string(),
-        StatValue::U64(block_size.autotune_ran as u64),
-    );
-    extensions.insert(
-        "tuning.autotune_sampled_bytes".to_string(),
-        StatValue::U64(block_size.sampled_bytes as u64),
-    );
-    extensions.insert(
         "compression.raw_passthrough_blocks".to_string(),
         StatValue::U64(raw_passthrough_blocks),
     );

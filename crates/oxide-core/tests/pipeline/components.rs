@@ -1,37 +1,14 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use oxide_core::BufferPool;
 use oxide_core::pipeline::{
-    ArchivePipelineConfig, PipelinePerformanceOptions,
+    PipelinePerformanceOptions,
     archive::ArchivePipeline,
     directory::{BlockCountPlanner, DirectoryBatchSubmitter},
 };
-use oxide_core::types::{CompressionAlgo, FileFormat};
+use oxide_core::types::FileFormat;
 
 mod archive_tests {
     use super::*;
-
-    fn pseudo_random_bytes(len: usize) -> Vec<u8> {
-        let mut state = 0x1234_5678_9ABC_DEF0u64;
-        let mut out = Vec::with_capacity(len);
-        for _ in 0..len {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            out.push((state >> 56) as u8);
-        }
-        out
-    }
-
-    fn build_pipeline_for_score(raw_fallback_enabled: bool) -> ArchivePipeline {
-        let mut config = ArchivePipelineConfig::new(
-            8 * 1024,
-            1,
-            Arc::new(BufferPool::new(16 * 1024, 16)),
-            CompressionAlgo::Lz4,
-        );
-        config.performance.raw_fallback_enabled = raw_fallback_enabled;
-        ArchivePipeline::new(config)
-    }
 
     #[test]
     fn inflight_window_is_limited_by_byte_budget() {
@@ -70,22 +47,6 @@ mod archive_tests {
             ArchivePipeline::select_stored_payload(&source, &compressed_larger, true);
         assert!(raw_larger);
         assert_eq!(stored_larger, source.as_slice());
-    }
-
-    #[test]
-    fn score_block_size_respects_raw_fallback_setting() {
-        let sample = pseudo_random_bytes(64 * 1024);
-
-        let score_with_fallback = build_pipeline_for_score(true)
-            .score_block_size(&sample, 8 * 1024)
-            .expect("score with fallback");
-        let score_without_fallback = build_pipeline_for_score(false)
-            .score_block_size(&sample, 8 * 1024)
-            .expect("score without fallback");
-
-        assert!(score_without_fallback.output_bytes > sample.len());
-        assert!(score_with_fallback.output_bytes <= sample.len());
-        assert!(score_with_fallback.output_bytes <= score_without_fallback.output_bytes);
     }
 }
 

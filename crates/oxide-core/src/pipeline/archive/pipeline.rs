@@ -222,16 +222,6 @@ impl ArchivePipeline {
         super::archiver::select_stored_payload(source, compressed, raw_fallback_enabled)
     }
 
-    pub fn score_block_size(
-        &self,
-        sample: &[u8],
-        block_size: usize,
-    ) -> Result<super::types::BlockSizeScore> {
-        let config = self.config();
-        let archiver = Archiver::new(&config);
-        archiver.score_block_size(sample, block_size)
-    }
-
     /// Extracts all block payload bytes from an OXZ archive in block order and
     /// returns a detailed report.
     pub fn extract_archive<R: Read + Seek>(
