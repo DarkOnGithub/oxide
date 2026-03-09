@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use crossbeam_channel::{bounded, RecvTimeoutError, TryRecvError};
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Seek, Write};
@@ -35,13 +34,6 @@ pub const DIRECTORY_FORMAT_PROBE_LIMIT: usize = 64 * 1024;
 pub const DIRECTORY_PREFETCH_WINDOW: usize = 8;
 pub const MIN_INFLIGHT_BLOCKS: usize = 64;
 pub const MAX_INFLIGHT_BLOCKS: usize = 4096;
-pub const AUTOTUNE_CANDIDATE_BLOCK_SIZES: [usize; 5] = [
-    256 * 1024,
-    512 * 1024,
-    1024 * 1024,
-    2 * 1024 * 1024,
-    4 * 1024 * 1024,
-];
 
 #[inline]
 pub fn container_prefix_bytes(
@@ -1170,132 +1162,20 @@ impl<'a> Archiver<'a> {
 
     pub fn choose_block_size_for_file(
         &self,
-        path: &Path,
-        input_bytes: u64,
+        _path: &Path,
+        _input_bytes: u64,
     ) -> Result<BlockSizeDecision> {
-        if !self.config.performance.autotune_enabled
-            || input_bytes < self.config.performance.autotune_min_input_bytes
-        {
-            return Ok(BlockSizeDecision {
-                selected_block_size: self.config.target_block_size,
-                autotune_requested: self.config.performance.autotune_enabled,
-                autotune_ran: false,
-                sampled_bytes: 0,
-            });
-        }
-
-        let sample = collect_file_sample(path, self.config.performance.autotune_sample_bytes)?;
-        self.pick_tuned_block_size(&sample)
+        Ok(BlockSizeDecision {
+            selected_block_size: self.config.target_block_size,
+        })
     }
 
     fn choose_block_size_for_directory(
         &self,
-        discovery: &directory::DirectoryDiscovery,
+        _discovery: &directory::DirectoryDiscovery,
     ) -> Result<BlockSizeDecision> {
-        if !self.config.performance.autotune_enabled
-            || discovery.input_bytes_total < self.config.performance.autotune_min_input_bytes
-        {
-            return Ok(BlockSizeDecision {
-                selected_block_size: self.config.target_block_size,
-                autotune_requested: self.config.performance.autotune_enabled,
-                autotune_ran: false,
-                sampled_bytes: 0,
-            });
-        }
-
-        let sample =
-            collect_directory_sample(discovery, self.config.performance.autotune_sample_bytes)?;
-        self.pick_tuned_block_size(&sample)
-    }
-
-    pub fn pick_tuned_block_size(&self, sample: &[u8]) -> Result<BlockSizeDecision> {
-        if sample.is_empty() {
-            return Ok(BlockSizeDecision {
-                selected_block_size: self.config.target_block_size,
-                autotune_requested: self.config.performance.autotune_enabled,
-                autotune_ran: false,
-                sampled_bytes: 0,
-            });
-        }
-
-        let mut candidates = AUTOTUNE_CANDIDATE_BLOCK_SIZES.to_vec();
-        let default_block = self.config.target_block_size.max(1);
-        if !candidates.contains(&default_block) {
-            candidates.push(default_block);
-        }
-        candidates.sort_unstable();
-        candidates.dedup();
-
-        let mut scores = Vec::with_capacity(candidates.len());
-        for block_size in candidates {
-            scores.push(self.score_block_size(sample, block_size)?);
-        }
-
-        scores.sort_by(|left, right| {
-            right
-                .objective_score
-                .partial_cmp(&left.objective_score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| left.output_bytes.cmp(&right.output_bytes))
-                .then_with(|| {
-                    right
-                        .throughput_bps
-                        .partial_cmp(&left.throughput_bps)
-                        .unwrap_or(Ordering::Equal)
-                })
-                .then_with(|| left.block_size.cmp(&right.block_size))
-        });
-
-        let selected = scores
-            .first()
-            .map(|score| score.block_size)
-            .unwrap_or(default_block);
         Ok(BlockSizeDecision {
-            selected_block_size: selected.max(1),
-            autotune_requested: self.config.performance.autotune_enabled,
-            autotune_ran: true,
-            sampled_bytes: sample.len(),
-        })
-    }
-
-    pub fn score_block_size(&self, sample: &[u8], block_size: usize) -> Result<BlockSizeScore> {
-        let started = Instant::now();
-        let mut output_bytes = 0usize;
-        let chunk_size = block_size.max(1);
-        let mut trial_scratch = WorkerScratchArena::new();
-        for chunk in sample.chunks(chunk_size) {
-            let compressed = apply_compression_request_with_scratch(
-                CompressionRequest {
-                    data: chunk,
-                    algo: self.config.compression_algo,
-                    preset: self.config.performance.compression_preset,
-                    dictionary: None,
-                },
-                trial_scratch.compression(),
-            )?;
-            let (stored_payload, _raw_passthrough) = select_stored_payload(
-                chunk,
-                compressed.as_slice(),
-                self.config.performance.raw_fallback_enabled,
-            );
-            output_bytes = output_bytes.saturating_add(stored_payload.len());
-        }
-        let elapsed = started.elapsed();
-        let throughput_bps = sample.len() as f64 / elapsed.as_secs_f64().max(1e-9);
-        let objective = super::planning::score_candidate(
-            sample.len(),
-            output_bytes,
-            elapsed,
-            0,
-            super::planning::ObjectiveWeights::for_preset(
-                self.config.performance.compression_preset,
-            ),
-        );
-        Ok(BlockSizeScore {
-            block_size: chunk_size,
-            throughput_bps,
-            output_bytes,
-            objective_score: objective.total,
+            selected_block_size: self.config.target_block_size,
         })
     }
 
@@ -1586,30 +1466,6 @@ pub fn collect_file_sample(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
             break;
         }
         sample.extend_from_slice(&scratch[..read]);
-    }
-    Ok(sample)
-}
-
-fn collect_directory_sample(
-    discovery: &directory::DirectoryDiscovery,
-    max_bytes: usize,
-) -> Result<Vec<u8>> {
-    let limit = max_bytes.max(1);
-    let mut sample = Vec::with_capacity(limit);
-    let mut scratch = vec![0u8; 64 * 1024];
-    for file in &discovery.files {
-        if sample.len() >= limit {
-            break;
-        }
-        let mut reader = fs::File::open(&file.full_path)?;
-        while sample.len() < limit {
-            let to_read = (limit - sample.len()).min(scratch.len());
-            let read = reader.read(&mut scratch[..to_read])?;
-            if read == 0 {
-                break;
-            }
-            sample.extend_from_slice(&scratch[..read]);
-        }
     }
     Ok(sample)
 }

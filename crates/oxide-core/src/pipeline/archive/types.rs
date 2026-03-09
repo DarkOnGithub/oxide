@@ -35,17 +35,6 @@ pub struct PlannerArchiveSummary {
 #[derive(Debug, Clone, Copy)]
 pub struct BlockSizeDecision {
     pub selected_block_size: usize,
-    pub autotune_requested: bool,
-    pub autotune_ran: bool,
-    pub sampled_bytes: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct BlockSizeScore {
-    pub block_size: usize,
-    pub throughput_bps: f64,
-    pub output_bytes: usize,
-    pub objective_score: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

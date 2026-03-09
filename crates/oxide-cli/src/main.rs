@@ -55,10 +55,6 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = PlannerModeArg::Fast)]
         planner_mode: PlannerModeArg,
 
-        /// Enable block-size autotuning for large inputs.
-        #[arg(long, default_value_t = false)]
-        autotune: bool,
-
         /// Buffer pool default capacity (supports suffixes K/M/G).
         #[arg(long, default_value = "1M", value_parser = parse_size)]
         pool_capacity: usize,
@@ -175,7 +171,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             workers,
             compression,
             planner_mode,
-            autotune,
             pool_capacity,
             pool_buffers,
             stats_interval_ms,
@@ -193,7 +188,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             workers,
             compression.into(),
             planner_mode.into(),
-            autotune,
             pool_capacity,
             pool_buffers,
             stats_interval_ms,
@@ -224,7 +218,6 @@ fn archive_command(
     workers: usize,
     compression: CompressionAlgo,
     planner_mode: CompressionPreset,
-    autotune: bool,
     pool_capacity: usize,
     pool_buffers: usize,
     stats_interval_ms: u64,
@@ -252,7 +245,6 @@ fn archive_command(
     } else {
         workers.max(1)
     };
-    performance.autotune_enabled = autotune;
     performance.compression_preset = planner_mode;
     performance.max_inflight_bytes = inflight_bytes.max(1);
     performance.directory_stream_read_buffer_size = stream_read_buffer.max(1);
