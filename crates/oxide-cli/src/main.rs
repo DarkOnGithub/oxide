@@ -51,10 +51,6 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = CompressionArg::Lz4)]
         compression: CompressionArg,
 
-        /// Planner mode controlling adaptive chunking and per-chunk preset selection.
-        #[arg(long, value_enum, default_value_t = PlannerModeArg::Fast)]
-        planner_mode: PlannerModeArg,
-
         /// Buffer pool default capacity (supports suffixes K/M/G).
         #[arg(long, default_value = "1M", value_parser = parse_size)]
         pool_capacity: usize,
@@ -127,27 +123,10 @@ enum CompressionArg {
     Lz4,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum PlannerModeArg {
-    Fast,
-    Balanced,
-    MaxRatio,
-}
-
 impl From<CompressionArg> for CompressionAlgo {
     fn from(value: CompressionArg) -> Self {
         match value {
             CompressionArg::Lz4 => CompressionAlgo::Lz4,
-        }
-    }
-}
-
-impl From<PlannerModeArg> for CompressionPreset {
-    fn from(value: PlannerModeArg) -> Self {
-        match value {
-            PlannerModeArg::Fast => CompressionPreset::Fast,
-            PlannerModeArg::Balanced => CompressionPreset::Default,
-            PlannerModeArg::MaxRatio => CompressionPreset::High,
         }
     }
 }
@@ -170,7 +149,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             block_size,
             workers,
             compression,
-            planner_mode,
             pool_capacity,
             pool_buffers,
             stats_interval_ms,
@@ -187,7 +165,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             block_size,
             workers,
             compression.into(),
-            planner_mode.into(),
             pool_capacity,
             pool_buffers,
             stats_interval_ms,
@@ -217,7 +194,6 @@ fn archive_command(
     block_size: usize,
     workers: usize,
     compression: CompressionAlgo,
-    planner_mode: CompressionPreset,
     pool_capacity: usize,
     pool_buffers: usize,
     stats_interval_ms: u64,
@@ -245,7 +221,7 @@ fn archive_command(
     } else {
         workers.max(1)
     };
-    performance.compression_preset = planner_mode;
+    performance.compression_preset = CompressionPreset::Fast;
     performance.max_inflight_bytes = inflight_bytes.max(1);
     performance.directory_stream_read_buffer_size = stream_read_buffer.max(1);
     performance.producer_threads = producer_threads;
@@ -312,7 +288,6 @@ fn archive_command(
         &input,
         &output_path,
         compression,
-        planner_mode,
         &run.report,
         live_rates.peak_read_bps,
         live_rates.peak_write_bps,
@@ -731,7 +706,6 @@ fn print_archive_report_summary(
     input: &Path,
     output: &Path,
     compression: CompressionAlgo,
-    planner_mode: CompressionPreset,
     report: &ArchiveReport,
     peak_read_bps: f64,
     peak_write_bps: f64,
@@ -752,7 +726,6 @@ fn print_archive_report_summary(
     print_report_value("source", format!("{} ({source_kind})", input.display()));
     print_report_value("output", output.display());
     print_report_value("compression", format!("{:?}", compression));
-    print_report_value("planner mode", planner_mode_label(planner_mode));
     print_report_value("elapsed", format_duration(report.elapsed));
     print_report_value("input bytes", format_bytes(report.input_bytes_total));
     print_report_value("output bytes", format_bytes(report.output_bytes_total));
@@ -1284,14 +1257,6 @@ fn default_extract_output_path(input: &Path) -> PathBuf {
     let mut fallback = input.as_os_str().to_os_string();
     fallback.push(".out");
     PathBuf::from(fallback)
-}
-
-fn planner_mode_label(mode: CompressionPreset) -> &'static str {
-    match mode {
-        CompressionPreset::Fast => "fast",
-        CompressionPreset::Default => "balanced",
-        CompressionPreset::High => "max-ratio",
-    }
 }
 
 fn parse_size(value: &str) -> Result<usize, String> {
