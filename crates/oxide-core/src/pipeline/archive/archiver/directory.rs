@@ -1,28 +1,26 @@
-use crossbeam_channel::{bounded, RecvTimeoutError, TryRecvError};
+use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::buffer::BufferPool;
 use crate::core::WorkerPool;
-use crate::format::{
-    ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE,
-};
+use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE};
 use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
 use crate::types::{Batch, CompressedBlock, FileFormat, Result};
 
-use super::super::types::*;
 use super::super::telemetry::*;
-use super::utils::*;
+use super::super::types::*;
 use super::processing::process_batch;
+use super::utils::*;
 
 pub fn archive_directory_streaming_with_writer<W, AW, F>(
     config: &ArchivePipelineConfig,
@@ -35,7 +33,13 @@ pub fn archive_directory_streaming_with_writer<W, AW, F>(
 where
     W: Write + Send + 'static,
     AW: ArchiveBlockWriter<InnerWriter = W> + Send + 'static,
-    F: FnOnce(W, Arc<BufferPool>, Vec<crate::format::StoredDictionary>, ArchiveManifest) -> AW
+    F: FnOnce(
+            W,
+            Arc<BufferPool>,
+            Vec<crate::format::StoredDictionary>,
+            ArchiveManifest,
+            usize,
+        ) -> AW
         + Send
         + 'static,
 {
@@ -47,8 +51,7 @@ where
 
     let block_size = config.target_block_size;
     let format_probe_started = Instant::now();
-    let file_formats =
-        directory::detect_file_formats(&discovery, DIRECTORY_FORMAT_PROBE_LIMIT)?;
+    let file_formats = directory::detect_file_formats(&discovery, DIRECTORY_FORMAT_PROBE_LIMIT)?;
     stage_timings.format_probe += format_probe_started.elapsed();
 
     let block_count = directory::estimate_directory_block_count(
@@ -95,6 +98,7 @@ where
         .writer_result_queue_blocks
         .max(1)
         .min(max_inflight_blocks.max(1));
+    let writer_reorder_limit = writer_queue_capacity.max(1);
     let (writer_tx, writer_rx) = bounded::<CompressedBlock>(writer_queue_capacity);
     let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes(
         block_count,
@@ -111,6 +115,7 @@ where
             writer_buffer_pool,
             writer_dictionaries,
             writer_manifest,
+            writer_reorder_limit,
         );
         archive_writer.write_global_header_with_flags(
             block_count,
@@ -193,22 +198,13 @@ where
     let producer_file_formats = file_formats.clone();
     let producer_block_size = block_size;
     let preserve_boundaries = config.performance.preserve_directory_format_boundaries;
-    let stream_read_buffer_size = config
-        .performance
-        .directory_stream_read_buffer_size
-        .max(1);
+    let stream_read_buffer_size = config.performance.directory_stream_read_buffer_size.max(1);
     let producer_threads = config.performance.producer_threads.max(1);
-    let mmap_threshold = config
-        .performance
-        .directory_mmap_threshold_bytes
-        .max(1);
+    let mmap_threshold = config.performance.directory_mmap_threshold_bytes.max(1);
 
     let producer_handle = thread::spawn(move || -> Result<DirectoryProducerOutcome> {
-        let mut submitter = DirectoryBatchSubmitter::new(
-            producer_root,
-            producer_block_size,
-            preserve_boundaries,
-        );
+        let mut submitter =
+            DirectoryBatchSubmitter::new(producer_root, producer_block_size, preserve_boundaries);
         let mut producer_read = Duration::ZERO;
 
         let submit_batch = |batch: Batch| -> Result<()> {
@@ -240,9 +236,8 @@ where
             let mut encoded = Vec::with_capacity(1 + 4 + rel_path.len());
             encoded.push(0);
             directory::encode_path(&mut encoded, rel_path)?;
-            submitter.push_bytes_with_hint(&encoded, FileFormat::Common, |batch| {
-                submit_batch(batch)
-            })?;
+            submitter
+                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| submit_batch(batch))?;
         }
 
         let mut prefetch_request_tx = None;
@@ -306,8 +301,7 @@ where
                             })
                             .map_err(|_| {
                                 crate::OxideError::CompressionError(
-                                    "directory prefetch queue closed before completion"
-                                        .to_string(),
+                                    "directory prefetch queue closed before completion".to_string(),
                                 )
                             })?;
                     }
@@ -319,9 +313,8 @@ where
             encoded.push(1);
             directory::encode_path(&mut encoded, &file.rel_path)?;
             encoded.extend_from_slice(&file.size.to_le_bytes());
-            submitter.push_bytes_with_hint(&encoded, FileFormat::Common, |batch| {
-                submit_batch(batch)
-            })?;
+            submitter
+                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| submit_batch(batch))?;
 
             let file_size = usize::try_from(file.size).unwrap_or(usize::MAX);
             if prefetch_request_tx.is_some() && file_size > 0 && file_size <= mmap_threshold {
@@ -334,8 +327,7 @@ where
                     loop {
                         let result = result_rx.recv().map_err(|_| {
                             crate::OxideError::CompressionError(
-                                "directory prefetch worker stopped before completion"
-                                    .to_string(),
+                                "directory prefetch worker stopped before completion".to_string(),
                             )
                         })?;
                         if result.index == file_index {
@@ -345,11 +337,9 @@ where
                     }
                 };
                 producer_read += prefetched_file.read_elapsed;
-                submitter.push_bytes_with_hint(
-                    &prefetched_file.data,
-                    file_format,
-                    |batch| submit_batch(batch),
-                )?;
+                submitter.push_bytes_with_hint(&prefetched_file.data, file_format, |batch| {
+                    submit_batch(batch)
+                })?;
             } else if file_size >= mmap_threshold {
                 let read_started = Instant::now();
                 let mmap = MmapInput::open(&file.full_path)?;
@@ -374,11 +364,9 @@ where
                         break;
                     }
 
-                    submitter.push_bytes_with_hint(
-                        &read_buffer[..read],
-                        file_format,
-                        |batch| submit_batch(batch),
-                    )?;
+                    submitter.push_bytes_with_hint(&read_buffer[..read], file_format, |batch| {
+                        submit_batch(batch)
+                    })?;
                 }
             }
 
@@ -422,8 +410,7 @@ where
     loop {
         let mut progressed = false;
 
-        while !producer_done
-            && submitted_count.saturating_sub(received_count) < max_inflight_blocks
+        while !producer_done && submitted_count.saturating_sub(received_count) < max_inflight_blocks
         {
             match batch_rx.try_recv() {
                 Ok(batch) => {
@@ -457,9 +444,7 @@ where
         }
         progressed |= drained > 0;
 
-        if !producer_done
-            && submitted_count.saturating_sub(received_count) < max_inflight_blocks
-        {
+        if !producer_done && submitted_count.saturating_sub(received_count) < max_inflight_blocks {
             let wait_started = Instant::now();
             match batch_rx.recv_timeout(result_wait_timeout) {
                 Ok(batch) => {
@@ -655,10 +640,13 @@ where
         &final_runtime,
         block_size,
         raw_passthrough_blocks,
-
         config.performance.compression_preset,
         max_inflight_blocks,
         max_inflight_bytes,
+        config.performance.max_inflight_bytes,
+        config.performance.max_inflight_blocks_per_worker,
+        writer_queue_capacity,
+        writer_reorder_limit,
         pending_write_peak,
         writer_queue_peak,
         stage_timings,

@@ -67,6 +67,10 @@ enum Commands {
         #[arg(long, default_value = "2G", value_parser = parse_size)]
         inflight_bytes: usize,
 
+        /// Maximum in-flight blocks budgeted per worker before byte caps apply.
+        #[arg(long, default_value_t = 256)]
+        inflight_blocks_per_worker: usize,
+
         /// Read buffer size for streaming directory input.
         #[arg(long, default_value = "64M", value_parser = parse_size)]
         stream_read_buffer: usize,
@@ -153,6 +157,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             pool_buffers,
             stats_interval_ms,
             inflight_bytes,
+            inflight_blocks_per_worker,
             stream_read_buffer,
             producer_threads,
             directory_mmap_threshold,
@@ -169,6 +174,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             pool_buffers,
             stats_interval_ms,
             inflight_bytes,
+            inflight_blocks_per_worker,
             stream_read_buffer,
             producer_threads,
             directory_mmap_threshold,
@@ -198,6 +204,7 @@ fn archive_command(
     pool_buffers: usize,
     stats_interval_ms: u64,
     inflight_bytes: usize,
+    inflight_blocks_per_worker: usize,
     stream_read_buffer: usize,
     producer_threads: usize,
     directory_mmap_threshold: usize,
@@ -223,6 +230,7 @@ fn archive_command(
     };
     performance.compression_preset = CompressionPreset::Fast;
     performance.max_inflight_bytes = inflight_bytes.max(1);
+    performance.max_inflight_blocks_per_worker = inflight_blocks_per_worker.max(1);
     performance.directory_stream_read_buffer_size = stream_read_buffer.max(1);
     performance.producer_threads = producer_threads;
     performance.directory_mmap_threshold_bytes = directory_mmap_threshold.max(1);
@@ -845,10 +853,34 @@ fn print_archive_report_summary(
     {
         print_report_value("max in-flight blocks", max_inflight_blocks);
     }
+    if let Some(inflight_blocks_per_worker) = extension_u64(
+        &report.extensions,
+        "pipeline.max_inflight_blocks_per_worker",
+    ) {
+        print_report_value("in-flight blocks/worker", inflight_blocks_per_worker);
+    }
+    if let Some(configured_inflight_bytes) =
+        extension_u64(&report.extensions, "pipeline.configured_inflight_bytes")
+    {
+        print_report_value(
+            "configured in-flight bytes",
+            format_bytes(configured_inflight_bytes),
+        );
+    }
     if let Some(max_inflight_bytes) =
         extension_u64(&report.extensions, "pipeline.max_inflight_bytes")
     {
         print_report_value("max in-flight bytes", format_bytes(max_inflight_bytes));
+    }
+    if let Some(writer_queue_capacity) =
+        extension_u64(&report.extensions, "pipeline.writer_queue_capacity")
+    {
+        print_report_value("writer queue limit", writer_queue_capacity);
+    }
+    if let Some(reorder_pending_limit) =
+        extension_u64(&report.extensions, "pipeline.reorder_pending_limit")
+    {
+        print_report_value("reorder pending limit", reorder_pending_limit);
     }
     if let Some(pending_write_peak) =
         extension_u64(&report.extensions, "pipeline.pending_write_peak")

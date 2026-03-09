@@ -2,12 +2,11 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
+use crate::format::ArchiveManifest;
 use crate::format::{
-    CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, GLOBAL_HEADER_SIZE,
-    SECTION_TABLE_ENTRY_SIZE,
+    CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, GLOBAL_HEADER_SIZE, SECTION_TABLE_ENTRY_SIZE,
 };
 use crate::pipeline::types::PipelinePerformanceOptions;
-use crate::format::ArchiveManifest;
 use crate::types::Result;
 
 pub const SUBMISSION_DRAIN_BUDGET: usize = 128;

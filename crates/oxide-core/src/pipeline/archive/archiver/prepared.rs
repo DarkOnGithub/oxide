@@ -13,8 +13,8 @@ use crate::types::{CompressedBlock, Result};
 
 use super::super::telemetry::*;
 use super::super::types::*;
-use super::utils::*;
 use super::processing::process_batch;
+use super::utils::*;
 
 pub fn archive_prepared_with_writer<W, AW, F>(
     config: &ArchivePipelineConfig,
@@ -74,10 +74,8 @@ where
         Vec::new(),
         manifest,
     );
-    archive_writer.write_global_header_with_flags(
-        block_count,
-        directory::source_kind_flags(source_kind),
-    )?;
+    archive_writer
+        .write_global_header_with_flags(block_count, directory::source_kind_flags(source_kind))?;
     let mut output_bytes_written =
         container_prefix_bytes(block_count, dictionary_bytes, manifest_bytes);
     let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
@@ -207,10 +205,13 @@ where
         &final_runtime,
         block_size,
         raw_passthrough_blocks,
-
         config.performance.compression_preset,
         max_inflight_blocks,
         max_inflight_bytes,
+        config.performance.max_inflight_bytes,
+        config.performance.max_inflight_blocks_per_worker,
+        max_inflight_blocks,
+        max_inflight_blocks,
         pending_write_peak,
         0,
         stage_timings,

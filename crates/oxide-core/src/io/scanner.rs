@@ -5,11 +5,11 @@ use std::time::Instant;
 use image::ImageDecoder;
 use memchr::memchr;
 use symphonia::core::codecs::{
-    CodecType, CODEC_TYPE_PCM_F32BE, CODEC_TYPE_PCM_F32LE, CODEC_TYPE_PCM_F64BE,
-    CODEC_TYPE_PCM_F64LE, CODEC_TYPE_PCM_S16BE, CODEC_TYPE_PCM_S16LE, CODEC_TYPE_PCM_S24BE,
-    CODEC_TYPE_PCM_S24LE, CODEC_TYPE_PCM_S32BE, CODEC_TYPE_PCM_S32LE, CODEC_TYPE_PCM_S8,
+    CODEC_TYPE_PCM_F32BE, CODEC_TYPE_PCM_F32LE, CODEC_TYPE_PCM_F64BE, CODEC_TYPE_PCM_F64LE,
+    CODEC_TYPE_PCM_S8, CODEC_TYPE_PCM_S16BE, CODEC_TYPE_PCM_S16LE, CODEC_TYPE_PCM_S24BE,
+    CODEC_TYPE_PCM_S24LE, CODEC_TYPE_PCM_S32BE, CODEC_TYPE_PCM_S32LE, CODEC_TYPE_PCM_U8,
     CODEC_TYPE_PCM_U16BE, CODEC_TYPE_PCM_U16LE, CODEC_TYPE_PCM_U24BE, CODEC_TYPE_PCM_U24LE,
-    CODEC_TYPE_PCM_U32BE, CODEC_TYPE_PCM_U32LE, CODEC_TYPE_PCM_U8,
+    CODEC_TYPE_PCM_U32BE, CODEC_TYPE_PCM_U32LE, CodecType,
 };
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
@@ -17,8 +17,8 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 use crate::format::FormatDetector;
-use crate::io::chunking::ChunkingPolicy;
 use crate::io::MmapInput;
+use crate::io::chunking::ChunkingPolicy;
 use crate::preprocessing::{
     AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat,
     PreprocessingMetadata,
@@ -469,7 +469,6 @@ impl InputScanner {
         telemetry::increment_counter(tags::METRIC_SCANNER_FALLBACK_COUNT, 1);
         BoundaryMode::Raw
     }
-
 }
 
 fn audio_sample_layout_for_codec(codec: CodecType) -> Option<(AudioSampleEncoding, AudioEndian)> {

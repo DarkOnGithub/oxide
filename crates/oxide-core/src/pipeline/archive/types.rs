@@ -2,7 +2,7 @@ use super::super::directory;
 use super::super::types::ArchiveSourceKind;
 use crate::core::{PoolRuntimeSnapshot, WorkerRuntimeSnapshot};
 use crate::format::{ArchiveManifest, BlockHeader};
-use crate::types::{duration_to_us, Batch};
+use crate::types::{Batch, duration_to_us};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 

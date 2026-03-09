@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::CompressionPreset;
 use crate::buffer::BufferPool;
 use crate::types::CompressionAlgo;
-use crate::CompressionPreset;
 
 /// Indicates whether the archive source is a single file or a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ impl Default for PipelinePerformanceOptions {
             raw_fallback_enabled: true,
             compression_preset: CompressionPreset::Fast,
             max_inflight_bytes: 512 * 1024 * 1024,
-            max_inflight_blocks_per_worker: 32,
+            max_inflight_blocks_per_worker: 256,
             directory_stream_read_buffer_size: 16 * 1024 * 1024,
             preserve_directory_format_boundaries: false,
             result_wait_timeout: Duration::from_millis(5),

@@ -1,5 +1,5 @@
-use crate::preprocessing::utils;
 use crate::Result;
+use crate::preprocessing::utils;
 
 /// Converts raw image bytes into RGB pixels for Paeth predictor processing.
 pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec<[u8; 3]>> {
