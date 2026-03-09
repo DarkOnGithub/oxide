@@ -11,7 +11,7 @@ pub use consts::{
     FEATURE_DEDUP_REFERENCES, FOOTER_SIZE, GLOBAL_HEADER_SIZE, OXZ_END_MAGIC, OXZ_MAGIC,
     OXZ_VERSION, SECTION_TABLE_ENTRY_SIZE,
 };
-pub use dictionary_store::{decode_dictionary_store, encode_dictionary_store, StoredDictionary};
+pub use dictionary_store::{StoredDictionary, decode_dictionary_store, encode_dictionary_store};
 pub use headers::{
     BlockHeader, ChunkDescriptor, Footer, GlobalHeader, SectionTableEntry, SectionType,
 };

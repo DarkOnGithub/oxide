@@ -4,9 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::buffer::BufferPool;
-use crate::format::{
-    ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter,
-};
+use crate::format::{ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter};
 use crate::io::{ChunkingPolicy, InputScanner};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetrySink};
@@ -17,10 +15,10 @@ pub mod prepared;
 pub mod processing;
 pub mod utils;
 
-pub use utils::*;
-pub use processing::*;
 pub use directory::record_result_to_writer_queue;
-pub use prepared::{record_result_to_writer, recv_result_to_writer, drain_results_to_writer};
+pub use prepared::{drain_results_to_writer, record_result_to_writer, recv_result_to_writer};
+pub use processing::*;
+pub use utils::*;
 
 use self::directory::archive_directory_streaming_with_writer;
 use self::prepared::archive_prepared_with_writer;
@@ -112,10 +110,11 @@ impl<'a> Archiver<'a> {
             writer,
             options,
             sink,
-            |writer, pool, dictionaries, manifest| {
-                ArchiveWriter::with_dictionaries_and_manifest(
+            |writer, pool, dictionaries, manifest, reorder_limit| {
+                ArchiveWriter::with_reorder_limit_and_manifest(
                     writer,
                     pool,
+                    reorder_limit,
                     dictionaries,
                     Some(manifest),
                 )
@@ -136,10 +135,11 @@ impl<'a> Archiver<'a> {
             writer,
             options,
             sink,
-            |writer, pool, dictionaries, manifest| {
-                SeekableArchiveWriter::with_dictionaries_and_manifest(
+            |writer, pool, dictionaries, manifest, reorder_limit| {
+                SeekableArchiveWriter::with_reorder_limit_and_manifest(
                     writer,
                     pool,
+                    reorder_limit,
                     dictionaries,
                     Some(manifest),
                 )
@@ -209,7 +209,12 @@ impl<'a> Archiver<'a> {
     where
         W: Write,
         AW: ArchiveBlockWriter<InnerWriter = W>,
-        F: FnOnce(W, Arc<BufferPool>, Vec<crate::format::StoredDictionary>, crate::format::ArchiveManifest) -> AW,
+        F: FnOnce(
+            W,
+            Arc<BufferPool>,
+            Vec<crate::format::StoredDictionary>,
+            crate::format::ArchiveManifest,
+        ) -> AW,
     {
         archive_prepared_with_writer(
             self.config,

@@ -3,13 +3,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::telemetry::{profile, tags};
-use crate::types::{duration_to_us, placeholder_checksum, PLACEHOLDER_CHECKSUM};
+use crate::types::{PLACEHOLDER_CHECKSUM, duration_to_us, placeholder_checksum};
 use crate::{BufferPool, CompressedBlock, OxideError, Result};
 
 use super::{
-    encode_dictionary_store, ArchiveManifest, ChunkDescriptor, Footer, GlobalHeader, ReorderBuffer,
-    SectionTableEntry, SectionType, StoredDictionary, CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT,
-    DEFAULT_REORDER_PENDING_LIMIT, GLOBAL_HEADER_SIZE, SECTION_TABLE_ENTRY_SIZE,
+    ArchiveManifest, CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, ChunkDescriptor,
+    DEFAULT_REORDER_PENDING_LIMIT, Footer, GLOBAL_HEADER_SIZE, GlobalHeader, ReorderBuffer,
+    SECTION_TABLE_ENTRY_SIZE, SectionTableEntry, SectionType, StoredDictionary,
+    encode_dictionary_store,
 };
 
 #[derive(Debug)]
@@ -99,10 +100,26 @@ impl<W: Write> ArchiveWriter<W> {
         dictionaries: Vec<StoredDictionary>,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
-        Self::with_reorder_limit_and_dictionaries(
+        Self::with_reorder_limit_and_manifest(
             writer,
             buffer_pool,
             DEFAULT_REORDER_PENDING_LIMIT,
+            dictionaries,
+            manifest,
+        )
+    }
+
+    pub fn with_reorder_limit_and_manifest(
+        writer: W,
+        buffer_pool: Arc<BufferPool>,
+        max_pending: usize,
+        dictionaries: Vec<StoredDictionary>,
+        manifest: Option<ArchiveManifest>,
+    ) -> Self {
+        Self::with_reorder_limit_and_dictionaries(
+            writer,
+            buffer_pool,
+            max_pending,
             dictionaries,
             manifest,
         )
@@ -376,10 +393,26 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         dictionaries: Vec<StoredDictionary>,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
-        Self::with_reorder_limit_and_dictionaries(
+        Self::with_reorder_limit_and_manifest(
             writer,
             buffer_pool,
             DEFAULT_REORDER_PENDING_LIMIT,
+            dictionaries,
+            manifest,
+        )
+    }
+
+    pub fn with_reorder_limit_and_manifest(
+        writer: W,
+        buffer_pool: Arc<BufferPool>,
+        max_pending: usize,
+        dictionaries: Vec<StoredDictionary>,
+        manifest: Option<ArchiveManifest>,
+    ) -> Self {
+        Self::with_reorder_limit_and_dictionaries(
+            writer,
+            buffer_pool,
+            max_pending,
             dictionaries,
             manifest,
         )

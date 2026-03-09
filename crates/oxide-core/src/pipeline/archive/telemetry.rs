@@ -3,10 +3,10 @@ use super::super::types::StatValue;
 use super::types::*;
 use crate::core::PoolRuntimeSnapshot;
 use crate::telemetry::{
-    self, profile, tags, ArchiveProgressEvent, ArchiveReport, ExtractProgressEvent, ExtractReport,
-    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
+    self, ArchiveProgressEvent, ArchiveReport, ExtractProgressEvent, ExtractReport, ReportValue,
+    RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport, profile, tags,
 };
-use crate::types::{duration_to_us, CompressionPreset};
+use crate::types::{CompressionPreset, duration_to_us};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -166,6 +166,10 @@ pub fn build_stats_extensions(
     compression_preset: CompressionPreset,
     max_inflight_blocks: usize,
     max_inflight_bytes: usize,
+    configured_inflight_bytes: usize,
+    max_inflight_blocks_per_worker: usize,
+    writer_queue_capacity: usize,
+    reorder_pending_limit: usize,
     pending_write_peak: usize,
     writer_queue_peak: usize,
     stage_timings: StageTimings,
@@ -273,8 +277,24 @@ pub fn build_stats_extensions(
         StatValue::U64(max_inflight_blocks as u64),
     );
     extensions.insert(
+        "pipeline.max_inflight_blocks_per_worker".to_string(),
+        StatValue::U64(max_inflight_blocks_per_worker as u64),
+    );
+    extensions.insert(
+        "pipeline.configured_inflight_bytes".to_string(),
+        StatValue::U64(configured_inflight_bytes as u64),
+    );
+    extensions.insert(
         "pipeline.max_inflight_bytes".to_string(),
         StatValue::U64(max_inflight_bytes as u64),
+    );
+    extensions.insert(
+        "pipeline.writer_queue_capacity".to_string(),
+        StatValue::U64(writer_queue_capacity as u64),
+    );
+    extensions.insert(
+        "pipeline.reorder_pending_limit".to_string(),
+        StatValue::U64(reorder_pending_limit as u64),
     );
     extensions.insert(
         "pipeline.pending_write_peak".to_string(),

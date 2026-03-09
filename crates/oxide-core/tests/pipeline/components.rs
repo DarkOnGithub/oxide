@@ -33,6 +33,16 @@ mod archive_tests {
     }
 
     #[test]
+    fn worker_scaling_does_not_clamp_cli_sized_byte_budget() {
+        let mut performance = PipelinePerformanceOptions::default();
+        performance.max_inflight_bytes = 2 * 1024 * 1024 * 1024;
+
+        let inflight = ArchivePipeline::max_inflight_blocks(10_000, 16, 1024 * 1024, &performance);
+
+        assert_eq!(inflight, 2048);
+    }
+
+    #[test]
     fn select_stored_payload_uses_raw_when_compression_is_not_smaller() {
         let source = [1u8, 2, 3, 4];
         let compressed_equal = [9u8, 9, 9, 9];
