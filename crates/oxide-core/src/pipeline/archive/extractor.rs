@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, TryRecvError};
+use crossbeam_channel::{Receiver, TryRecvError, bounded};
 
 use crate::core::WorkerRuntimeSnapshot;
-use crate::format::{ArchiveReader, BlockHeader, GlobalHeader, FOOTER_SIZE};
+use crate::format::{ArchiveReader, BlockHeader, FOOTER_SIZE, GlobalHeader};
 use crate::telemetry::{ReportValue, RunTelemetryOptions, TelemetrySink};
 use crate::types::Result;
 

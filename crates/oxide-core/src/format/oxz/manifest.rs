@@ -78,7 +78,7 @@ impl ArchiveManifest {
                 _ => {
                     return Err(OxideError::InvalidFormat(
                         "invalid archive manifest entry kind",
-                    ))
+                    ));
                 }
             };
             cursor += 1;
