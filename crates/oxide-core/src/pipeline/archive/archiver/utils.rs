@@ -1,5 +1,3 @@
-use std::fs;
-use std::io::Read;
 use std::path::Path;
 
 use crate::format::ArchiveManifest;
@@ -59,20 +57,4 @@ pub fn file_manifest(path: &Path, size: u64) -> Result<ArchiveManifest> {
         kind: crate::ArchiveEntryKind::File,
         size,
     }]))
-}
-
-pub fn collect_file_sample(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
-    let limit = max_bytes.max(1);
-    let mut file = fs::File::open(path)?;
-    let mut sample = Vec::with_capacity(limit);
-    let mut scratch = vec![0u8; 64 * 1024];
-    while sample.len() < limit {
-        let to_read = (limit - sample.len()).min(scratch.len());
-        let read = file.read(&mut scratch[..to_read])?;
-        if read == 0 {
-            break;
-        }
-        sample.extend_from_slice(&scratch[..read]);
-    }
-    Ok(sample)
 }

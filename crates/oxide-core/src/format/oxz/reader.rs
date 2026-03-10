@@ -190,11 +190,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
         }
     }
 
-    /// Consumes the reader and returns the underlying inner reader.
-    pub fn into_inner(self) -> R {
-        self.reader
-    }
-
     pub(crate) fn finish_sequential_extract_validation(&mut self) -> Result<()> {
         Ok(())
     }

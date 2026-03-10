@@ -74,11 +74,6 @@ impl WorkerPool {
         }
     }
 
-    /// Number of workers configured in this pool.
-    pub fn num_workers(&self) -> usize {
-        self.num_workers
-    }
-
     /// Spawns worker threads and returns a handle for submission and collection.
     pub fn spawn<F>(&self, processor: F) -> WorkerPoolHandle
     where
@@ -246,15 +241,6 @@ impl WorkerPoolHandle {
     pub fn pending_count(&self) -> usize {
         self.submitted_count()
             .saturating_sub(self.completed_count())
-    }
-
-    /// Per-worker processed task counts.
-    pub fn worker_task_counts(&self) -> Vec<usize> {
-        self.state
-            .task_counts
-            .iter()
-            .map(|counter| counter.load(Ordering::Acquire))
-            .collect()
     }
 
     /// Returns runtime metrics for the pool and each worker.
