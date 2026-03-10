@@ -336,12 +336,7 @@ fn extract_command(
 
 fn tree_command(input: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let reader = ArchiveReader::new(File::open(&input)?)?;
-    let manifest = reader
-        .manifest()
-        .ok_or(oxide_core::OxideError::InvalidFormat(
-            "archive tree metadata is not present; only newly created archives are supported",
-        ))?;
-    print_archive_tree(&input, manifest.entries());
+    print_archive_tree(&input, reader.manifest().entries());
     Ok(())
 }
 

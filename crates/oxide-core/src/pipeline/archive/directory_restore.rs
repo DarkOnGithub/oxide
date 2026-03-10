@@ -3,12 +3,12 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::format::ArchiveManifest;
 use crate::types::Result;
+use crate::OxideError;
 
 use super::super::directory;
 use super::reorder_writer::OrderedChunkWriter;
-
-const DIRECTORY_HEADER_LEN: usize = 10;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DirectoryRestoreStats {
@@ -19,293 +19,123 @@ pub(crate) struct DirectoryRestoreStats {
 }
 
 #[derive(Debug)]
-enum RestoreState {
-    Header,
-    EntryKind,
-    PathLen {
-        kind: u8,
-    },
-    Path {
-        kind: u8,
-        len: usize,
-    },
-    FileSize {
-        rel_path: String,
-    },
-    FileData {
-        remaining: usize,
-        writer: BufWriter<fs::File>,
-    },
-    Done,
+struct PendingFile {
+    remaining: u64,
+    writer: BufWriter<fs::File>,
 }
 
 #[derive(Debug)]
 pub(crate) struct DirectoryRestoreWriter {
     root: PathBuf,
-    pending: Vec<u8>,
-    entries_remaining: u32,
-    state: RestoreState,
+    entries: Vec<crate::ArchiveListingEntry>,
+    next_entry: usize,
+    pending_file: Option<PendingFile>,
     stats: DirectoryRestoreStats,
 }
 
 impl DirectoryRestoreWriter {
-    pub(crate) fn create(root: &Path) -> Result<Self> {
+    pub(crate) fn create(root: &Path, manifest: ArchiveManifest) -> Result<Self> {
         fs::create_dir_all(root)?;
         Ok(Self {
             root: root.to_path_buf(),
-            pending: Vec::new(),
-            entries_remaining: 0,
-            state: RestoreState::Header,
+            entries: manifest.entries().to_vec(),
+            next_entry: 0,
+            pending_file: None,
             stats: DirectoryRestoreStats::default(),
         })
     }
 
     pub(crate) fn finish(&mut self) -> Result<DirectoryRestoreStats> {
-        self.consume_pending()?;
-        if !self.pending.is_empty() {
+        self.advance_entries()?;
+        if let Some(pending) = self.pending_file.as_ref() {
+            if pending.remaining > 0 {
+                return Err(crate::OxideError::InvalidFormat(
+                    "truncated file payload during directory restore",
+                ));
+            }
+        }
+        if self.pending_file.is_some() || self.next_entry != self.entries.len() {
             return Err(crate::OxideError::InvalidFormat(
-                "directory bundle has trailing data",
+                "directory restore ended before all entries completed",
             ));
         }
-
-        match self.state {
-            RestoreState::Done if self.entries_remaining == 0 => Ok(self.stats),
-            _ => Err(crate::OxideError::InvalidFormat(
-                "truncated directory bundle during restore",
-            )),
-        }
+        Ok(self.stats)
     }
 
-    fn consume_pending(&mut self) -> Result<()> {
-        let mut cursor = 0usize;
+    fn advance_entries(&mut self) -> Result<()> {
+        while self.pending_file.is_none() && self.next_entry < self.entries.len() {
+            let entry = self.entries[self.next_entry].clone();
+            self.next_entry += 1;
+            self.stats.entry_count = self.stats.entry_count.saturating_add(1);
 
-        loop {
-            if cursor == self.pending.len() {
-                break;
-            }
-
-            match &mut self.state {
-                RestoreState::Header => {
-                    if self.pending.len() - cursor < DIRECTORY_HEADER_LEN {
-                        break;
-                    }
-
-                    let decode_started = Instant::now();
-                    let header = &self.pending[cursor..cursor + DIRECTORY_HEADER_LEN];
-                    if header[..4] != directory::DIRECTORY_BUNDLE_MAGIC {
-                        return Err(crate::OxideError::InvalidFormat(
-                            "archive payload is not a directory bundle",
-                        ));
-                    }
-
-                    let version = u16::from_le_bytes([header[4], header[5]]);
-                    if version != directory::DIRECTORY_BUNDLE_VERSION {
-                        return Err(crate::OxideError::InvalidFormat(
-                            "unsupported directory bundle version",
-                        ));
-                    }
-
-                    self.entries_remaining =
-                        u32::from_le_bytes([header[6], header[7], header[8], header[9]]);
-                    self.state = if self.entries_remaining == 0 {
-                        RestoreState::Done
-                    } else {
-                        RestoreState::EntryKind
-                    };
-                    self.stats.directory_decode += decode_started.elapsed();
-                    cursor += DIRECTORY_HEADER_LEN;
-                }
-                RestoreState::EntryKind => {
-                    if self.entries_remaining == 0 {
-                        self.state = RestoreState::Done;
-                        continue;
-                    }
-
-                    let decode_started = Instant::now();
-                    let kind = self.pending[cursor];
-                    if kind > 1 {
-                        return Err(crate::OxideError::InvalidFormat(
-                            "invalid directory bundle entry kind",
-                        ));
-                    }
-                    self.state = RestoreState::PathLen { kind };
-                    self.stats.directory_decode += decode_started.elapsed();
-                    cursor += 1;
-                }
-                RestoreState::PathLen { kind } => {
-                    if self.pending.len() - cursor < 4 {
-                        break;
-                    }
-
-                    let decode_started = Instant::now();
-                    let len = u32::from_le_bytes([
-                        self.pending[cursor],
-                        self.pending[cursor + 1],
-                        self.pending[cursor + 2],
-                        self.pending[cursor + 3],
-                    ]) as usize;
-                    self.state = RestoreState::Path { kind: *kind, len };
-                    self.stats.directory_decode += decode_started.elapsed();
-                    cursor += 4;
-                }
-                RestoreState::Path { kind, len } => {
-                    if self.pending.len() - cursor < *len {
-                        break;
-                    }
-
-                    let decode_started = Instant::now();
-                    let rel_path = std::str::from_utf8(&self.pending[cursor..cursor + *len])
-                        .map_err(|_| {
-                            crate::OxideError::InvalidFormat("directory path is not utf8")
-                        })?
-                        .to_string();
-                    self.stats.directory_decode += decode_started.elapsed();
-                    cursor += *len;
-
-                    if *kind == 0 {
-                        let output_started = Instant::now();
-                        let out_path = directory::join_safe(&self.root, &rel_path)?;
-                        fs::create_dir_all(out_path)?;
-                        self.stats.output_write += output_started.elapsed();
-                        self.complete_entry();
-                    } else {
-                        self.state = RestoreState::FileSize { rel_path };
-                    }
-                }
-                RestoreState::FileSize { rel_path } => {
-                    if self.pending.len() - cursor < 8 {
-                        break;
-                    }
-
-                    let decode_started = Instant::now();
-                    let size = u64::from_le_bytes([
-                        self.pending[cursor],
-                        self.pending[cursor + 1],
-                        self.pending[cursor + 2],
-                        self.pending[cursor + 3],
-                        self.pending[cursor + 4],
-                        self.pending[cursor + 5],
-                        self.pending[cursor + 6],
-                        self.pending[cursor + 7],
-                    ]);
-                    let remaining = usize::try_from(size)
-                        .map_err(|_| crate::OxideError::InvalidFormat("file size overflow"))?;
-                    self.stats.directory_decode += decode_started.elapsed();
-                    cursor += 8;
-
+            match entry.kind {
+                crate::ArchiveEntryKind::Directory => {
                     let output_started = Instant::now();
-                    let out_path = directory::join_safe(&self.root, rel_path)?;
+                    let out_path = directory::join_safe(&self.root, &entry.path)?;
+                    fs::create_dir_all(out_path)?;
+                    self.stats.output_write += output_started.elapsed();
+                }
+                crate::ArchiveEntryKind::File => {
+                    let output_started = Instant::now();
+                    let out_path = directory::join_safe(&self.root, &entry.path)?;
                     if let Some(parent) = out_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
                     let file = fs::File::create(out_path)?;
                     self.stats.output_write += output_started.elapsed();
 
-                    if remaining == 0 {
-                        self.complete_entry();
-                    } else {
-                        self.state = RestoreState::FileData {
-                            remaining,
-                            writer: BufWriter::new(file),
-                        };
-                    }
-                }
-                RestoreState::FileData { remaining, writer } => {
-                    let available = self.pending.len() - cursor;
-                    if available == 0 {
-                        break;
+                    if entry.size == 0 {
+                        continue;
                     }
 
-                    let take = available.min(*remaining);
-                    let output_started = Instant::now();
-                    writer.write_all(&self.pending[cursor..cursor + take])?;
-                    self.stats.output_write += output_started.elapsed();
-                    self.stats.output_bytes_total =
-                        self.stats.output_bytes_total.saturating_add(take as u64);
-                    cursor += take;
-                    *remaining -= take;
-
-                    if *remaining == 0 {
-                        let output_started = Instant::now();
-                        writer.flush()?;
-                        self.stats.output_write += output_started.elapsed();
-                        self.complete_entry();
-                    }
-                }
-                RestoreState::Done => {
-                    return Err(crate::OxideError::InvalidFormat(
-                        "directory bundle has trailing data",
-                    ));
+                    self.pending_file = Some(PendingFile {
+                        remaining: entry.size,
+                        writer: BufWriter::new(file),
+                    });
                 }
             }
-        }
-
-        if cursor == self.pending.len() {
-            self.pending.clear();
-        } else if cursor > 0 {
-            self.pending.drain(..cursor);
         }
 
         Ok(())
     }
-
-    fn write_file_data_bytes(&mut self, bytes: &[u8]) -> Result<usize> {
-        let mut take = 0usize;
-        let mut finished = false;
-
-        if let RestoreState::FileData { remaining, writer } = &mut self.state {
-            take = bytes.len().min(*remaining);
-            if take == 0 {
-                return Ok(0);
-            }
-
-            let output_started = Instant::now();
-            writer.write_all(&bytes[..take])?;
-            self.stats.output_write += output_started.elapsed();
-            self.stats.output_bytes_total =
-                self.stats.output_bytes_total.saturating_add(take as u64);
-            *remaining -= take;
-
-            if *remaining == 0 {
-                let output_started = Instant::now();
-                writer.flush()?;
-                self.stats.output_write += output_started.elapsed();
-                finished = true;
-            }
-        }
-
-        if finished {
-            self.complete_entry();
-        }
-
-        Ok(take)
-    }
-
-    fn complete_entry(&mut self) {
-        self.stats.entry_count = self.stats.entry_count.saturating_add(1);
-        self.entries_remaining = self.entries_remaining.saturating_sub(1);
-        self.state = if self.entries_remaining == 0 {
-            RestoreState::Done
-        } else {
-            RestoreState::EntryKind
-        };
-    }
 }
 
 impl OrderedChunkWriter for DirectoryRestoreWriter {
-    fn write_chunk(&mut self, bytes: &[u8]) -> Result<()> {
-        if self.pending.is_empty() {
-            let consumed = self.write_file_data_bytes(bytes)?;
-            if consumed == bytes.len() {
-                return Ok(());
-            }
-            if consumed > 0 {
-                self.pending.extend_from_slice(&bytes[consumed..]);
-                return self.consume_pending();
+    fn write_chunk(&mut self, mut bytes: &[u8]) -> Result<()> {
+        let decode_started = Instant::now();
+        self.advance_entries()?;
+        self.stats.directory_decode += decode_started.elapsed();
+
+        while !bytes.is_empty() {
+            let finished_file = {
+                let pending = self.pending_file.as_mut().ok_or(OxideError::InvalidFormat(
+                    "directory archive contains file data beyond manifest entries",
+                ))?;
+
+                let take = bytes.len().min(pending.remaining as usize);
+                let output_started = Instant::now();
+                pending.writer.write_all(&bytes[..take])?;
+                self.stats.output_write += output_started.elapsed();
+                self.stats.output_bytes_total =
+                    self.stats.output_bytes_total.saturating_add(take as u64);
+                pending.remaining -= take as u64;
+                bytes = &bytes[take..];
+                pending.remaining == 0
+            };
+
+            if finished_file {
+                let output_started = Instant::now();
+                if let Some(pending) = self.pending_file.as_mut() {
+                    pending.writer.flush()?;
+                }
+                self.stats.output_write += output_started.elapsed();
+                self.pending_file = None;
+                let decode_started = Instant::now();
+                self.advance_entries()?;
+                self.stats.directory_decode += decode_started.elapsed();
             }
         }
 
-        self.pending.extend_from_slice(bytes);
-        self.consume_pending()
+        Ok(())
     }
 }

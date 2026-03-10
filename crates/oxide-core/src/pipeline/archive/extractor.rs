@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, TryRecvError, bounded};
 
 use crate::core::WorkerRuntimeSnapshot;
-use crate::format::{ArchiveReader, BlockHeader, FOOTER_SIZE, GlobalHeader};
+use crate::format::{ArchiveMetadata, ArchiveReader, BlockHeader, GlobalHeader};
 use crate::telemetry::{ReportValue, RunTelemetryOptions, TelemetrySink};
 use crate::types::Result;
 
@@ -100,10 +100,10 @@ impl Extractor {
         let position = reader.stream_position()?;
         reader.seek(SeekFrom::Start(0))?;
         let header = GlobalHeader::read(reader)?;
+        reader.seek(SeekFrom::Start(header.metadata_offset))?;
+        let metadata = ArchiveMetadata::read(reader)?;
         reader.seek(SeekFrom::Start(position))?;
-        Ok(directory::source_kind_from_flags(u32::from(
-            header.feature_bits,
-        )))
+        Ok(metadata.source_kind)
     }
 
     pub fn read_archive_payload_with_metrics<R: Read + Seek>(
@@ -113,9 +113,18 @@ impl Extractor {
         options: &RunTelemetryOptions,
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
+        let archive_started = Instant::now();
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
+        let archive_read_elapsed = archive_started.elapsed();
         let mut writer = VecChunkWriter::default();
-        let decoded =
-            self.decode_archive_to_writer(reader, started_at, options, sink, &mut writer)?;
+        let decoded = self.decode_archive_to_writer(
+            archive,
+            archive_read_elapsed,
+            started_at,
+            options,
+            sink,
+            &mut writer,
+        )?;
         let payload = writer.into_inner();
         let payload_len = payload.len() as u64;
         if payload_len != decoded.decoded_bytes_total {
@@ -144,15 +153,21 @@ impl Extractor {
         options: &RunTelemetryOptions,
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
+        let archive_started = Instant::now();
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
+        let archive_read_elapsed = archive_started.elapsed();
         let mut writer = FileChunkWriter::create(output_path)?;
-        let decoded =
-            self.decode_archive_to_writer(reader, started_at, options, sink, &mut writer)?;
+        let decoded = self.decode_archive_to_writer(
+            archive,
+            archive_read_elapsed,
+            started_at,
+            options,
+            sink,
+            &mut writer,
+        )?;
         writer.flush()?;
 
-        if !matches!(
-            directory::source_kind_from_flags(decoded.flags),
-            ArchiveSourceKind::File
-        ) {
+        if !matches!(directory::source_kind_from_flags(decoded.flags), ArchiveSourceKind::File) {
             return Err(crate::OxideError::InvalidFormat(
                 "archive is not a file payload",
             ));
@@ -178,18 +193,25 @@ impl Extractor {
         options: &RunTelemetryOptions,
         sink: &mut dyn TelemetrySink,
     ) -> Result<DirectoryRestoreOutcome> {
-        let mut writer = DirectoryRestoreWriter::create(output_path)?;
-        let decoded =
-            self.decode_archive_to_writer(reader, started_at, options, sink, &mut writer)?;
-
-        if !matches!(
-            directory::source_kind_from_flags(decoded.flags),
-            ArchiveSourceKind::Directory
-        ) {
+        let archive_started = Instant::now();
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
+        let archive_read_elapsed = archive_started.elapsed();
+        if archive.source_kind() != ArchiveSourceKind::Directory {
             return Err(crate::OxideError::InvalidFormat(
                 "archive is not a directory payload",
             ));
         }
+
+        let manifest = archive.manifest().clone();
+        let mut writer = DirectoryRestoreWriter::create(output_path, manifest)?;
+        let decoded = self.decode_archive_to_writer(
+            archive,
+            archive_read_elapsed,
+            started_at,
+            options,
+            sink,
+            &mut writer,
+        )?;
 
         let restore_stats = writer.finish()?;
         let mut stage_timings = decoded.stage_timings;
@@ -216,7 +238,8 @@ impl Extractor {
 
     fn decode_archive_to_writer<R, W>(
         &self,
-        reader: R,
+        mut archive: ArchiveReader<R>,
+        archive_read_elapsed: Duration,
         started_at: Instant,
         options: &RunTelemetryOptions,
         sink: &mut dyn TelemetrySink,
@@ -227,11 +250,9 @@ impl Extractor {
         W: OrderedChunkWriter,
     {
         let mut stage_timings = ExtractStageTimings::default();
-        let archive_started = Instant::now();
-        let mut archive = ArchiveReader::new_for_sequential_extract(reader)?;
-        stage_timings.archive_read += archive_started.elapsed();
-        let flags = u32::from(archive.global_header().feature_bits);
-        let source_kind = directory::source_kind_from_flags(flags);
+        stage_timings.archive_read += archive_read_elapsed;
+        let source_kind = archive.source_kind();
+        let flags = directory::source_kind_flags(source_kind);
         let block_capacity = archive.block_count() as usize;
         let worker_count = self.num_workers.max(1);
         let queue_capacity = worker_count.saturating_mul(DECODE_QUEUE_MULTIPLIER).max(1);
@@ -282,15 +303,7 @@ impl Extractor {
         }
         drop(result_tx);
 
-        let payload_offset = archive
-            .section_table()
-            .iter()
-            .find(|entry| entry.section_type == crate::SectionType::PayloadRegion)
-            .map(|entry| entry.offset)
-            .ok_or(crate::OxideError::InvalidFormat(
-                "missing payload region section",
-            ))?;
-        let mut archive_bytes_total = payload_offset + FOOTER_SIZE as u64;
+        let archive_bytes_total = archive.global_header().footer_offset + crate::FOOTER_SIZE as u64;
         let mut submitted = 0usize;
         let mut received = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
@@ -306,7 +319,6 @@ impl Extractor {
             let read_started = Instant::now();
             let (header, block_data) = archive.read_block(block_index as u32)?;
             stage_timings.archive_read += read_started.elapsed();
-            archive_bytes_total = archive_bytes_total.saturating_add(block_data.len() as u64);
 
             while submitted.saturating_sub(received) >= queue_capacity {
                 receive_decode_result_to_writer(
@@ -477,38 +489,26 @@ impl Extractor {
         extensions: &mut BTreeMap<String, ReportValue>,
     ) -> Result<(ArchiveSourceKind, u64)> {
         let directory_decode_started = Instant::now();
-        if let Some(entries) = directory::decode_directory_entries(&decoded.payload, decoded.flags)?
-        {
-            decoded.stage_timings.directory_decode += directory_decode_started.elapsed();
-            let output_bytes_total = entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    directory::DirectoryBundleEntry::File { data, .. } => Some(data.len() as u64),
-                    directory::DirectoryBundleEntry::Directory { .. } => None,
-                })
-                .sum();
-            extensions.insert(
-                "extract.directory_entries".to_string(),
-                ReportValue::U64(entries.len() as u64),
-            );
+        let source_kind = directory::source_kind_from_flags(decoded.flags);
+        decoded.stage_timings.directory_decode += directory_decode_started.elapsed();
 
-            let write_started = Instant::now();
-            directory::write_directory_entries(output_path, entries)?;
-            decoded.stage_timings.output_write += write_started.elapsed();
-            Ok((ArchiveSourceKind::Directory, output_bytes_total))
-        } else {
-            decoded.stage_timings.directory_decode += directory_decode_started.elapsed();
-            if let Some(parent) = output_path
-                .parent()
-                .filter(|path| !path.as_os_str().is_empty())
-            {
-                fs::create_dir_all(parent)?;
-            }
-            let write_started = Instant::now();
-            fs::write(output_path, &decoded.payload)?;
-            decoded.stage_timings.output_write += write_started.elapsed();
-            Ok((ArchiveSourceKind::File, decoded.payload.len() as u64))
+        if source_kind == ArchiveSourceKind::Directory {
+            return Err(crate::OxideError::InvalidFormat(
+                "directory payload restoration requires archive metadata; use extract_path or extract_directory_archive",
+            ));
         }
+
+        let _ = extensions;
+        if let Some(parent) = output_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
+        let write_started = Instant::now();
+        fs::write(output_path, &decoded.payload)?;
+        decoded.stage_timings.output_write += write_started.elapsed();
+        Ok((ArchiveSourceKind::File, decoded.payload.len() as u64))
     }
 }
 
