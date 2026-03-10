@@ -348,7 +348,7 @@ where
                 submitter.push_bytes_with_hint(
                     &prefetched_file.data,
                     file_format,
-                    |batch| submit_batch(batch),
+                    &submit_batch,
                 )?;
             } else if file_size >= mmap_threshold {
                 let read_started = Instant::now();
@@ -358,9 +358,7 @@ where
                 while offset < len {
                     let end = offset.saturating_add(stream_read_buffer_size).min(len);
                     let bytes = mmap.mapped_slice(offset, end)?;
-                    submitter.push_bytes_with_hint(bytes.as_slice(), file_format, |batch| {
-                        submit_batch(batch)
-                    })?;
+                    submitter.push_bytes_with_hint(bytes.as_slice(), file_format, &submit_batch)?;
                     offset = end;
                 }
                 producer_read += read_started.elapsed();
@@ -377,19 +375,14 @@ where
                     submitter.push_bytes_with_hint(
                         &read_buffer[..read],
                         file_format,
-                        |batch| submit_batch(batch),
+                        &submit_batch,
                     )?;
                 }
             }
 
             if let Some(result_rx) = prefetch_result_rx.as_ref() {
-                loop {
-                    match result_rx.try_recv() {
-                        Ok(result) => {
-                            prefetched.insert(result.index, result);
-                        }
-                        Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-                    }
+                while let Ok(result) = result_rx.try_recv() {
+                    prefetched.insert(result.index, result);
                 }
             }
         }
@@ -413,7 +406,7 @@ where
             }
         }
 
-        submitter.finish(|batch| submit_batch(batch))?;
+        submitter.finish(submit_batch)?;
         Ok(DirectoryProducerOutcome { producer_read })
     });
 
@@ -613,9 +606,7 @@ where
     }
 
     let final_runtime = handle.runtime_snapshot();
-    if let Err(join_error) = handle.join() {
-        return Err(join_error);
-    }
+    handle.join()?;
 
     drop(writer_tx);
     let writer_outcome = match writer_handle.join() {

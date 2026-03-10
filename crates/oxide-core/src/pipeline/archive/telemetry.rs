@@ -353,10 +353,9 @@ pub fn build_archive_report(
         if let Some(stage) = key
             .strip_prefix("stage.")
             .and_then(|stage| stage.strip_suffix("_us"))
+            && let StatValue::U64(value_us) = &value
         {
-            if let StatValue::U64(value_us) = &value {
-                main_thread.stage_us.insert(stage.to_string(), *value_us);
-            }
+            main_thread.stage_us.insert(stage.to_string(), *value_us);
         }
         report_extensions.insert(key, report_value_from_stat(value));
     }

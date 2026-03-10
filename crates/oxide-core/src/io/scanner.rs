@@ -119,7 +119,7 @@ impl InputScanner {
             Ok(_batches) => {
                 profile::event(
                     tags::PROFILE_SCANNER,
-                    &PROFILE_TAG_STACK_SCANNER,
+                    PROFILE_TAG_STACK_SCANNER,
                     "scan_file",
                     "ok",
                     elapsed_us,
@@ -142,7 +142,7 @@ impl InputScanner {
             Err(_error) => {
                 profile::event(
                     tags::PROFILE_SCANNER,
-                    &PROFILE_TAG_STACK_SCANNER,
+                    PROFILE_TAG_STACK_SCANNER,
                     "scan_file",
                     "error",
                     elapsed_us,
@@ -425,7 +425,7 @@ impl InputScanner {
 
         for track in probed.format.tracks() {
             let params = &track.codec_params;
-            let channels = params.channels.map(|channels| channels.count() as usize);
+            let channels = params.channels.map(|channels| channels.count());
             let bits_per_sample = params.bits_per_sample.map(|bits| bits as usize);
             let frames_per_packet = params
                 .max_frames_per_packet
@@ -453,10 +453,9 @@ impl InputScanner {
                 if let Some(frame_bytes) = bytes_per_sample
                     .checked_mul(channels)
                     .and_then(|v| v.checked_mul(frames_per_packet))
+                    && frame_bytes > 0
                 {
-                    if frame_bytes > 0 {
-                        return Some((BoundaryMode::AudioFrames { frame_bytes }, metadata));
-                    }
+                    return Some((BoundaryMode::AudioFrames { frame_bytes }, metadata));
                 }
             }
         }

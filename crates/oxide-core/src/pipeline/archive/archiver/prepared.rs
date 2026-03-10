@@ -184,9 +184,7 @@ where
     }
 
     let final_runtime = handle.runtime_snapshot();
-    if let Err(join_error) = handle.join() {
-        return Err(join_error);
-    }
+    handle.join()?;
     if let Some(error) = first_error {
         return Err(error);
     }

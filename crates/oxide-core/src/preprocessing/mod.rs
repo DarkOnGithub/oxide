@@ -33,7 +33,7 @@ pub fn apply_preprocessing_with_metadata(
     strategy: &PreProcessingStrategy,
     metadata: Option<&PreprocessingMetadata>,
 ) -> Result<Vec<u8>> {
-    let result = match strategy {
+    match strategy {
         PreProcessingStrategy::None => Ok(data.to_vec()),
         PreProcessingStrategy::Text(TextStrategy::Bpe) => text_bpe::apply(data),
         PreProcessingStrategy::Text(TextStrategy::Bwt) => text_bwt::apply(data),
@@ -50,9 +50,7 @@ pub fn apply_preprocessing_with_metadata(
             audio_lpc::apply(data, metadata_as_audio(metadata)?)
         }
         PreProcessingStrategy::Binary(BinaryStrategy::Bcj) => binary_bcj::apply(data),
-    };
-
-    result
+    }
 }
 
 fn metadata_as_image(metadata: Option<&PreprocessingMetadata>) -> Result<Option<&ImageMetadata>> {
@@ -89,7 +87,7 @@ pub fn get_preprocessing_strategy(
 
 /// Dispatches reverse preprocessing to the specified strategy.
 pub fn reverse_preprocessing(data: &[u8], strategy: &PreProcessingStrategy) -> Result<Vec<u8>> {
-    let result = match strategy {
+    match strategy {
         PreProcessingStrategy::None => Ok(data.to_vec()),
         PreProcessingStrategy::Text(TextStrategy::Bpe) => text_bpe::reverse(data),
         PreProcessingStrategy::Text(TextStrategy::Bwt) => text_bwt::reverse(data),
@@ -98,7 +96,5 @@ pub fn reverse_preprocessing(data: &[u8], strategy: &PreProcessingStrategy) -> R
         PreProcessingStrategy::Image(ImageStrategy::LocoI) => image_locoi::reverse(data),
         PreProcessingStrategy::Audio(AudioStrategy::Lpc) => audio_lpc::reverse(data),
         PreProcessingStrategy::Binary(BinaryStrategy::Bcj) => binary_bcj::reverse(data),
-    };
-
-    result
+    }
 }
