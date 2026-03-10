@@ -104,7 +104,6 @@ mod telemetry_enabled_tests {
             .expect("worker task histogram missing");
         assert_eq!(task_hist.count, 2);
         assert!(task_hist.max >= task_hist.min);
-
     }
 }
 

@@ -2,10 +2,10 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use oxide_core::{
-    ArchiveReader, ArchiveWriter, BlockHeader, BufferPool, CompressionAlgo, CompressionMeta,
-    CompressionPreset, Footer, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
-    ReorderBuffer, SeekableArchiveWriter, StoredDictionary, TextStrategy, CHUNK_DESCRIPTOR_SIZE,
-    CORE_SECTION_COUNT, GLOBAL_HEADER_SIZE, SECTION_TABLE_ENTRY_SIZE,
+    ArchiveReader, ArchiveWriter, BlockHeader, BufferPool, CHUNK_DESCRIPTOR_SIZE,
+    CORE_SECTION_COUNT, CompressionAlgo, CompressionMeta, CompressionPreset, Footer,
+    GLOBAL_HEADER_SIZE, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
+    ReorderBuffer, SECTION_TABLE_ENTRY_SIZE, SeekableArchiveWriter, StoredDictionary, TextStrategy,
 };
 
 fn block(
@@ -146,8 +146,8 @@ fn footer_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn archive_writer_and_reader_support_random_and_sequential_access(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn archive_writer_and_reader_support_random_and_sequential_access()
+-> Result<(), Box<dyn std::error::Error>> {
     let pool = Arc::new(BufferPool::new(128, 8));
     let mut writer = ArchiveWriter::new(Vec::new(), Arc::clone(&pool));
     writer.write_global_header(3)?;
@@ -235,8 +235,8 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn seekable_archive_writer_streams_payload_and_round_trips(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn seekable_archive_writer_streams_payload_and_round_trips()
+-> Result<(), Box<dyn std::error::Error>> {
     let pool = Arc::new(BufferPool::new(128, 8));
     let cursor = Cursor::new(Vec::new());
     let mut writer = SeekableArchiveWriter::new(cursor, Arc::clone(&pool));
