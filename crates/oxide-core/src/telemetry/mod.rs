@@ -125,7 +125,7 @@ pub fn sample_process_memory() -> ProcessMemorySample {
 pub fn snapshot() -> TelemetrySnapshot {
     #[cfg(feature = "telemetry")]
     {
-        return registry::snapshot();
+        registry::snapshot()
     }
 
     #[cfg(not(feature = "telemetry"))]

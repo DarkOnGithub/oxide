@@ -53,16 +53,14 @@ pub(crate) fn apply_compression_request_with_scratch(
     request: CompressionRequest<'_>,
     scratch: &mut CompressionScratchArena,
 ) -> Result<Vec<u8>> {
-    let result = match request.algo {
+    match request.algo {
         CompressionAlgo::Lz4 => lz4::apply_with_scratch(
             request.data,
             request.preset,
             request.dictionary,
             scratch.lz4(),
         ),
-    };
-
-    result
+    }
 }
 
 /// Dispatches decompression to the specified algorithm.

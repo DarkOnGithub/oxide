@@ -254,7 +254,10 @@ impl<R: Read + Seek> ArchiveReader<R> {
         chunk_index_entry: SectionTableEntry,
         payload_entry: SectionTableEntry,
     ) -> Result<(Vec<ChunkDescriptor>, Vec<u64>)> {
-        if chunk_index_entry.length % CHUNK_DESCRIPTOR_SIZE as u64 != 0 {
+        if !chunk_index_entry
+            .length
+            .is_multiple_of(CHUNK_DESCRIPTOR_SIZE as u64)
+        {
             return Err(OxideError::InvalidFormat(
                 "chunk index section is not descriptor-aligned",
             ));

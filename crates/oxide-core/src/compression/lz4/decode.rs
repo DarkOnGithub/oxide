@@ -130,7 +130,7 @@ impl<'a> BlockDecoder<'a> {
             dictionary: dictionary.unwrap_or(&[]),
             input_pos: 0,
             output_pos: 0,
-            stats: DecodeStats::default(),
+            stats: DecodeStats,
         }
     }
 

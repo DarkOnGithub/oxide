@@ -346,10 +346,10 @@ impl WorkerPoolHandle {
             }
         }
 
-        if let Err(join_err) = self.join_workers() {
-            if first_error.is_none() {
-                first_error = Some(OxideError::CompressionError(join_err));
-            }
+        if let Err(join_err) = self.join_workers()
+            && first_error.is_none()
+        {
+            first_error = Some(OxideError::CompressionError(join_err));
         }
 
         if let Some(error) = first_error {

@@ -1130,7 +1130,7 @@ fn raw_telemetry_metric_label(name: &str) -> String {
 }
 
 fn humanize_metric_name(name: &str) -> String {
-    name.replace('.', " ").replace('_', " ")
+    name.replace(['.', '_'], " ")
 }
 
 fn format_telemetry_scalar(name: &str, value: u64) -> String {
