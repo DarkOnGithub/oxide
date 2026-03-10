@@ -11,10 +11,6 @@ pub enum OxideError {
     #[error("invalid format: {0}")]
     InvalidFormat(&'static str),
 
-    /// CRC32 checksum verification failed
-    #[error("checksum mismatch (expected {expected:#010x}, actual {actual:#010x})")]
-    ChecksumMismatch { expected: u32, actual: u32 },
-
     /// Compression operation failed
     #[error("compression error: {0}")]
     CompressionError(String),

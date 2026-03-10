@@ -38,11 +38,6 @@ impl<T> WorkStealingQueue<T> {
         }
     }
 
-    /// Number of local workers configured for this queue.
-    pub fn worker_count(&self) -> usize {
-        self.stealers.len()
-    }
-
     /// Approximate number of queued tasks across global/local queues.
     pub fn pending(&self) -> usize {
         self.pending.load(Ordering::Acquire)
@@ -136,11 +131,6 @@ impl<T> WorkStealingWorker<T> {
         self.local.push(item);
         self.queue.pending.fetch_add(1, Ordering::AcqRel);
         self.queue.wait_condvar.notify_one();
-    }
-
-    /// Approximate local queue depth.
-    pub fn local_len(&self) -> usize {
-        self.local.len()
     }
 
     /// Approximate queue depth visible to this worker.

@@ -74,18 +74,8 @@ impl<T> ReorderBuffer<T> {
         Ok(ready)
     }
 
-    /// Returns the next expected ID.
-    pub fn next_expected(&self) -> usize {
-        self.next_id
-    }
-
     /// Returns the number of items currently pending.
     pub fn pending_len(&self) -> usize {
         self.pending.len()
-    }
-
-    /// Returns the maximum number of pending items allowed.
-    pub fn max_pending(&self) -> usize {
-        self.max_pending
     }
 }

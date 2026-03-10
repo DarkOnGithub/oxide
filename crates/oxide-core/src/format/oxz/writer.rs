@@ -231,11 +231,6 @@ impl<W: Write> ArchiveWriter<W> {
         Ok(accepted)
     }
 
-    /// Returns the number of blocks already staged for final output.
-    pub fn blocks_written(&self) -> u32 {
-        self.blocks_written
-    }
-
     /// Returns the number of blocks currently pending in the reorder buffer.
     pub fn pending_blocks(&self) -> usize {
         self.reorder.pending_len()
@@ -286,11 +281,6 @@ impl<W: Write> ArchiveWriter<W> {
         record_finalize_telemetry(&sections, finalize_started.elapsed());
 
         Ok(self.writer)
-    }
-
-    /// Consumes the writer and returns the underlying inner writer.
-    pub fn into_inner(self) -> W {
-        self.writer
     }
 
     fn ensure_header_written(&self) -> Result<()> {
@@ -546,10 +536,6 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         Ok(accepted)
     }
 
-    pub fn blocks_written(&self) -> u32 {
-        self.blocks_written
-    }
-
     pub fn pending_blocks(&self) -> usize {
         self.reorder.pending_len()
     }
@@ -587,10 +573,6 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         record_finalize_telemetry(&sections, finalize_started.elapsed());
 
         Ok(self.writer)
-    }
-
-    pub fn into_inner(self) -> W {
-        self.writer
     }
 
     fn ensure_header_written(&self) -> Result<()> {
