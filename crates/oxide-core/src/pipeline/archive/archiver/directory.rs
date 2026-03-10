@@ -15,7 +15,7 @@ use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
-use crate::types::{Batch, CompressedBlock, FileFormat, Result};
+use crate::types::{Batch, CompressedBlock, Result};
 
 use super::super::telemetry::*;
 use super::super::types::*;
@@ -193,7 +193,6 @@ where
 
     let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
     let producer_root = discovery.root.clone();
-    let producer_directories = discovery.directories.clone();
     let producer_files = discovery.files.clone();
     let producer_file_formats = file_formats.clone();
     let producer_block_size = block_size;
@@ -214,31 +213,6 @@ where
                 )
             })
         };
-
-        let entry_count = producer_directories
-            .len()
-            .checked_add(producer_files.len())
-            .ok_or(crate::OxideError::InvalidFormat(
-                "directory entry count overflow",
-            ))?;
-        let entry_count = u32::try_from(entry_count)
-            .map_err(|_| crate::OxideError::InvalidFormat("directory entry count overflow"))?;
-
-        let mut bundle_header = Vec::with_capacity(10);
-        bundle_header.extend_from_slice(&directory::DIRECTORY_BUNDLE_MAGIC);
-        bundle_header.extend_from_slice(&directory::DIRECTORY_BUNDLE_VERSION.to_le_bytes());
-        bundle_header.extend_from_slice(&entry_count.to_le_bytes());
-        submitter.push_bytes_with_hint(&bundle_header, FileFormat::Common, |batch| {
-            submit_batch(batch)
-        })?;
-
-        for rel_path in &producer_directories {
-            let mut encoded = Vec::with_capacity(1 + 4 + rel_path.len());
-            encoded.push(0);
-            directory::encode_path(&mut encoded, rel_path)?;
-            submitter
-                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| submit_batch(batch))?;
-        }
 
         let mut prefetch_request_tx = None;
         let mut prefetch_result_rx = None;
@@ -308,13 +282,6 @@ where
                     next_prefetch += 1;
                 }
             }
-
-            let mut encoded = Vec::with_capacity(1 + 4 + file.rel_path.len() + 8);
-            encoded.push(1);
-            directory::encode_path(&mut encoded, &file.rel_path)?;
-            encoded.extend_from_slice(&file.size.to_le_bytes());
-            submitter
-                .push_bytes_with_hint(&encoded, FileFormat::Common, |batch| submit_batch(batch))?;
 
             let file_size = usize::try_from(file.size).unwrap_or(usize::MAX);
             if prefetch_request_tx.is_some() && file_size > 0 && file_size <= mmap_threshold {

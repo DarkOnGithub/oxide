@@ -4,9 +4,8 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader,
-    BufferPool, CompressionAlgo, ExtractProgressEvent, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
-    PreProcessingStrategy, ReportValue, RunTelemetryOptions, SECTION_TABLE_ENTRY_SIZE,
-    TelemetryEvent, TelemetrySink,
+    BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo, ExtractProgressEvent, FOOTER_SIZE,
+    PreProcessingStrategy, ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -203,10 +202,14 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
         .writer;
 
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
+    let mut previous_offset = None;
     for (expected, block) in reader.iter_blocks().enumerate() {
         let (header, payload) = block?;
-        assert_eq!(header.chunk_id, expected as u64);
         assert_eq!(payload.len(), header.encoded_len as usize);
+        if let Some(previous_offset) = previous_offset {
+            assert!(header.payload_offset > previous_offset, "block {expected} did not advance");
+        }
+        previous_offset = Some(header.payload_offset);
     }
 
     Ok(())
@@ -372,7 +375,7 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
         )?
         .writer;
     let reader = ArchiveReader::new(Cursor::new(archive))?;
-    assert_eq!(u32::from(reader.global_header().feature_bits) & 1, 1);
+    assert_eq!(reader.source_kind(), oxide_core::ArchiveSourceKind::Directory);
     Ok(())
 }
 
@@ -513,7 +516,7 @@ fn archive_reader_exposes_directory_manifest() -> Result<(), Box<dyn std::error:
         )?
         .writer;
     let reader = ArchiveReader::new(Cursor::new(archive))?;
-    let manifest = reader.manifest().expect("missing archive manifest");
+    let manifest = reader.manifest();
     assert_eq!(
         manifest.entries(),
         vec![
@@ -564,7 +567,7 @@ fn archive_reader_exposes_file_manifest() -> Result<(), Box<dyn std::error::Erro
         )?
         .writer;
     let reader = ArchiveReader::new(Cursor::new(archive))?;
-    let manifest = reader.manifest().expect("missing archive manifest");
+    let manifest = reader.manifest();
     assert_eq!(
         manifest.entries(),
         vec![oxide_core::ArchiveListingEntry {
@@ -624,13 +627,9 @@ fn extract_archive_ignores_payload_checksum_mismatch() -> Result<(), Box<dyn std
         )?
         .writer;
     let reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
-    let payload_entry_index = reader
-        .section_table()
-        .iter()
-        .position(|entry| entry.section_type == oxide_core::SectionType::PayloadRegion)
-        .expect("payload section");
-    let payload_checksum_offset =
-        GLOBAL_HEADER_SIZE + (payload_entry_index * SECTION_TABLE_ENTRY_SIZE) + 20;
+    let payload_checksum_offset = reader.global_header().chunk_table_offset as usize
+        + CHUNK_TABLE_HEADER_SIZE
+        + 16;
     archive[payload_checksum_offset] ^= 0xA5;
 
     let (restored, _report) =

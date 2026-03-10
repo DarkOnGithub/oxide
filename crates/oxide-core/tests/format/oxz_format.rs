@@ -2,10 +2,10 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use oxide_core::{
-    ArchiveReader, ArchiveWriter, BlockHeader, BufferPool, CHUNK_DESCRIPTOR_SIZE,
-    CORE_SECTION_COUNT, CompressionAlgo, CompressionMeta, CompressionPreset, Footer,
+    ARCHIVE_METADATA_SIZE, ArchiveReader, ArchiveWriter, BlockHeader, BufferPool,
+    CHUNK_DESCRIPTOR_SIZE, CompressionAlgo, CompressionMeta, CompressionPreset, Footer,
     GLOBAL_HEADER_SIZE, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
-    ReorderBuffer, SECTION_TABLE_ENTRY_SIZE, SeekableArchiveWriter, StoredDictionary, TextStrategy,
+    ReorderBuffer, SeekableArchiveWriter, StoredDictionary, TextStrategy,
 };
 
 fn block(
@@ -61,7 +61,7 @@ fn compression_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let header = GlobalHeader::with_feature_bits(6, 0x0001, GLOBAL_HEADER_SIZE as u64);
+    let header = GlobalHeader::new(56, 64, 96, 128, 160, 224);
     let mut encoded = Vec::new();
     header.write(&mut encoded)?;
     assert_eq!(encoded.len(), GLOBAL_HEADER_SIZE);
@@ -74,7 +74,7 @@ fn header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let header = BlockHeader::new(
-        7,
+        128,
         1024,
         384,
         PreProcessingStrategy::Text(TextStrategy::Bwt),
@@ -99,7 +99,7 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn block_header_round_trip_preserves_raw_passthrough() -> Result<(), Box<dyn std::error::Error>> {
     let header = BlockHeader::new_with_compression_meta(
-        9,
+        512,
         4096,
         4096,
         PreProcessingStrategy::None,
@@ -175,16 +175,17 @@ fn archive_writer_and_reader_support_random_and_sequential_access()
     assert_eq!(reader.block_count(), 3);
 
     let (header, payload) = reader.read_block(1)?;
-    assert_eq!(header.chunk_id, 1);
     assert_eq!(payload, b"beta");
+    assert!(header.payload_offset > 0);
 
-    let mut seen_ids = Vec::new();
+    let mut seen_offsets = Vec::new();
     for block_entry in reader.iter_blocks() {
         let (block_header, data) = block_entry?;
-        seen_ids.push(block_header.chunk_id);
+        seen_offsets.push(block_header.payload_offset);
         assert_eq!(data.len(), block_header.encoded_len as usize);
     }
-    assert_eq!(seen_ids, vec![0, 1, 2]);
+    assert_eq!(seen_offsets.len(), 3);
+    assert!(seen_offsets.windows(2).all(|pair| pair[0] < pair[1]));
 
     Ok(())
 }
@@ -225,12 +226,12 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
 
     let archive = writer.write_footer()?;
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
-    let ids: Vec<u64> = reader
+    let payloads: Vec<Vec<u8>> = reader
         .iter_blocks()
-        .map(|entry| entry.map(|(header, _)| header.chunk_id))
+        .map(|entry| entry.map(|(_, payload)| payload))
         .collect::<Result<Vec<_>, _>>()?;
 
-    assert_eq!(ids, vec![0, 1, 2]);
+    assert_eq!(payloads, vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]);
     Ok(())
 }
 
@@ -264,8 +265,8 @@ fn seekable_archive_writer_streams_payload_and_round_trips()
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     assert_eq!(reader.block_count(), 3);
     let (header, payload) = reader.read_block(1)?;
-    assert_eq!(header.chunk_id, 1);
     assert_eq!(payload, b"beta");
+    assert!(header.payload_offset > 0);
     Ok(())
 }
 
@@ -305,9 +306,9 @@ fn reader_ignores_global_crc_mismatch() -> Result<(), Box<dyn std::error::Error>
     ))?;
     let mut archive = writer.write_footer()?;
 
-    let payload_offset = GLOBAL_HEADER_SIZE
-        + (CORE_SECTION_COUNT as usize * SECTION_TABLE_ENTRY_SIZE)
-        + CHUNK_DESCRIPTOR_SIZE;
+    let payload_offset = ArchiveReader::new(Cursor::new(archive.clone()))?
+        .global_header()
+        .payload_offset as usize;
     archive[payload_offset] ^= 0xFF;
 
     let reader = ArchiveReader::new(Cursor::new(archive))?;
@@ -333,8 +334,8 @@ fn reader_ignores_block_crc_mismatch_on_read() -> Result<(), Box<dyn std::error:
 
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, payload) = reader.read_block(0)?;
-    assert_eq!(header.chunk_id, 0);
     assert_eq!(payload, b"payload");
+    assert!(header.payload_offset >= (GLOBAL_HEADER_SIZE + ARCHIVE_METADATA_SIZE) as u64);
     Ok(())
 }
 

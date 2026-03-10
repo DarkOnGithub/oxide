@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::format::ArchiveManifest;
 use crate::format::{
-    CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, GLOBAL_HEADER_SIZE, SECTION_TABLE_ENTRY_SIZE,
+    ARCHIVE_METADATA_SIZE, CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE, GLOBAL_HEADER_SIZE,
 };
 use crate::pipeline::types::PipelinePerformanceOptions;
 use crate::types::Result;
@@ -19,12 +19,12 @@ pub fn container_prefix_bytes(
     dictionary_bytes: usize,
     manifest_bytes: usize,
 ) -> u64 {
-    let section_count = CORE_SECTION_COUNT as u64 + if manifest_bytes > 0 { 1 } else { 0 };
     GLOBAL_HEADER_SIZE as u64
-        + section_count * SECTION_TABLE_ENTRY_SIZE as u64
+        + ARCHIVE_METADATA_SIZE as u64
+        + manifest_bytes as u64
+        + CHUNK_TABLE_HEADER_SIZE as u64
         + block_count as u64 * CHUNK_DESCRIPTOR_SIZE as u64
         + dictionary_bytes as u64
-        + manifest_bytes as u64
 }
 
 pub fn max_inflight_blocks(

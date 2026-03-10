@@ -8,9 +8,9 @@ pub mod oxz;
 
 pub use detector::FormatDetector;
 pub use oxz::{
-    ArchiveBlockWriter, ArchiveManifest, ArchiveReader, ArchiveWriter, BlockHeader, BlockIterator,
-    CHUNK_DESCRIPTOR_SIZE, CORE_SECTION_COUNT, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT,
-    FEATURE_DEDUP_REFERENCES, FOOTER_SIZE, Footer, GLOBAL_HEADER_SIZE, GlobalHeader, OXZ_MAGIC,
-    OXZ_VERSION, ReorderBuffer, SECTION_TABLE_ENTRY_SIZE, SectionTableEntry, SectionType,
-    SeekableArchiveWriter, StoredDictionary,
+    ARCHIVE_METADATA_SIZE, ArchiveBlockWriter, ArchiveManifest, ArchiveMetadata, ArchiveReader,
+    ArchiveWriter, BlockHeader, BlockIterator, CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE,
+    ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT, FOOTER_SIZE, Footer, GLOBAL_HEADER_SIZE,
+    GlobalHeader, OXZ_MAGIC, OXZ_VERSION, ReorderBuffer, SeekableArchiveWriter,
+    StoredDictionary,
 };
