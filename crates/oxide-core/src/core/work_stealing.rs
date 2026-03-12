@@ -133,9 +133,9 @@ impl<T> WorkStealingWorker<T> {
         self.queue.wait_condvar.notify_one();
     }
 
-    /// Approximate queue depth visible to this worker.
+    /// Approximate total queue depth across the pool.
     pub fn queue_depth(&self) -> usize {
-        self.local.len().saturating_add(self.queue.global.len())
+        self.queue.pending()
     }
 
     /// Fetches one task, preferring local work for cache locality.

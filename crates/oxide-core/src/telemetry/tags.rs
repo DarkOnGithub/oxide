@@ -56,7 +56,7 @@ pub const METRIC_MEMORY_PROCESS_VIRTUAL_BYTES: &str = "oxide.memory.process.virt
 
 /// Total count of tasks processed by workers.
 pub const METRIC_WORKER_TASK_COUNT: &str = "oxide.worker.task.count";
-/// Current depth of the worker queues.
+/// Current total depth of queued worker tasks across the pool.
 pub const METRIC_WORKER_QUEUE_DEPTH: &str = "oxide.worker.queue.depth";
 /// Number of workers currently active.
 pub const METRIC_WORKER_ACTIVE_COUNT: &str = "oxide.worker.active.count";

@@ -19,15 +19,15 @@ pub struct ArchiveProgressEvent {
     pub input_bytes_completed: u64,
     /// Number of output bytes written so far.
     pub output_bytes_completed: u64,
-    /// Average read throughput in bytes per second.
+    /// Average read throughput in bytes per second over wall-clock elapsed time.
     pub read_avg_bps: f64,
-    /// Average write throughput in bytes per second.
+    /// Average write throughput in bytes per second over wall-clock elapsed time.
     pub write_avg_bps: f64,
-    /// Average preprocessing throughput in bytes per second.
+    /// Aggregate preprocessing throughput over summed stage busy time.
     pub preprocessing_avg_bps: f64,
-    /// Average compression throughput in bytes per second.
+    /// Aggregate compression throughput over summed stage busy time.
     pub compression_avg_bps: f64,
-    /// Combined preprocessing and compression throughput.
+    /// Aggregate preprocessing+compression throughput over summed stage busy time.
     pub preprocessing_compression_avg_bps: f64,
     /// Preprocessing throughput relative to wall clock time.
     pub preprocessing_wall_avg_bps: f64,
@@ -60,9 +60,9 @@ pub struct ExtractProgressEvent {
     pub archive_bytes_completed: u64,
     /// Number of bytes decoded so far.
     pub decoded_bytes_completed: u64,
-    /// Average read throughput in bytes per second.
+    /// Average read throughput in bytes per second over wall-clock elapsed time.
     pub read_avg_bps: f64,
-    /// Average decode throughput in bytes per second.
+    /// Average decode throughput in bytes per second over wall-clock elapsed time.
     pub decode_avg_bps: f64,
     /// Ratio of decoded bytes to archive bytes processed.
     pub decode_archive_ratio: f64,

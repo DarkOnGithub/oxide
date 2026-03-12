@@ -22,6 +22,7 @@ pub use utils::*;
 
 use self::directory::archive_directory_streaming_with_writer;
 use self::prepared::archive_prepared_with_writer;
+use super::telemetry;
 use super::types::PreparedInput;
 
 pub struct Archiver<'a> {
@@ -46,6 +47,7 @@ impl<'a> Archiver<'a> {
                 "archive_file expects a file path",
             ));
         }
+        telemetry::begin_archive_run_telemetry();
         let block_size = self.config.target_block_size;
         let prepared = self.prepare_file(path, block_size)?;
         self.archive_prepared_with_writer(
@@ -78,6 +80,7 @@ impl<'a> Archiver<'a> {
                 "archive_file expects a file path",
             ));
         }
+        telemetry::begin_archive_run_telemetry();
         let block_size = self.config.target_block_size;
         let prepared = self.prepare_file(path, block_size)?;
         self.archive_prepared_with_writer(
@@ -104,6 +107,7 @@ impl<'a> Archiver<'a> {
         options: &RunTelemetryOptions,
         sink: &mut dyn TelemetrySink,
     ) -> Result<ArchiveRun<W>> {
+        telemetry::begin_archive_run_telemetry();
         archive_directory_streaming_with_writer(
             self.config,
             root,
@@ -129,6 +133,7 @@ impl<'a> Archiver<'a> {
         options: &RunTelemetryOptions,
         sink: &mut dyn TelemetrySink,
     ) -> Result<ArchiveRun<W>> {
+        telemetry::begin_archive_run_telemetry();
         archive_directory_streaming_with_writer(
             self.config,
             root,
@@ -155,6 +160,7 @@ impl<'a> Archiver<'a> {
         sink: &mut dyn TelemetrySink,
         block_size: usize,
     ) -> Result<ArchiveRun<W>> {
+        telemetry::begin_archive_run_telemetry();
         self.archive_prepared_with_writer(
             prepared,
             writer,
@@ -180,6 +186,7 @@ impl<'a> Archiver<'a> {
         sink: &mut dyn TelemetrySink,
         block_size: usize,
     ) -> Result<ArchiveRun<W>> {
+        telemetry::begin_archive_run_telemetry();
         self.archive_prepared_with_writer(
             prepared,
             writer,

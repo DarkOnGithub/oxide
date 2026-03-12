@@ -25,9 +25,6 @@ struct FinalizedLayout {
     entry_table_bytes: Vec<u8>,
     chunk_table_bytes: Vec<u8>,
     dictionary_store_bytes: Vec<u8>,
-    chunk_table_elapsed_us: u64,
-    dictionary_store_elapsed_us: u64,
-    header_elapsed_us: u64,
 }
 
 pub trait ArchiveBlockWriter {
@@ -151,8 +148,11 @@ impl<W: Write> ArchiveWriter<W> {
         let source_kind = archive_source_kind_from_flags(flags)?;
         let entry_table_bytes = self.manifest.encode()?;
         let dictionary_store_bytes = encode_dictionary_store(&self.dictionaries)?;
-        let payload_offset =
-            payload_offset_bytes(block_count, entry_table_bytes.len(), dictionary_store_bytes.len())?;
+        let payload_offset = payload_offset_bytes(
+            block_count,
+            entry_table_bytes.len(),
+            dictionary_store_bytes.len(),
+        )?;
 
         self.entry_table_bytes = entry_table_bytes;
         self.dictionary_store_bytes = dictionary_store_bytes;
@@ -237,11 +237,13 @@ impl<W: Write> ArchiveWriter<W> {
             self.next_payload_offset,
         )?;
 
-        self.writer.write_all(&layout.header_bytes)?;
-        self.writer.write_all(&layout.metadata_bytes)?;
-        self.writer.write_all(&layout.entry_table_bytes)?;
-        self.writer.write_all(&layout.chunk_table_bytes)?;
-        self.writer.write_all(&layout.dictionary_store_bytes)?;
+        let header_write_elapsed = write_all_timed(&mut self.writer, &layout.header_bytes)?;
+        write_all_timed(&mut self.writer, &layout.metadata_bytes)?;
+        write_all_timed(&mut self.writer, &layout.entry_table_bytes)?;
+        let chunk_table_write_elapsed =
+            write_all_timed(&mut self.writer, &layout.chunk_table_bytes)?;
+        let dictionary_store_write_elapsed =
+            write_all_timed(&mut self.writer, &layout.dictionary_store_bytes)?;
 
         let pending_chunks = std::mem::take(&mut self.pending_chunks);
         for chunk in pending_chunks {
@@ -252,7 +254,12 @@ impl<W: Write> ArchiveWriter<W> {
         let footer = Footer::new(PLACEHOLDER_CHECKSUM);
         footer.write(&mut self.writer)?;
 
-        record_finalize_telemetry(&layout, finalize_started.elapsed());
+        record_finalize_telemetry(
+            header_write_elapsed,
+            chunk_table_write_elapsed,
+            dictionary_store_write_elapsed,
+            finalize_started.elapsed(),
+        );
         Ok(self.writer)
     }
 
@@ -408,8 +415,11 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         let source_kind = archive_source_kind_from_flags(flags)?;
         let entry_table_bytes = self.manifest.encode()?;
         let dictionary_store_bytes = encode_dictionary_store(&self.dictionaries)?;
-        let payload_offset =
-            payload_offset_bytes(block_count, entry_table_bytes.len(), dictionary_store_bytes.len())?;
+        let payload_offset = payload_offset_bytes(
+            block_count,
+            entry_table_bytes.len(),
+            dictionary_store_bytes.len(),
+        )?;
 
         reserve_prefix(&mut self.writer, payload_offset)?;
 
@@ -504,17 +514,25 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         )?;
 
         self.writer.seek(SeekFrom::Start(0))?;
-        self.writer.write_all(&layout.header_bytes)?;
-        self.writer.write_all(&layout.metadata_bytes)?;
-        self.writer.write_all(&layout.entry_table_bytes)?;
-        self.writer.write_all(&layout.chunk_table_bytes)?;
-        self.writer.write_all(&layout.dictionary_store_bytes)?;
-        self.writer.seek(SeekFrom::Start(self.next_payload_offset))?;
+        let header_write_elapsed = write_all_timed(&mut self.writer, &layout.header_bytes)?;
+        write_all_timed(&mut self.writer, &layout.metadata_bytes)?;
+        write_all_timed(&mut self.writer, &layout.entry_table_bytes)?;
+        let chunk_table_write_elapsed =
+            write_all_timed(&mut self.writer, &layout.chunk_table_bytes)?;
+        let dictionary_store_write_elapsed =
+            write_all_timed(&mut self.writer, &layout.dictionary_store_bytes)?;
+        self.writer
+            .seek(SeekFrom::Start(self.next_payload_offset))?;
 
         let footer = Footer::new(PLACEHOLDER_CHECKSUM);
         footer.write(&mut self.writer)?;
 
-        record_finalize_telemetry(&layout, finalize_started.elapsed());
+        record_finalize_telemetry(
+            header_write_elapsed,
+            chunk_table_write_elapsed,
+            dictionary_store_write_elapsed,
+            finalize_started.elapsed(),
+        );
         Ok(self.writer)
     }
 
@@ -605,8 +623,8 @@ fn payload_offset_bytes(
     entry_table_len: usize,
     dictionary_store_len: usize,
 ) -> Result<u64> {
-    let chunk_table_len = CHUNK_TABLE_HEADER_SIZE as u64
-        + u64::from(block_count) * CHUNK_DESCRIPTOR_SIZE as u64;
+    let chunk_table_len =
+        CHUNK_TABLE_HEADER_SIZE as u64 + u64::from(block_count) * CHUNK_DESCRIPTOR_SIZE as u64;
     (GLOBAL_HEADER_SIZE as u64)
         .checked_add(ARCHIVE_METADATA_SIZE as u64)
         .and_then(|offset| offset.checked_add(entry_table_len as u64))
@@ -672,14 +690,7 @@ fn finalize_layout(
     }
 
     let metadata_bytes = ArchiveMetadata::new(source_kind).to_bytes();
-
-    let chunk_table_started = Instant::now();
     let chunk_table_bytes = encode_chunk_table(descriptors)?;
-    let chunk_table_elapsed_us = duration_to_us(chunk_table_started.elapsed());
-
-    let dictionary_store_elapsed_us = 0;
-
-    let header_started = Instant::now();
     let header_bytes = GlobalHeader::new(
         metadata_offset,
         entry_table_offset,
@@ -689,7 +700,6 @@ fn finalize_layout(
         footer_offset,
     )
     .to_bytes();
-    let header_elapsed_us = duration_to_us(header_started.elapsed());
 
     Ok(FinalizedLayout {
         header_bytes,
@@ -697,10 +707,13 @@ fn finalize_layout(
         entry_table_bytes: entry_table_bytes.to_vec(),
         chunk_table_bytes,
         dictionary_store_bytes: dictionary_store_bytes.to_vec(),
-        chunk_table_elapsed_us,
-        dictionary_store_elapsed_us,
-        header_elapsed_us,
     })
+}
+
+fn write_all_timed<W: Write>(writer: &mut W, bytes: &[u8]) -> Result<std::time::Duration> {
+    let started = Instant::now();
+    writer.write_all(bytes)?;
+    Ok(started.elapsed())
 }
 
 fn archive_source_kind_from_flags(flags: u32) -> Result<ArchiveSourceKind> {
@@ -725,14 +738,19 @@ fn record_stage_telemetry(elapsed: std::time::Duration) {
     );
 }
 
-fn record_finalize_telemetry(layout: &FinalizedLayout, finalize_elapsed: std::time::Duration) {
+fn record_finalize_telemetry(
+    header_write_elapsed: std::time::Duration,
+    chunk_table_write_elapsed: std::time::Duration,
+    dictionary_store_write_elapsed: std::time::Duration,
+    finalize_elapsed: std::time::Duration,
+) {
     let finalize_elapsed_us = duration_to_us(finalize_elapsed);
     profile::event(
         tags::PROFILE_OXZ,
         &[tags::TAG_OXZ],
         "write_header",
         "ok",
-        layout.header_elapsed_us,
+        duration_to_us(header_write_elapsed),
         "oxz header written successfully",
     );
     profile::event(
@@ -740,7 +758,7 @@ fn record_finalize_telemetry(layout: &FinalizedLayout, finalize_elapsed: std::ti
         &[tags::TAG_OXZ],
         "write_chunk_table",
         "ok",
-        layout.chunk_table_elapsed_us,
+        duration_to_us(chunk_table_write_elapsed),
         "oxz chunk table written successfully",
     );
     profile::event(
@@ -748,7 +766,7 @@ fn record_finalize_telemetry(layout: &FinalizedLayout, finalize_elapsed: std::ti
         &[tags::TAG_OXZ],
         "write_dictionary_store",
         "ok",
-        layout.dictionary_store_elapsed_us,
+        duration_to_us(dictionary_store_write_elapsed),
         "oxz dictionary store written successfully",
     );
     profile::event(

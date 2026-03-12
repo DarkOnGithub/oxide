@@ -167,7 +167,10 @@ impl Extractor {
         )?;
         writer.flush()?;
 
-        if !matches!(directory::source_kind_from_flags(decoded.flags), ArchiveSourceKind::File) {
+        if !matches!(
+            directory::source_kind_from_flags(decoded.flags),
+            ArchiveSourceKind::File
+        ) {
             return Err(crate::OxideError::InvalidFormat(
                 "archive is not a file payload",
             ));
@@ -304,6 +307,8 @@ impl Extractor {
         drop(result_tx);
 
         let archive_bytes_total = archive.global_header().footer_offset + crate::FOOTER_SIZE as u64;
+        let mut archive_bytes_completed =
+            archive.global_header().payload_offset + crate::FOOTER_SIZE as u64;
         let mut submitted = 0usize;
         let mut received = 0usize;
         let mut first_error: Option<crate::OxideError> = None;
@@ -319,6 +324,8 @@ impl Extractor {
             let read_started = Instant::now();
             let (header, block_data) = archive.read_block(block_index as u32)?;
             stage_timings.archive_read += read_started.elapsed();
+            archive_bytes_completed =
+                archive_bytes_completed.saturating_add(header.encoded_len as u64);
 
             while submitted.saturating_sub(received) >= queue_capacity {
                 receive_decode_result_to_writer(
@@ -336,7 +343,7 @@ impl Extractor {
                 emit_extract_progress_if_due(
                     source_kind,
                     started_at,
-                    archive_bytes_total,
+                    archive_bytes_completed,
                     decoded_bytes_completed,
                     block_capacity as u32,
                     received as u32,
@@ -393,7 +400,7 @@ impl Extractor {
             emit_extract_progress_if_due(
                 source_kind,
                 started_at,
-                archive_bytes_total,
+                archive_bytes_completed,
                 decoded_bytes_completed,
                 block_capacity as u32,
                 received as u32,
@@ -432,7 +439,7 @@ impl Extractor {
             emit_extract_progress_if_due(
                 source_kind,
                 started_at,
-                archive_bytes_total,
+                archive_bytes_completed,
                 decoded_bytes_completed,
                 block_capacity as u32,
                 received as u32,
@@ -454,7 +461,7 @@ impl Extractor {
             emit_extract_progress(
                 source_kind,
                 started_at,
-                archive_bytes_total,
+                archive_bytes_completed,
                 decoded_bytes_completed,
                 block_capacity as u32,
                 received as u32,

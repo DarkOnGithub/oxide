@@ -112,11 +112,11 @@ impl InputScanner {
         let result = self.scan_file_inner(path);
 
         let elapsed_us = profile::elapsed_us(started_at);
-        telemetry::increment_counter(tags::METRIC_SCANNER_SCAN_COUNT, 1);
         telemetry::record_histogram(tags::METRIC_SCANNER_SCAN_LATENCY_US, elapsed_us);
 
         match &result {
             Ok(_batches) => {
+                telemetry::increment_counter(tags::METRIC_SCANNER_SCAN_COUNT, 1);
                 profile::event(
                     tags::PROFILE_SCANNER,
                     PROFILE_TAG_STACK_SCANNER,

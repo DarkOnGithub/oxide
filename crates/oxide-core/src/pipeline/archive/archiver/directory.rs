@@ -304,11 +304,9 @@ where
                     }
                 };
                 producer_read += prefetched_file.read_elapsed;
-                submitter.push_bytes_with_hint(
-                    &prefetched_file.data,
-                    file_format,
-                    |batch| submit_batch(batch),
-                )?;
+                submitter.push_bytes_with_hint(&prefetched_file.data, file_format, |batch| {
+                    submit_batch(batch)
+                })?;
             } else if file_size >= mmap_threshold {
                 let read_started = Instant::now();
                 let mmap = MmapInput::open(&file.full_path)?;
@@ -317,11 +315,9 @@ where
                 while offset < len {
                     let end = offset.saturating_add(stream_read_buffer_size).min(len);
                     let bytes = mmap.mapped_slice(offset, end)?;
-                    submitter.push_bytes_with_hint(
-                        bytes.as_slice(),
-                        file_format,
-                        |batch| submit_batch(batch),
-                    )?;
+                    submitter.push_bytes_with_hint(bytes.as_slice(), file_format, |batch| {
+                        submit_batch(batch)
+                    })?;
                     offset = end;
                 }
                 producer_read += read_started.elapsed();
@@ -335,11 +331,9 @@ where
                         break;
                     }
 
-                    submitter.push_bytes_with_hint(
-                        &read_buffer[..read],
-                        file_format,
-                        |batch| submit_batch(batch),
-                    )?;
+                    submitter.push_bytes_with_hint(&read_buffer[..read], file_format, |batch| {
+                        submit_batch(batch)
+                    })?;
                 }
             }
 
@@ -619,9 +613,11 @@ where
         processing_snapshot,
     );
 
+    let elapsed = started_at.elapsed();
+    record_archive_run_telemetry(elapsed, stage_timings);
     let report = build_archive_report(
         ArchiveSourceKind::Directory,
-        started_at.elapsed(),
+        elapsed,
         input_bytes_total,
         output_bytes_written,
         block_count,
@@ -630,7 +626,6 @@ where
         extensions,
         *options,
     );
-    record_archive_run_telemetry(report.elapsed, stage_timings);
     sink.on_event(TelemetryEvent::ArchiveCompleted(report.clone()));
     Ok(ArchiveRun {
         writer: writer_outcome.writer,
