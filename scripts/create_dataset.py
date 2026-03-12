@@ -1,170 +1,108 @@
 import os
 import urllib.request
-import urllib.error
 import concurrent.futures
 import tarfile
 import zipfile
-import gzip
 import shutil
+import ssl
+import subprocess
 
-# Define the base directory for downloads
 BASE_DIR = "datasets"
+ssl_context = ssl._create_unverified_context()
 
-# Grouping datasets by category with their direct URLs
 DATASETS = {
-    "IMAGES": [
-        "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz",
-        "https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz",
-        "https://www.robots.ox.ac.uk/~vgg/data/flowers/102/102flowers.tgz"
+    "IMAGES_BMP": [
+        "http://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_valid_HR.zip",
+    ],
+    "AUDIO_WAV": [
+        "https://github.com/karolpiczak/ESC-50/archive/refs/heads/master.zip"
     ],
     "TEXT": [
-        "https://s3.amazonaws.com/fast-ai-nlp/wikitext-103.tgz"
+        "https://s3.amazonaws.com/fast-ai-nlp/wikitext-103.tgz",
+        "http://mattmahoney.net/dc/enwik9.zip" # Adds exactly 1GB uncompressed
     ],
     "STRUCTURED": [
-        f"https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-{m:02d}.parquet"
-        for m in range(1, 11)
-    ],
-    "AUDIO": [
-        "https://github.com/karoldvl/ESC-50/archive/master.zip"
+        f"https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_{year}-{m:02d}.parquet"
+        for year in [2022, 2023] for m in range(1, 13)
     ],
     "BINARY": [
         "https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz",
-        "https://biometrics.nist.gov/cs_links/EMNIST/gzip.zip",
-        "http://fashion-mnist.s3-website.eu-central-1.amazonaws.com/train-images-idx3-ubyte.gz",
-        "http://fashion-mnist.s3-website.eu-central-1.amazonaws.com/train-labels-idx1-ubyte.gz",
-        "http://fashion-mnist.s3-website.eu-central-1.amazonaws.com/t10k-images-idx3-ubyte.gz",
-        "http://fashion-mnist.s3-website.eu-central-1.amazonaws.com/t10k-labels-idx1-ubyte.gz"
+        "https://biometrics.nist.gov/cs_links/EMNIST/gzip.zip"
     ]
 }
 
 def process_file(url, category_dir):
-    """Downloads and extracts a single file with retries and corruption checks."""
-    filename = url.split('/')[-1]
+    # 1. NAME MAPPING
+    if "DIV2K" in url: filename = "DIV2K_HighRes.zip"
+    elif "ESC-50" in url: filename = "ESC50_Audio.zip"
+    else: filename = url.split('/')[-1].split('?')[0]
+
     filepath = os.path.join(category_dir, filename)
     
-    # 1. DOWNLOAD PHASE (with retries)
-    max_retries = 3
-    download_success = False
-
-    # Skip download if we already successfully unzipped/extracted it previously
-    # Checking for known extracted folders/files avoids re-downloading if the archive was deleted
-    extracted_indicators = {
-        "cifar-10-python.tar.gz": os.path.join(category_dir, "cifar-10-batches-py"),
-        "cifar-100-python.tar.gz": os.path.join(category_dir, "cifar-100-python"),
-        "cifar-10-binary.tar.gz": os.path.join(category_dir, "cifar-10-batches-bin"),
-        "102flowers.tgz": os.path.join(category_dir, "jpg"),
-        "wikitext-103.tgz": os.path.join(category_dir, "wikitext-103"),
-        "master.zip": os.path.join(category_dir, "ESC-50-master"),
-        "gzip.zip": os.path.join(category_dir, "gzip")
+    # 2. STRICT SKIP CHECK (To preserve your existing 4GB)
+    indicator_map = {
+        "DIV2K_HighRes.zip": "DIV2K_valid_HR",
+        "ESC50_Audio.zip": "ESC-50-master",
+        "wikitext-103.tgz": "wikitext-103",
+        "cifar-10-binary.tar.gz": "cifar-10-batches-bin",
+        "enwik9.zip": "enwik9", # The uncompressed file name
     }
-
-    # If the file is already extracted, skip entirely
-    if filename in extracted_indicators and os.path.exists(extracted_indicators[filename]):
-        return f"⏭️  SKIPPED (Already extracted): {filename}"
-        
-    # If it's a parquet file that doesn't need extraction and is already downloaded, skip
+    
+    # Check if folder or uncompressed file already exists
+    indicator = indicator_map.get(filename)
+    if indicator and os.path.exists(os.path.join(category_dir, indicator)):
+        return f"⏭️  SKIPPED: {filename} (Already exists)"
+    
+    # Check for raw parquet files
     if filename.endswith('.parquet') and os.path.exists(filepath):
-        return f"⏭️  SKIPPED (Already downloaded): {filename}"
-        
-    # If it's a .gz file (like Fashion-MNIST) and the extracted .ubyte exists, skip
-    extracted_gz_path = filepath[:-3] if filepath.endswith('.gz') and not filepath.endswith('.tar.gz') else None
-    if extracted_gz_path and os.path.exists(extracted_gz_path):
-        return f"⏭️  SKIPPED (Already extracted): {filename}"
+        return f"⏭️  SKIPPED: {filename}"
 
-    for attempt in range(max_retries):
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30) as response:
-                
-                # Get expected file size
-                expected_size = response.info().get('Content-Length')
-                expected_size = int(expected_size) if expected_size else None
-
-                with open(filepath, 'wb') as out_file:
-                    shutil.copyfileobj(response, out_file)
-                
-                # Verify the file size matches what the server promised
-                if expected_size and os.path.getsize(filepath) != expected_size:
-                    raise EOFError(f"Incomplete download: {os.path.getsize(filepath)} / {expected_size} bytes")
-                
-                download_success = True
-                break # Success, exit retry loop
-
-        except Exception as e:
-            if os.path.exists(filepath):
-                os.remove(filepath) # Delete the corrupted partial file
-            if attempt < max_retries - 1:
-                print(f"  ↻ Retrying {filename} (Attempt {attempt + 2}/{max_retries})...")
-                continue # Try again silently
-            return f"❌ ERROR downloading {filename} after {max_retries} attempts: {e}"
-
-    if not download_success:
-        return f"❌ ERROR: Failed to download {filename}"
-
-    # 2. EXTRACTION PHASE
+    # 3. DOWNLOAD
     try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        req = urllib.request.Request(url, headers=headers)
+        
+        print(f"📥 Downloading: {filename}...")
+        with urllib.request.urlopen(req, timeout=600, context=ssl_context) as response:
+            tmp_path = filepath + ".tmp"
+            with open(tmp_path, 'wb') as out_file:
+                shutil.copyfileobj(response, out_file, length=1024*1024)
+            os.rename(tmp_path, filepath)
+    except Exception as e:
+        return f"❌ DOWNLOAD FAILED {filename}: {e}"
+
+    # 4. EXTRACTION
+    try:
+        print(f"📦 Extracting: {filename}...")
         if filepath.endswith('.zip'):
             with zipfile.ZipFile(filepath, 'r') as zf:
                 zf.extractall(category_dir)
-            return f"✅ DONE (Downloaded & Unzipped): {filename}"
-            
-        elif filepath.endswith('.tar.gz') or filepath.endswith('.tgz'):
-            with tarfile.open(filepath, 'r:gz') as tf:
-                # Python 3.12+ security standard to prevent directory traversal
-                if hasattr(tarfile, 'data_filter'):
-                    tf.extractall(category_dir, filter='data')
-                else:
-                    tf.extractall(category_dir)
-            return f"✅ DONE (Downloaded & Extracted TAR): {filename}"
-            
-        elif filepath.endswith('.gz') and not filepath.endswith('.tar.gz'):
-            # For standalone .gz files (like Fashion-MNIST .ubyte.gz)
-            extracted_path = filepath[:-3] # Remove '.gz'
-            if not os.path.exists(extracted_path):
-                with gzip.open(filepath, 'rb') as f_in, open(extracted_path, 'wb') as f_out:
-                    shutil.copyfileobj(f_in, f_out)
-            return f"✅ DONE (Downloaded & Gunzipped): {filename}"
-            
-        else:
-            # Parquet files or files that don't need extraction
-            return f"✅ DONE (Downloaded, no extraction needed): {filename}"
-            
-    except Exception as e:
-        # If extraction fails (e.g. EOFError), the file is corrupt. 
-        # Delete it so it doesn't block future attempts.
-        if os.path.exists(filepath):
             os.remove(filepath)
-        return f"⚠️ Extraction FAILED for {filename} (File deleted, please re-run to try again): {e}"
+        elif filepath.endswith(('.tar.gz', '.tgz')):
+            with tarfile.open(filepath, 'r:gz') as tf:
+                tf.extractall(category_dir)
+            os.remove(filepath)
+        return f"✅ DONE: {filename}"
+    except Exception as e:
+        if os.path.exists(filepath): os.remove(filepath)
+        return f"⚠️ EXTRACTION FAILED {filename}: {e}"
 
 def main():
-    print(f"Creating base directory: {BASE_DIR}")
     os.makedirs(BASE_DIR, exist_ok=True)
-
-    # Build a list of all tasks
     tasks = []
-    for category, urls in DATASETS.items():
-        category_dir = os.path.join(BASE_DIR, category)
-        os.makedirs(category_dir, exist_ok=True)
+    for cat, urls in DATASETS.items():
+        cat_dir = os.path.join(BASE_DIR, cat)
+        os.makedirs(cat_dir, exist_ok=True)
         for url in urls:
-            tasks.append((url, category_dir))
+            tasks.append((url, cat_dir))
 
-    print(f"\n🚀 Starting parallel download & extraction for {len(tasks)} files...")
-    print("This will automatically skip files you have already downloaded and extracted.\n")
-
-    # Use ThreadPoolExecutor to run tasks concurrently
-    # max_workers=5 keeps it fast without overwhelming the host servers (rate-limiting)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        # Submit all tasks to the executor
-        future_to_url = {executor.submit(process_file, url, cat_dir): url for url, cat_dir in tasks}
-        
-        # As each task completes, yield the result
-        for future in concurrent.futures.as_completed(future_to_url):
-            result = future.result()
-            print(result)
-
-    print("\n" + "=" * 60)
-    print("🎉 All downloads and extractions complete!")
-    print("=" * 60)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(process_file, url, d) for url, d in tasks]
+        for f in concurrent.futures.as_completed(futures):
+            print(f.result())
+    
+    print("\n📊 Final Disk Usage:")
+    subprocess.run(["du", "-h", BASE_DIR, "--max-depth=1"])
 
 if __name__ == "__main__":
     main()
