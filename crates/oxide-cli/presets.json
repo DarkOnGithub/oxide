@@ -1,0 +1,48 @@
+{
+  "archive": {
+    "default_preset": "fast",
+    "defaults": {
+      "compression": "lz4",
+      "compression_preset": "fast",
+      "block_size": "2M",
+      "workers": 0,
+      "pool_capacity": "1M",
+      "pool_buffers": 512,
+      "stats_interval_ms": 250,
+      "inflight_bytes": "2G",
+      "inflight_blocks_per_worker": 256,
+      "stream_read_buffer": "64M",
+      "producer_threads": 1,
+      "directory_mmap_threshold": "8M",
+      "writer_queue_blocks": 1024,
+      "preserve_format_boundaries": false,
+      "result_wait_ms": 1
+    },
+    "presets": {
+      "fast": {
+        "compression_preset": "fast",
+        "block_size": "2M",
+        "stream_read_buffer": "128M",
+        "inflight_bytes": "2G"
+      },
+      "balanced": {
+        "compression_preset": "default",
+        "block_size": "4M",
+        "stream_read_buffer": "96M",
+        "directory_mmap_threshold": "16M",
+        "inflight_bytes": "1G",
+        "result_wait_ms": 2
+      },
+      "compact": {
+        "compression_preset": "high",
+        "block_size": "8M",
+        "stream_read_buffer": "128M",
+        "directory_mmap_threshold": "16M",
+        "inflight_bytes": "768M",
+        "inflight_blocks_per_worker": 128,
+        "writer_queue_blocks": 2048,
+        "result_wait_ms": 5
+      }
+    }
+  }
+}
