@@ -115,9 +115,9 @@ pub struct ArchiveReport {
     pub blocks_total: u32,
     /// Number of blocks successfully completed.
     pub blocks_completed: u32,
-    /// Average read throughput in bytes per second.
+    /// Average read throughput in bytes per second over wall-clock elapsed time.
     pub read_avg_bps: f64,
-    /// Average write throughput in bytes per second.
+    /// Average write throughput in bytes per second over wall-clock elapsed time.
     pub write_avg_bps: f64,
     /// Ratio of output size to input size.
     pub output_input_ratio: f64,
@@ -167,11 +167,11 @@ pub struct ExtractReport {
     pub output_bytes_total: u64,
     /// Total number of blocks in the archive.
     pub blocks_total: u32,
-    /// Average read throughput in bytes per second.
+    /// Average read throughput in bytes per second over wall-clock elapsed time.
     pub read_avg_bps: f64,
-    /// Average decode throughput in bytes per second.
+    /// Average decode throughput in bytes per second over wall-clock elapsed time.
     pub decode_avg_bps: f64,
-    /// Average write throughput in bytes per second.
+    /// Average write throughput in bytes per second over wall-clock elapsed time.
     pub output_avg_bps: f64,
     /// Ratio of output size to archive size.
     pub output_archive_ratio: f64,
@@ -205,7 +205,7 @@ impl ExtractReport {
         let decode_avg_bps = decoded_bytes_total as f64 / elapsed_secs;
         let output_avg_bps = output_bytes_total as f64 / elapsed_secs;
         let output_archive_ratio = if archive_bytes_total == 0 {
-            1.0
+            0.0
         } else {
             output_bytes_total as f64 / archive_bytes_total as f64
         };

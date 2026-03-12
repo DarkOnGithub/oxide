@@ -105,6 +105,27 @@ mod telemetry_enabled_tests {
         assert_eq!(task_hist.count, 2);
         assert!(task_hist.max >= task_hist.min);
     }
+
+    #[test]
+    fn scanner_count_only_tracks_successful_scans() {
+        let _guard = TELEMETRY_TEST_MUTEX
+            .lock()
+            .expect("telemetry test lock poisoned");
+
+        telemetry::reset();
+
+        let scanner = InputScanner::new(8);
+        let missing = std::path::Path::new("/definitely/missing/oxide-telemetry-test.bin");
+        assert!(scanner.scan_file(missing).is_err());
+
+        let snapshot = telemetry::snapshot();
+        assert_eq!(snapshot.counter(tags::METRIC_SCANNER_SCAN_COUNT), None);
+
+        let scanner_hist = snapshot
+            .histogram(tags::METRIC_SCANNER_SCAN_LATENCY_US)
+            .expect("scanner scan histogram missing");
+        assert_eq!(scanner_hist.count, 1);
+    }
 }
 
 #[cfg(not(feature = "telemetry"))]

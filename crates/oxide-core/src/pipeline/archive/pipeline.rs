@@ -233,6 +233,7 @@ impl ArchivePipeline {
         tracing::info!("starting archive extraction");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
+        begin_extract_run_telemetry();
         let started_at = Instant::now();
         let extractor = Extractor::new(self.num_workers);
         let mut decoded =
@@ -242,8 +243,10 @@ impl ArchivePipeline {
         let decoded_bytes_total = decoded.decoded_bytes_total;
         let stage_timings = decoded.stage_timings;
         let payload = std::mem::take(&mut decoded.payload);
+        let elapsed = started_at.elapsed();
+        record_extract_run_telemetry(elapsed, stage_timings);
         let report = build_extract_report_helper(
-            started_at,
+            elapsed,
             decoded,
             source_kind,
             decoded_bytes_total,
@@ -251,7 +254,6 @@ impl ArchivePipeline {
             extensions,
             options,
         );
-        record_extract_run_telemetry(report.elapsed, stage_timings);
 
         sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
 
@@ -273,6 +275,7 @@ impl ArchivePipeline {
         tracing::info!(output_dir = %output_dir.as_ref().display(), "starting directory archive extraction");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
+        begin_extract_run_telemetry();
         let started_at = Instant::now();
         let extractor = Extractor::new(self.num_workers);
         let restored = extractor.extract_directory_to_path_with_metrics(
@@ -292,8 +295,10 @@ impl ArchivePipeline {
         let output_bytes_total = restored.output_bytes_total;
         let stage_timings = decoded.stage_timings;
 
+        let elapsed = started_at.elapsed();
+        record_extract_run_telemetry(elapsed, stage_timings);
         let report = build_extract_report_helper(
-            started_at,
+            elapsed,
             decoded,
             ArchiveSourceKind::Directory,
             decoded_bytes_total,
@@ -301,7 +306,6 @@ impl ArchivePipeline {
             extensions,
             options,
         );
-        record_extract_run_telemetry(report.elapsed, stage_timings);
         sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
         Ok(report)
     }
@@ -324,6 +328,7 @@ impl ArchivePipeline {
         tracing::info!(output_path = %output_path.as_ref().display(), "starting path extraction");
         let mut noop = NoopTelemetrySink;
         let sink = sink.unwrap_or(&mut noop);
+        begin_extract_run_telemetry();
         let started_at = Instant::now();
         let extractor = Extractor::new(self.num_workers);
         let mut reader = reader;
@@ -365,8 +370,10 @@ impl ArchivePipeline {
 
         let decoded_bytes_total = decoded.decoded_bytes_total;
         let stage_timings = decoded.stage_timings;
+        let elapsed = started_at.elapsed();
+        record_extract_run_telemetry(elapsed, stage_timings);
         let report = build_extract_report_helper(
-            started_at,
+            elapsed,
             decoded,
             source_kind,
             decoded_bytes_total,
@@ -374,7 +381,6 @@ impl ArchivePipeline {
             extensions,
             options,
         );
-        record_extract_run_telemetry(report.elapsed, stage_timings);
         sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
         Ok(report)
     }
@@ -392,7 +398,7 @@ fn extract_extensions_from_flags(
 }
 
 fn build_extract_report_helper(
-    started_at: Instant,
+    elapsed: std::time::Duration,
     decoded: super::types::DecodedArchivePayload,
     source_kind: ArchiveSourceKind,
     decoded_bytes_total: u64,
@@ -402,7 +408,7 @@ fn build_extract_report_helper(
 ) -> ExtractReport {
     super::telemetry::build_extract_report(
         source_kind,
-        started_at.elapsed(),
+        elapsed,
         decoded.archive_bytes_total,
         decoded_bytes_total,
         output_bytes_total,

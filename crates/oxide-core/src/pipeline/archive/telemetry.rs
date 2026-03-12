@@ -10,9 +10,18 @@ use crate::types::{CompressionPreset, duration_to_us};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+pub fn begin_archive_run_telemetry() {
+    telemetry::reset();
+    telemetry::increment_counter(tags::METRIC_PIPELINE_ARCHIVE_RUN_COUNT, 1);
+}
+
+pub fn begin_extract_run_telemetry() {
+    telemetry::reset();
+    telemetry::increment_counter(tags::METRIC_PIPELINE_EXTRACT_RUN_COUNT, 1);
+}
+
 pub fn record_archive_run_telemetry(elapsed: Duration, stage_timings: StageTimings) {
     let elapsed_us = duration_to_us(elapsed);
-    telemetry::increment_counter(tags::METRIC_PIPELINE_ARCHIVE_RUN_COUNT, 1);
     telemetry::record_histogram(tags::METRIC_PIPELINE_ARCHIVE_RUN_LATENCY_US, elapsed_us);
     profile::event(
         tags::PROFILE_PIPELINE,
@@ -27,7 +36,6 @@ pub fn record_archive_run_telemetry(elapsed: Duration, stage_timings: StageTimin
 
 pub fn record_extract_run_telemetry(elapsed: Duration, stage_timings: ExtractStageTimings) {
     let elapsed_us = duration_to_us(elapsed);
-    telemetry::increment_counter(tags::METRIC_PIPELINE_EXTRACT_RUN_COUNT, 1);
     telemetry::record_histogram(tags::METRIC_PIPELINE_EXTRACT_RUN_LATENCY_US, elapsed_us);
     profile::event(
         tags::PROFILE_PIPELINE,
@@ -61,7 +69,7 @@ pub fn emit_archive_progress_if_due(
         let read_avg_bps = input_done as f64 / elapsed_secs;
         let write_avg_bps = output_bytes_completed as f64 / elapsed_secs;
         let output_input_ratio = if input_done == 0 {
-            1.0
+            0.0
         } else {
             output_bytes_completed as f64 / input_done as f64
         };
@@ -139,7 +147,7 @@ pub fn emit_extract_progress(
     let read_avg_bps = archive_bytes_completed as f64 / elapsed_secs;
     let decode_avg_bps = decoded_bytes_completed as f64 / elapsed_secs;
     let decode_archive_ratio = if archive_bytes_completed == 0 {
-        1.0
+        0.0
     } else {
         decoded_bytes_completed as f64 / archive_bytes_completed as f64
     };
@@ -357,7 +365,7 @@ pub fn build_archive_report(
     let read_avg_bps = input_bytes_total as f64 / elapsed_secs;
     let write_avg_bps = output_bytes_total as f64 / elapsed_secs;
     let output_input_ratio = if input_bytes_total == 0 {
-        1.0
+        0.0
     } else {
         output_bytes_total as f64 / input_bytes_total as f64
     };

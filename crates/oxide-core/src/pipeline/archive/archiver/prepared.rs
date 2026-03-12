@@ -215,9 +215,11 @@ where
         stage_timings,
         processing_snapshot,
     );
+    let elapsed = started_at.elapsed();
+    record_archive_run_telemetry(elapsed, stage_timings);
     let report = build_archive_report(
         source_kind,
-        started_at.elapsed(),
+        elapsed,
         input_bytes_total,
         output_bytes_written,
         block_count,
@@ -226,7 +228,6 @@ where
         extensions,
         *options,
     );
-    record_archive_run_telemetry(report.elapsed, stage_timings);
     sink.on_event(TelemetryEvent::ArchiveCompleted(report.clone()));
     Ok(ArchiveRun { writer, report })
 }
