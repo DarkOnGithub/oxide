@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::thread;
 
 use bytes::Bytes;
 use jwalk::WalkDir;
@@ -144,7 +145,8 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
     }
 
     let mut directory_paths = Vec::<PathBuf>::new();
-    let mut file_paths = Vec::<PathBuf>::new();
+    let mut files = Vec::<DirectoryFileSpec>::new();
+    let mut input_bytes_total = 0u64;
 
     for entry in WalkDir::new(root) {
         let entry = entry.map_err(anyhow::Error::from)?;
@@ -161,7 +163,21 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
         if entry.file_type().is_dir() {
             directory_paths.push(rel_path);
         } else if entry.file_type().is_file() {
-            file_paths.push(rel_path);
+            let full_path = path;
+            let rel_path = relative_path_to_utf8(&rel_path)?;
+            let size = fs::metadata(&full_path)?.len();
+
+            input_bytes_total =
+                input_bytes_total
+                    .checked_add(size)
+                    .ok_or(crate::OxideError::InvalidFormat(
+                        "directory input size overflow",
+                    ))?;
+            files.push(DirectoryFileSpec {
+                rel_path,
+                full_path,
+                size,
+            });
         } else {
             return Err(crate::OxideError::InvalidFormat(
                 "directory archive supports regular files/directories only",
@@ -170,29 +186,11 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
     }
 
     directory_paths.sort();
-    file_paths.sort();
+    files.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
 
     let mut directories = Vec::with_capacity(directory_paths.len());
     for directory_rel in directory_paths {
         directories.push(relative_path_to_utf8(&directory_rel)?);
-    }
-
-    let mut input_bytes_total = 0u64;
-    let mut files = Vec::with_capacity(file_paths.len());
-    for file_rel in file_paths {
-        let rel_path = relative_path_to_utf8(&file_rel)?;
-        let full_path = root.join(&file_rel);
-        let size = fs::metadata(&full_path)?.len();
-        input_bytes_total = input_bytes_total
-            .checked_add(size)
-            .ok_or(crate::OxideError::InvalidFormat(
-                "directory input size overflow",
-            ))?;
-        files.push(DirectoryFileSpec {
-            rel_path,
-            full_path,
-            size,
-        });
     }
 
     Ok(DirectoryDiscovery {
@@ -229,16 +227,61 @@ pub(super) fn manifest_from_discovery(
 pub(super) fn detect_file_formats(
     discovery: &DirectoryDiscovery,
     format_probe_limit: usize,
+    threads: usize,
 ) -> Result<Vec<FileFormat>> {
     let probe_limit = format_probe_limit.max(1);
-    let mut probe = vec![0u8; probe_limit];
-    let mut formats = Vec::with_capacity(discovery.files.len());
+    let mut formats = vec![FileFormat::Common; discovery.files.len()];
+    let worker_count = threads.max(1).min(discovery.files.len().max(1));
 
-    for file in &discovery.files {
-        let mut reader = fs::File::open(&file.full_path)?;
-        let read = reader.read(&mut probe)?;
-        formats.push(FormatDetector::detect(&probe[..read]));
+    if worker_count == 1 {
+        let mut probe = vec![0u8; probe_limit];
+        for (file, format) in discovery.files.iter().zip(formats.iter_mut()) {
+            let mut reader = fs::File::open(&file.full_path)?;
+            let read = reader.read(&mut probe)?;
+            *format = FormatDetector::detect(&probe[..read]);
+        }
+        return Ok(formats);
     }
+
+    let chunk_size = discovery.files.len().div_ceil(worker_count).max(1);
+    thread::scope(|scope| -> Result<()> {
+        let mut handles = Vec::new();
+        for (files_chunk, formats_chunk) in discovery
+            .files
+            .chunks(chunk_size)
+            .zip(formats.chunks_mut(chunk_size))
+        {
+            handles.push(scope.spawn(move || -> Result<()> {
+                let mut probe = vec![0u8; probe_limit];
+                for (file, format) in files_chunk.iter().zip(formats_chunk.iter_mut()) {
+                    let mut reader = fs::File::open(&file.full_path)?;
+                    let read = reader.read(&mut probe)?;
+                    *format = FormatDetector::detect(&probe[..read]);
+                }
+                Ok(())
+            }));
+        }
+
+        for handle in handles {
+            match handle.join() {
+                Ok(outcome) => outcome?,
+                Err(payload) => {
+                    let details = if let Some(message) = payload.downcast_ref::<&str>() {
+                        (*message).to_string()
+                    } else if let Some(message) = payload.downcast_ref::<String>() {
+                        message.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    };
+                    return Err(crate::OxideError::CompressionError(format!(
+                        "directory format probe thread panicked: {details}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    })?;
 
     Ok(formats)
 }
@@ -264,6 +307,62 @@ pub(super) fn estimate_directory_block_count(
 
     u32::try_from(planner.finish())
         .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v2"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detect_file_formats, discover_directory_tree, estimate_directory_block_count};
+    use crate::types::FileFormat;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn discovery_collects_sizes_in_one_pass() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let nested = root.join("nested");
+        fs::create_dir(&nested).expect("create nested dir");
+        fs::write(root.join("notes.txt"), b"hello\nworld\n").expect("write text");
+        fs::write(nested.join("payload.bin"), [0, 159, 146, 150]).expect("write binary");
+
+        let discovery = discover_directory_tree(root).expect("discover directory");
+
+        assert_eq!(discovery.directories, vec!["nested"]);
+        assert_eq!(discovery.files.len(), 2);
+        assert_eq!(discovery.files[0].rel_path, "nested/payload.bin");
+        assert_eq!(discovery.files[1].rel_path, "notes.txt");
+        assert_eq!(discovery.input_bytes_total, 16);
+    }
+
+    #[test]
+    fn format_probe_detects_expected_formats() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let nested = root.join("nested");
+        fs::create_dir(&nested).expect("create nested dir");
+        fs::write(root.join("notes.txt"), b"hello\nworld\n").expect("write text");
+        fs::write(nested.join("payload.bin"), [0, 159, 146, 150]).expect("write binary");
+
+        let discovery = discover_directory_tree(root).expect("discover directory");
+        let formats = detect_file_formats(&discovery, 64 * 1024, 2).expect("probe formats");
+
+        assert_eq!(formats, vec![FileFormat::Common, FileFormat::Text]);
+    }
+
+    #[test]
+    fn block_count_uses_formats_embedded_in_discovery() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::write(root.join("alpha.txt"), b"alpha\n").expect("write alpha");
+        fs::write(root.join("beta.bin"), [0, 159, 146, 150, 42]).expect("write beta");
+
+        let discovery = discover_directory_tree(root).expect("discover directory");
+        let formats = detect_file_formats(&discovery, 64 * 1024, 2).expect("probe formats");
+        let block_count =
+            estimate_directory_block_count(&discovery, &formats, 4, true).expect("plan");
+
+        assert_eq!(block_count, 4);
+    }
 }
 
 #[derive(Debug, Clone)]
