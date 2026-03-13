@@ -34,7 +34,7 @@
         "inflight_bytes": "1G",
         "result_wait_ms": 2
       },
-      "compact": {
+      "ultra": {
         "compression_preset": "high",
         "block_size": "8M",
         "stream_read_buffer": "128M",
