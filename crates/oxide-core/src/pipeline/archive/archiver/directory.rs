@@ -1,10 +1,10 @@
-use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
+use crossbeam_channel::{bounded, RecvTimeoutError, TryRecvError};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -51,7 +51,11 @@ where
 
     let block_size = config.target_block_size;
     let format_probe_started = Instant::now();
-    let file_formats = directory::detect_file_formats(&discovery, DIRECTORY_FORMAT_PROBE_LIMIT)?;
+    let file_formats = directory::detect_file_formats(
+        &discovery,
+        DIRECTORY_FORMAT_PROBE_LIMIT,
+        config.performance.producer_threads,
+    )?;
     stage_timings.format_probe += format_probe_started.elapsed();
 
     let block_count = directory::estimate_directory_block_count(
