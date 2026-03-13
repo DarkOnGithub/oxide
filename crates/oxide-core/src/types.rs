@@ -290,7 +290,7 @@ impl CompressionMeta {
     /// Encodes compression metadata into OXZ compression flags.
     ///
     /// Layout:
-    /// - Bits 0..=1: algorithm (01 LZ4)
+    /// - Bits 0..=1: algorithm (01 LZ4, 10 Zstd)
     /// - Bit 2: raw passthrough marker
     /// - Bits 3..=4: preset (00 Fast, 01 Default, 10 High)
     /// - Bits 5..=7: reserved (must be zero)
@@ -489,6 +489,8 @@ pub enum BinaryStrategy {
 pub enum CompressionAlgo {
     /// LZ4 fast compression - Fast
     Lz4,
+    /// Zstandard compression with tunable ratio/speed levels.
+    Zstd,
 }
 
 impl PreProcessingStrategy {
@@ -539,14 +541,17 @@ impl PreProcessingStrategy {
 impl CompressionAlgo {
     /// Encodes the compression algorithm into OXZ compression flags.
     pub fn to_flags(self) -> u8 {
-        let _ = self;
-        0x01
+        match self {
+            Self::Lz4 => 0x01,
+            Self::Zstd => 0x02,
+        }
     }
 
     /// Decodes OXZ compression flags into a compression algorithm.
     pub fn from_flags(flags: u8) -> Result<Self> {
         match flags {
             0x01 => Ok(Self::Lz4),
+            0x02 => Ok(Self::Zstd),
             _ => Err(OxideError::InvalidFormat("invalid compression flags")),
         }
     }

@@ -63,13 +63,15 @@ fn preprocessing_round_trip_is_identity_for_all_strategies() {
 fn compression_router_apply_is_codec_specific() {
     let input = fixture();
     let lz4 = apply_compression(&input, CompressionAlgo::Lz4).expect("lz4 apply should succeed");
+    let zstd = apply_compression(&input, CompressionAlgo::Zstd).expect("zstd apply should succeed");
     assert_ne!(lz4, input, "lz4 should transform bytes");
+    assert_ne!(zstd, input, "zstd should transform bytes");
 }
 
 #[test]
 fn compression_router_reverse_fails_on_non_codec_payloads() {
     let input = fixture();
-    for algo in [CompressionAlgo::Lz4] {
+    for algo in [CompressionAlgo::Lz4, CompressionAlgo::Zstd] {
         assert!(
             reverse_compression(&input, algo).is_err(),
             "reverse should fail for non-{algo:?} payload"
@@ -80,7 +82,7 @@ fn compression_router_reverse_fails_on_non_codec_payloads() {
 #[test]
 fn compression_round_trip_is_identity_for_all_algorithms() {
     let input = fixture();
-    for algo in [CompressionAlgo::Lz4] {
+    for algo in [CompressionAlgo::Lz4, CompressionAlgo::Zstd] {
         let compressed = apply_compression(&input, algo).expect("apply should succeed");
         let restored = reverse_compression(&compressed, algo).expect("reverse should succeed");
         assert_eq!(restored, input, "round-trip should be identity: {algo:?}");

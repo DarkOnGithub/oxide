@@ -47,7 +47,7 @@ fn strategy_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn compression_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let algorithms = [CompressionAlgo::Lz4];
+    let algorithms = [CompressionAlgo::Lz4, CompressionAlgo::Zstd];
 
     for algorithm in algorithms {
         let flags = algorithm.to_flags();
@@ -122,13 +122,15 @@ fn block_header_round_trip_preserves_raw_passthrough() -> Result<(), Box<dyn std
 
 #[test]
 fn compression_meta_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let meta = CompressionMeta::new(CompressionAlgo::Lz4, CompressionPreset::Fast, true);
-    let encoded = meta.to_flags();
-    let decoded = CompressionMeta::from_flags(encoded)?;
+    for algo in [CompressionAlgo::Lz4, CompressionAlgo::Zstd] {
+        let meta = CompressionMeta::new(algo, CompressionPreset::Fast, true);
+        let encoded = meta.to_flags();
+        let decoded = CompressionMeta::from_flags(encoded)?;
 
-    assert_eq!(decoded.algo, CompressionAlgo::Lz4);
-    assert_eq!(decoded.preset, CompressionPreset::Fast);
-    assert!(decoded.raw_passthrough);
+        assert_eq!(decoded.algo, algo);
+        assert_eq!(decoded.preset, CompressionPreset::Fast);
+        assert!(decoded.raw_passthrough);
+    }
 
     assert!(CompressionMeta::from_flags(0b1110_0001).is_err());
     assert!(CompressionMeta::from_flags(0b0001_0000).is_err());

@@ -276,6 +276,7 @@ fn resolve_number<T: Copy>(
 fn parse_compression_algo(value: &str) -> Result<CompressionAlgo, io::Error> {
     match value.trim().to_ascii_lowercase().as_str() {
         "lz4" => Ok(CompressionArg::Lz4.into()),
+        "zstd" => Ok(CompressionArg::Zstd.into()),
         other => Err(invalid_input(format!("unsupported compression '{other}'"))),
     }
 }
@@ -305,7 +306,7 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 mod tests {
     use oxide_core::{CompressionAlgo, CompressionPreset};
 
-    use super::{ArchiveOverrides, PresetFile};
+    use super::{ArchiveOverrides, BUNDLED_PRESETS, PresetFile};
 
     fn parse_fixture(json: &str) -> PresetFile {
         serde_json::from_str(json).expect("fixture should parse")
@@ -369,5 +370,27 @@ mod tests {
         assert_eq!(preset.compression, CompressionAlgo::Lz4);
         assert_eq!(preset.compression_preset, CompressionPreset::High);
         assert_eq!(preset.block_size, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn bundled_balanced_and_ultra_use_zstd() {
+        let file = parse_fixture(BUNDLED_PRESETS);
+
+        let mut balanced = file.archive.defaults.clone();
+        balanced.merge_from(file.archive.presets.get("balanced").unwrap());
+        let balanced = balanced
+            .resolve("balanced", "bundled", ArchiveOverrides::default())
+            .expect("balanced should resolve");
+
+        let mut ultra = file.archive.defaults.clone();
+        ultra.merge_from(file.archive.presets.get("ultra").unwrap());
+        let ultra = ultra
+            .resolve("ultra", "bundled", ArchiveOverrides::default())
+            .expect("ultra should resolve");
+
+        assert_eq!(balanced.compression, CompressionAlgo::Zstd);
+        assert_eq!(balanced.compression_preset, CompressionPreset::Default);
+        assert_eq!(ultra.compression, CompressionAlgo::Zstd);
+        assert_eq!(ultra.compression_preset, CompressionPreset::High);
     }
 }
