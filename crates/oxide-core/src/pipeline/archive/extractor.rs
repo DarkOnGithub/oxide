@@ -628,6 +628,7 @@ pub fn decode_block_payload(header: BlockHeader, block_data: Vec<u8>) -> Result<
         crate::compression::reverse_compression_request(crate::compression::DecompressionRequest {
             data: &block_data,
             algo: compression_meta.algo,
+            raw_len: Some(header.raw_len as usize),
         })?
     };
     let strategy = header.strategy()?;

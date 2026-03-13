@@ -2,6 +2,7 @@ use crate::{CompressionAlgo, CompressionPreset, Result};
 
 pub mod lz4;
 pub(crate) mod scratch;
+pub mod zstd;
 
 pub(crate) use scratch::CompressionScratchArena;
 
@@ -28,11 +29,21 @@ impl<'a> CompressionRequest<'a> {
 pub struct DecompressionRequest<'a> {
     pub data: &'a [u8],
     pub algo: CompressionAlgo,
+    pub raw_len: Option<usize>,
 }
 
 impl<'a> DecompressionRequest<'a> {
     pub fn new(data: &'a [u8], algo: CompressionAlgo) -> Self {
-        Self { data, algo }
+        Self {
+            data,
+            algo,
+            raw_len: None,
+        }
+    }
+
+    pub fn with_raw_len(mut self, raw_len: usize) -> Self {
+        self.raw_len = Some(raw_len);
+        self
     }
 }
 
@@ -50,6 +61,7 @@ pub(crate) fn apply_compression_request_with_scratch(
         CompressionAlgo::Lz4 => {
             lz4::apply_with_scratch(request.data, request.preset, scratch.lz4())
         }
+        CompressionAlgo::Zstd => zstd::apply(request.data, request.preset),
     }
 }
 
@@ -61,5 +73,6 @@ pub fn reverse_compression(data: &[u8], algo: CompressionAlgo) -> Result<Vec<u8>
 pub(crate) fn reverse_compression_request(request: DecompressionRequest<'_>) -> Result<Vec<u8>> {
     match request.algo {
         CompressionAlgo::Lz4 => lz4::reverse(request.data),
+        CompressionAlgo::Zstd => zstd::reverse(request.data, request.raw_len),
     }
 }

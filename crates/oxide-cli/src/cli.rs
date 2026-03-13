@@ -143,12 +143,14 @@ pub struct TreeArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CompressionArg {
     Lz4,
+    Zstd,
 }
 
 impl From<CompressionArg> for CompressionAlgo {
     fn from(value: CompressionArg) -> Self {
         match value {
             CompressionArg::Lz4 => CompressionAlgo::Lz4,
+            CompressionArg::Zstd => CompressionAlgo::Zstd,
         }
     }
 }
@@ -264,6 +266,22 @@ mod tests {
 
         match cli.command {
             Commands::Archive(args) => assert_eq!(args.preset.as_deref(), Some("compact")),
+            _ => panic!("expected archive command"),
+        }
+    }
+
+    #[test]
+    fn archive_command_accepts_zstd_compression() {
+        let cli = Cli::try_parse_from(["oxide", "archive", "demo/input", "--compression", "zstd"])
+            .expect("archive arguments should parse");
+
+        match cli.command {
+            Commands::Archive(args) => {
+                assert!(matches!(
+                    args.compression,
+                    Some(super::CompressionArg::Zstd)
+                ));
+            }
             _ => panic!("expected archive command"),
         }
     }

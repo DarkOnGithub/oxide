@@ -27,6 +27,7 @@
         "producer_threads": 4
       },
       "balanced": {
+        "compression": "zstd",
         "compression_preset": "default",
         "block_size": "4M",
         "stream_read_buffer": "96M",
@@ -35,6 +36,7 @@
         "result_wait_ms": 2
       },
       "ultra": {
+        "compression": "zstd",
         "compression_preset": "high",
         "block_size": "8M",
         "stream_read_buffer": "128M",
