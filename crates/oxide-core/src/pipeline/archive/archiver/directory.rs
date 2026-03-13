@@ -183,10 +183,6 @@ where
     let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
     let mut raw_passthrough_blocks = 0u64;
     let mut writer_queue_peak = 0usize;
-    let result_wait_timeout = config
-        .performance
-        .result_wait_timeout
-        .max(Duration::from_millis(1));
 
     let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
     let producer_root = discovery.root.clone();
