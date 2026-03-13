@@ -25,6 +25,7 @@ pub fn process_batch(
             data: compression_input,
             algo: plan.algo,
             preset: plan.preset,
+            zstd_level: plan.zstd_level,
         },
         scratch.compression(),
     )?;

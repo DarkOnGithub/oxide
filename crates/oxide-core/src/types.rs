@@ -46,12 +46,24 @@ pub struct ChunkEncodingPlan {
     pub algo: CompressionAlgo,
     /// Compression preset selected for the chunk.
     pub preset: CompressionPreset,
+    /// Optional explicit zstd compression level used only by the encoder.
+    pub zstd_level: Option<i32>,
 }
 
 impl ChunkEncodingPlan {
     /// Creates a new chunk encoding plan.
     pub const fn new(algo: CompressionAlgo, preset: CompressionPreset) -> Self {
-        Self { algo, preset }
+        Self {
+            algo,
+            preset,
+            zstd_level: None,
+        }
+    }
+
+    /// Attaches an explicit zstd level override for encoding.
+    pub const fn with_zstd_level(mut self, zstd_level: Option<i32>) -> Self {
+        self.zstd_level = zstd_level;
+        self
     }
 
     /// Builds compression metadata for the final stored payload.

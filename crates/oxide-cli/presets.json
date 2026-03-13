@@ -29,6 +29,7 @@
       "balanced": {
         "compression": "zstd",
         "compression_preset": "default",
+        "zstd_level": 3,
         "block_size": "4M",
         "stream_read_buffer": "96M",
         "directory_mmap_threshold": "16M",
@@ -38,6 +39,7 @@
       "ultra": {
         "compression": "zstd",
         "compression_preset": "high",
+        "zstd_level": 19,
         "block_size": "8M",
         "stream_read_buffer": "128M",
         "directory_mmap_threshold": "16M",

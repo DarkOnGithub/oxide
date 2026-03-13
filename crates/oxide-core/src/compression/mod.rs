@@ -12,6 +12,7 @@ pub struct CompressionRequest<'a> {
     pub data: &'a [u8],
     pub algo: CompressionAlgo,
     pub preset: CompressionPreset,
+    pub zstd_level: Option<i32>,
 }
 
 impl<'a> CompressionRequest<'a> {
@@ -20,6 +21,7 @@ impl<'a> CompressionRequest<'a> {
             data,
             algo,
             preset: CompressionPreset::Default,
+            zstd_level: None,
         }
     }
 }
@@ -61,7 +63,7 @@ pub(crate) fn apply_compression_request_with_scratch(
         CompressionAlgo::Lz4 => {
             lz4::apply_with_scratch(request.data, request.preset, scratch.lz4())
         }
-        CompressionAlgo::Zstd => zstd::apply(request.data, request.preset),
+        CompressionAlgo::Zstd => zstd::apply(request.data, request.preset, request.zstd_level),
     }
 }
 

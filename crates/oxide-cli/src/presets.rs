@@ -17,6 +17,7 @@ pub struct ResolvedArchiveSettings {
     pub profile_source: String,
     pub compression: CompressionAlgo,
     pub compression_preset: CompressionPreset,
+    pub zstd_level: Option<i32>,
     pub block_size: usize,
     pub workers: usize,
     pub pool_capacity: usize,
@@ -95,6 +96,7 @@ struct ArchivePresetRegistry {
 struct ArchivePresetConfig {
     compression: Option<String>,
     compression_preset: Option<String>,
+    zstd_level: Option<i32>,
     block_size: Option<SizeValue>,
     workers: Option<usize>,
     pool_capacity: Option<SizeValue>,
@@ -117,6 +119,7 @@ impl ArchivePresetConfig {
             &mut self.compression_preset,
             other.compression_preset.clone(),
         );
+        merge_option(&mut self.zstd_level, other.zstd_level);
         merge_option(&mut self.block_size, other.block_size.clone());
         merge_option(&mut self.workers, other.workers);
         merge_option(&mut self.pool_capacity, other.pool_capacity.clone());
@@ -165,12 +168,14 @@ impl ArchivePresetConfig {
             .map(parse_compression_preset)
             .transpose()?
             .ok_or_else(|| invalid_input("archive preset is missing compression_preset"))?;
+        let zstd_level = resolve_zstd_level(compression, self.zstd_level)?;
 
         Ok(ResolvedArchiveSettings {
             profile_name: preset_name.to_string(),
             profile_source: source_label.to_string(),
             compression,
             compression_preset,
+            zstd_level,
             block_size: resolve_usize(overrides.block_size, self.block_size, "block_size")?,
             workers: resolve_number(overrides.workers, self.workers, "workers")?,
             pool_capacity: resolve_usize(
@@ -292,6 +297,29 @@ fn parse_compression_preset(value: &str) -> Result<CompressionPreset, io::Error>
     }
 }
 
+fn resolve_zstd_level(
+    compression: CompressionAlgo,
+    zstd_level: Option<i32>,
+) -> Result<Option<i32>, io::Error> {
+    let Some(level) = zstd_level else {
+        return Ok(None);
+    };
+
+    if compression != CompressionAlgo::Zstd {
+        return Err(invalid_input(
+            "zstd_level can only be used when compression is 'zstd'",
+        ));
+    }
+
+    if !(1..=22).contains(&level) {
+        return Err(invalid_input(format!(
+            "invalid zstd_level '{level}': expected an integer between 1 and 22"
+        )));
+    }
+
+    Ok(Some(level))
+}
+
 fn merge_option<T>(slot: &mut Option<T>, incoming: Option<T>) {
     if let Some(value) = incoming {
         *slot = Some(value);
@@ -321,6 +349,7 @@ mod tests {
                 "defaults": {
                   "compression": "lz4",
                   "compression_preset": "fast",
+                  "zstd_level": null,
                   "block_size": "2M",
                   "workers": 0,
                   "pool_capacity": "1M",
@@ -369,6 +398,7 @@ mod tests {
         assert_eq!(preset.profile_name, "compact");
         assert_eq!(preset.compression, CompressionAlgo::Lz4);
         assert_eq!(preset.compression_preset, CompressionPreset::High);
+        assert_eq!(preset.zstd_level, None);
         assert_eq!(preset.block_size, 16 * 1024 * 1024);
     }
 
@@ -390,7 +420,54 @@ mod tests {
 
         assert_eq!(balanced.compression, CompressionAlgo::Zstd);
         assert_eq!(balanced.compression_preset, CompressionPreset::Default);
+        assert_eq!(balanced.zstd_level, Some(3));
         assert_eq!(ultra.compression, CompressionAlgo::Zstd);
         assert_eq!(ultra.compression_preset, CompressionPreset::High);
+        assert_eq!(ultra.zstd_level, Some(19));
+    }
+
+    #[test]
+    fn rejects_zstd_level_for_non_zstd_compression() {
+        let file = parse_fixture(
+            r#"{
+              "archive": {
+                "default_preset": "bad",
+                "defaults": {
+                  "compression": "lz4",
+                  "compression_preset": "fast",
+                  "block_size": "2M",
+                  "workers": 0,
+                  "pool_capacity": "1M",
+                  "pool_buffers": 512,
+                  "stats_interval_ms": 250,
+                  "inflight_bytes": "2G",
+                  "inflight_blocks_per_worker": 256,
+                  "stream_read_buffer": "64M",
+                  "producer_threads": 1,
+                  "directory_mmap_threshold": "8M",
+                  "writer_queue_blocks": 1024,
+                  "preserve_format_boundaries": false,
+                  "result_wait_ms": 1
+                },
+                "presets": {
+                  "bad": {
+                    "zstd_level": 7
+                  }
+                }
+              }
+            }"#,
+        );
+
+        let preset = file.archive.presets.get("bad").unwrap();
+        let mut merged = file.archive.defaults.clone();
+        merged.merge_from(preset);
+
+        let error = merged
+            .resolve("bad", "fixture", ArchiveOverrides::default())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "zstd_level can only be used when compression is 'zstd'"
+        );
     }
 }

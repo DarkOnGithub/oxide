@@ -196,7 +196,8 @@ where
     let producer_compression_plan = ChunkEncodingPlan::new(
         config.compression_algo,
         config.performance.compression_preset,
-    );
+    )
+    .with_zstd_level(config.performance.zstd_level);
     let stream_read_buffer_size = config.performance.directory_stream_read_buffer_size.max(1);
     let producer_threads = config.performance.producer_threads.max(1);
     let mmap_threshold = config.performance.directory_mmap_threshold_bytes.max(1);
