@@ -11,7 +11,6 @@ pub struct CompressionRequest<'a> {
     pub data: &'a [u8],
     pub algo: CompressionAlgo,
     pub preset: CompressionPreset,
-    pub dictionary: Option<&'a [u8]>,
 }
 
 impl<'a> CompressionRequest<'a> {
@@ -20,7 +19,6 @@ impl<'a> CompressionRequest<'a> {
             data,
             algo,
             preset: CompressionPreset::Default,
-            dictionary: None,
         }
     }
 }
@@ -30,16 +28,11 @@ impl<'a> CompressionRequest<'a> {
 pub struct DecompressionRequest<'a> {
     pub data: &'a [u8],
     pub algo: CompressionAlgo,
-    pub dictionary: Option<&'a [u8]>,
 }
 
 impl<'a> DecompressionRequest<'a> {
     pub fn new(data: &'a [u8], algo: CompressionAlgo) -> Self {
-        Self {
-            data,
-            algo,
-            dictionary: None,
-        }
+        Self { data, algo }
     }
 }
 
@@ -54,12 +47,9 @@ pub(crate) fn apply_compression_request_with_scratch(
     scratch: &mut CompressionScratchArena,
 ) -> Result<Vec<u8>> {
     match request.algo {
-        CompressionAlgo::Lz4 => lz4::apply_with_scratch(
-            request.data,
-            request.preset,
-            request.dictionary,
-            scratch.lz4(),
-        ),
+        CompressionAlgo::Lz4 => {
+            lz4::apply_with_scratch(request.data, request.preset, scratch.lz4())
+        }
     }
 }
 
@@ -70,6 +60,6 @@ pub fn reverse_compression(data: &[u8], algo: CompressionAlgo) -> Result<Vec<u8>
 
 pub(crate) fn reverse_compression_request(request: DecompressionRequest<'_>) -> Result<Vec<u8>> {
     match request.algo {
-        CompressionAlgo::Lz4 => lz4::reverse_with_dictionary(request.data, request.dictionary),
+        CompressionAlgo::Lz4 => lz4::reverse(request.data),
     }
 }

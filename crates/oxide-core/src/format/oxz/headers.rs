@@ -26,7 +26,6 @@ pub struct GlobalHeader {
     pub metadata_offset: u64,
     pub entry_table_offset: u64,
     pub chunk_table_offset: u64,
-    pub dictionary_store_offset: u64,
     pub payload_offset: u64,
     pub footer_offset: u64,
 }
@@ -36,7 +35,6 @@ impl GlobalHeader {
         metadata_offset: u64,
         entry_table_offset: u64,
         chunk_table_offset: u64,
-        dictionary_store_offset: u64,
         payload_offset: u64,
         footer_offset: u64,
     ) -> Self {
@@ -46,7 +44,6 @@ impl GlobalHeader {
             metadata_offset,
             entry_table_offset,
             chunk_table_offset,
-            dictionary_store_offset,
             payload_offset,
             footer_offset,
         }
@@ -71,9 +68,8 @@ impl GlobalHeader {
         bytes[8..16].copy_from_slice(&self.metadata_offset.to_le_bytes());
         bytes[16..24].copy_from_slice(&self.entry_table_offset.to_le_bytes());
         bytes[24..32].copy_from_slice(&self.chunk_table_offset.to_le_bytes());
-        bytes[32..40].copy_from_slice(&self.dictionary_store_offset.to_le_bytes());
-        bytes[40..48].copy_from_slice(&self.payload_offset.to_le_bytes());
-        bytes[48..56].copy_from_slice(&self.footer_offset.to_le_bytes());
+        bytes[32..40].copy_from_slice(&self.payload_offset.to_le_bytes());
+        bytes[40..48].copy_from_slice(&self.footer_offset.to_le_bytes());
         bytes
     }
 
@@ -111,17 +107,13 @@ impl GlobalHeader {
                 bytes[24], bytes[25], bytes[26], bytes[27], bytes[28], bytes[29], bytes[30],
                 bytes[31],
             ]),
-            dictionary_store_offset: u64::from_le_bytes([
+            payload_offset: u64::from_le_bytes([
                 bytes[32], bytes[33], bytes[34], bytes[35], bytes[36], bytes[37], bytes[38],
                 bytes[39],
             ]),
-            payload_offset: u64::from_le_bytes([
+            footer_offset: u64::from_le_bytes([
                 bytes[40], bytes[41], bytes[42], bytes[43], bytes[44], bytes[45], bytes[46],
                 bytes[47],
-            ]),
-            footer_offset: u64::from_le_bytes([
-                bytes[48], bytes[49], bytes[50], bytes[51], bytes[52], bytes[53], bytes[54],
-                bytes[55],
             ]),
         };
         header.validate()?;
@@ -137,8 +129,7 @@ impl GlobalHeader {
 
         if !(self.metadata_offset <= self.entry_table_offset
             && self.entry_table_offset <= self.chunk_table_offset
-            && self.chunk_table_offset <= self.dictionary_store_offset
-            && self.dictionary_store_offset <= self.payload_offset
+            && self.chunk_table_offset <= self.payload_offset
             && self.payload_offset <= self.footer_offset)
         {
             return Err(OxideError::InvalidFormat(
@@ -214,7 +205,6 @@ pub struct ChunkDescriptor {
     pub checksum: u32,
     pub compression_flags: u8,
     pub strategy_flags: u8,
-    pub dict_id: u16,
 }
 
 impl ChunkDescriptor {
@@ -251,7 +241,6 @@ impl ChunkDescriptor {
             checksum,
             compression_flags: compression_meta.to_flags(),
             strategy_flags: strategy.to_flags(),
-            dict_id: 0,
         }
     }
 
@@ -261,7 +250,7 @@ impl ChunkDescriptor {
         let encoded_len = u32::try_from(block.data.len())
             .map_err(|_| OxideError::InvalidFormat("encoded length exceeds u32 range"))?;
 
-        let mut descriptor = Self::new_with_compression_meta(
+        let descriptor = Self::new_with_compression_meta(
             payload_offset,
             raw_len,
             encoded_len,
@@ -269,7 +258,6 @@ impl ChunkDescriptor {
             block.compression_meta(),
             block.crc32,
         );
-        descriptor.dict_id = block.dict_id;
         Ok(descriptor)
     }
 
@@ -310,7 +298,6 @@ impl ChunkDescriptor {
         bytes[16..20].copy_from_slice(&self.checksum.to_le_bytes());
         bytes[20] = self.compression_flags;
         bytes[21] = self.strategy_flags;
-        bytes[22..24].copy_from_slice(&self.dict_id.to_le_bytes());
         bytes
     }
 
@@ -324,7 +311,6 @@ impl ChunkDescriptor {
             checksum: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
             compression_flags: bytes[20],
             strategy_flags: bytes[21],
-            dict_id: u16::from_le_bytes([bytes[22], bytes[23]]),
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -344,7 +330,8 @@ pub type BlockHeader = ChunkDescriptor;
 pub fn encode_chunk_table(descriptors: &[ChunkDescriptor]) -> Result<Vec<u8>> {
     let count = u32::try_from(descriptors.len())
         .map_err(|_| OxideError::InvalidFormat("chunk count exceeds u32 range"))?;
-    let mut bytes = Vec::with_capacity(CHUNK_TABLE_HEADER_SIZE + descriptors.len() * CHUNK_DESCRIPTOR_SIZE);
+    let mut bytes =
+        Vec::with_capacity(CHUNK_TABLE_HEADER_SIZE + descriptors.len() * CHUNK_DESCRIPTOR_SIZE);
     bytes.extend_from_slice(&CHUNK_TABLE_MAGIC);
     bytes.extend_from_slice(&CHUNK_TABLE_VERSION.to_le_bytes());
     bytes.extend_from_slice(&0u16.to_le_bytes());

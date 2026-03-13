@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 
@@ -8,8 +7,7 @@ use crate::{ArchiveSourceKind, OxideError, Result};
 
 use super::{
     ARCHIVE_METADATA_SIZE, ArchiveManifest, ArchiveMetadata, CHUNK_TABLE_HEADER_SIZE,
-    ChunkDescriptor, FOOTER_SIZE, Footer, GlobalHeader, StoredDictionary, decode_chunk_table,
-    decode_dictionary_store,
+    ChunkDescriptor, FOOTER_SIZE, Footer, GlobalHeader, decode_chunk_table,
 };
 
 /// Reads OXZ archives and provides access to individual chunk payloads.
@@ -18,7 +16,6 @@ pub struct ArchiveReader<R: Read + Seek> {
     reader: R,
     global_header: GlobalHeader,
     metadata: ArchiveMetadata,
-    dictionaries: BTreeMap<u16, Vec<u8>>,
     manifest: ArchiveManifest,
     chunk_descriptors: Vec<ChunkDescriptor>,
     footer: Footer,
@@ -46,10 +43,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let metadata_elapsed_us = duration_to_us(metadata_started.elapsed());
 
         let manifest = Self::read_manifest(&mut reader, global_header)?;
-
-        let dictionary_store_started = Instant::now();
-        let dictionaries = Self::read_dictionary_store(&mut reader, global_header)?;
-        let dictionary_store_elapsed_us = duration_to_us(dictionary_store_started.elapsed());
 
         let chunk_table_started = Instant::now();
         let chunk_descriptors = Self::read_chunk_table(&mut reader, global_header)?;
@@ -84,20 +77,10 @@ impl<R: Read + Seek> ArchiveReader<R> {
             chunk_table_elapsed_us,
             "oxz chunk table read successfully",
         );
-        profile::event(
-            tags::PROFILE_OXZ,
-            &[tags::TAG_OXZ],
-            "read_dictionary_store",
-            "ok",
-            dictionary_store_elapsed_us,
-            "oxz dictionary store read successfully",
-        );
-
         Ok(Self {
             reader,
             global_header,
             metadata,
-            dictionaries,
             manifest,
             chunk_descriptors,
             footer,
@@ -124,14 +107,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
         self.footer
     }
 
-    pub fn dictionary(&self, dict_id: u16) -> Option<&[u8]> {
-        if dict_id == 0 {
-            return None;
-        }
-
-        self.dictionaries.get(&dict_id).map(Vec::as_slice)
-    }
-
     pub fn manifest(&self) -> &ArchiveManifest {
         &self.manifest
     }
@@ -146,7 +121,8 @@ impl<R: Read + Seek> ArchiveReader<R> {
             .get(index_val)
             .ok_or(OxideError::InvalidFormat("block index out of range"))?;
 
-        self.reader.seek(SeekFrom::Start(descriptor.payload_offset))?;
+        self.reader
+            .seek(SeekFrom::Start(descriptor.payload_offset))?;
         let mut data = vec![0u8; descriptor.encoded_len as usize];
         self.reader.read_exact(&mut data)?;
 
@@ -208,7 +184,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
 
     fn read_chunk_table(reader: &mut R, header: GlobalHeader) -> Result<Vec<ChunkDescriptor>> {
         let len = header
-            .dictionary_store_offset
+            .payload_offset
             .checked_sub(header.chunk_table_offset)
             .ok_or(OxideError::InvalidFormat("chunk table length underflow"))?;
         let len = usize::try_from(len)
@@ -220,33 +196,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
         reader.seek(SeekFrom::Start(header.chunk_table_offset))?;
         reader.read_exact(&mut bytes)?;
         decode_chunk_table(&bytes)
-    }
-
-    fn read_dictionary_store(
-        reader: &mut R,
-        header: GlobalHeader,
-    ) -> Result<BTreeMap<u16, Vec<u8>>> {
-        let len = header
-            .payload_offset
-            .checked_sub(header.dictionary_store_offset)
-            .ok_or(OxideError::InvalidFormat(
-                "dictionary store length underflow",
-            ))?;
-        if len == 0 {
-            return Ok(BTreeMap::new());
-        }
-
-        let len = usize::try_from(len).map_err(|_| {
-            OxideError::InvalidFormat("dictionary store length exceeds usize range")
-        })?;
-        let mut bytes = vec![0u8; len];
-        reader.seek(SeekFrom::Start(header.dictionary_store_offset))?;
-        reader.read_exact(&mut bytes)?;
-        let dictionaries = decode_dictionary_store(&bytes)?;
-        Ok(dictionaries
-            .into_iter()
-            .map(|dictionary: StoredDictionary| (dictionary.id, dictionary.data))
-            .collect())
     }
 
     fn validate_chunk_layout(descriptors: &[ChunkDescriptor], header: GlobalHeader) -> Result<()> {

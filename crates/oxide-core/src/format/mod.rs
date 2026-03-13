@@ -12,5 +12,4 @@ pub use oxz::{
     ArchiveWriter, BlockHeader, BlockIterator, CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE,
     ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT, FOOTER_SIZE, Footer, GLOBAL_HEADER_SIZE,
     GlobalHeader, OXZ_MAGIC, OXZ_VERSION, ReorderBuffer, SeekableArchiveWriter,
-    StoredDictionary,
 };

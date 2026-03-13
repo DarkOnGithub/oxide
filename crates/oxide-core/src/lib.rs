@@ -34,8 +34,7 @@ pub use format::{
     ARCHIVE_METADATA_SIZE, ArchiveBlockWriter, ArchiveManifest, ArchiveMetadata, ArchiveReader,
     ArchiveWriter, BlockHeader, BlockIterator, CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE,
     ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT, FOOTER_SIZE, Footer, FormatDetector,
-    GLOBAL_HEADER_SIZE, GlobalHeader, OXZ_MAGIC, OXZ_VERSION, ReorderBuffer,
-    SeekableArchiveWriter, StoredDictionary,
+    GLOBAL_HEADER_SIZE, GlobalHeader, OXZ_MAGIC, OXZ_VERSION, ReorderBuffer, SeekableArchiveWriter,
 };
 pub use io::{BoundaryMode, ChunkingMode, ChunkingPolicy, InputScanner, MmapInput};
 pub use pipeline::{

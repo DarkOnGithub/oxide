@@ -46,18 +46,12 @@ pub struct ChunkEncodingPlan {
     pub algo: CompressionAlgo,
     /// Compression preset selected for the chunk.
     pub preset: CompressionPreset,
-    /// Optional dictionary identifier referenced by the chunk descriptor.
-    pub dict_id: u16,
 }
 
 impl ChunkEncodingPlan {
     /// Creates a new chunk encoding plan.
-    pub const fn new(algo: CompressionAlgo, preset: CompressionPreset, dict_id: u16) -> Self {
-        Self {
-            algo,
-            preset,
-            dict_id,
-        }
+    pub const fn new(algo: CompressionAlgo, preset: CompressionPreset) -> Self {
+        Self { algo, preset }
     }
 
     /// Builds compression metadata for the final stored payload.
@@ -68,7 +62,7 @@ impl ChunkEncodingPlan {
 
 impl Default for ChunkEncodingPlan {
     fn default() -> Self {
-        Self::new(CompressionAlgo::Lz4, CompressionPreset::Default, 0)
+        Self::new(CompressionAlgo::Lz4, CompressionPreset::Default)
     }
 }
 
@@ -345,8 +339,6 @@ pub struct CompressedBlock {
     pub compression: CompressionAlgo,
     /// Preset used for compression.
     pub compression_preset: CompressionPreset,
-    /// Optional dictionary identifier used for compression.
-    pub dict_id: u16,
     /// Whether the data is stored raw.
     pub raw_passthrough: bool,
     /// Original uncompressed length.
@@ -395,7 +387,6 @@ impl CompressedBlock {
             pre_proc,
             compression: compression_meta.algo,
             compression_preset: compression_meta.preset,
-            dict_id: 0,
             raw_passthrough: compression_meta.raw_passthrough,
             original_len,
             crc32: PLACEHOLDER_CHECKSUM,
@@ -419,7 +410,6 @@ impl CompressedBlock {
             pre_proc,
             compression: encoding_plan.algo,
             compression_preset: encoding_plan.preset,
-            dict_id: encoding_plan.dict_id,
             raw_passthrough,
             original_len,
             crc32: PLACEHOLDER_CHECKSUM,

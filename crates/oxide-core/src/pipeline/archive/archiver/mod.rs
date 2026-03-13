@@ -56,14 +56,7 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries, manifest| {
-                ArchiveWriter::with_dictionaries_and_manifest(
-                    writer,
-                    pool,
-                    dictionaries,
-                    Some(manifest),
-                )
-            },
+            |writer, pool, manifest| ArchiveWriter::with_manifest(writer, pool, Some(manifest)),
         )
     }
 
@@ -89,13 +82,8 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries, manifest| {
-                SeekableArchiveWriter::with_dictionaries_and_manifest(
-                    writer,
-                    pool,
-                    dictionaries,
-                    Some(manifest),
-                )
+            |writer, pool, manifest| {
+                SeekableArchiveWriter::with_manifest(writer, pool, Some(manifest))
             },
         )
     }
@@ -114,12 +102,11 @@ impl<'a> Archiver<'a> {
             writer,
             options,
             sink,
-            |writer, pool, dictionaries, manifest, reorder_limit| {
+            |writer, pool, manifest, reorder_limit| {
                 ArchiveWriter::with_reorder_limit_and_manifest(
                     writer,
                     pool,
                     reorder_limit,
-                    dictionaries,
                     Some(manifest),
                 )
             },
@@ -140,12 +127,11 @@ impl<'a> Archiver<'a> {
             writer,
             options,
             sink,
-            |writer, pool, dictionaries, manifest, reorder_limit| {
+            |writer, pool, manifest, reorder_limit| {
                 SeekableArchiveWriter::with_reorder_limit_and_manifest(
                     writer,
                     pool,
                     reorder_limit,
-                    dictionaries,
                     Some(manifest),
                 )
             },
@@ -167,14 +153,7 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries, manifest| {
-                ArchiveWriter::with_dictionaries_and_manifest(
-                    writer,
-                    pool,
-                    dictionaries,
-                    Some(manifest),
-                )
-            },
+            |writer, pool, manifest| ArchiveWriter::with_manifest(writer, pool, Some(manifest)),
         )
     }
 
@@ -193,13 +172,8 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries, manifest| {
-                SeekableArchiveWriter::with_dictionaries_and_manifest(
-                    writer,
-                    pool,
-                    dictionaries,
-                    Some(manifest),
-                )
+            |writer, pool, manifest| {
+                SeekableArchiveWriter::with_manifest(writer, pool, Some(manifest))
             },
         )
     }
@@ -216,12 +190,7 @@ impl<'a> Archiver<'a> {
     where
         W: Write,
         AW: ArchiveBlockWriter<InnerWriter = W>,
-        F: FnOnce(
-            W,
-            Arc<BufferPool>,
-            Vec<crate::format::StoredDictionary>,
-            crate::format::ArchiveManifest,
-        ) -> AW,
+        F: FnOnce(W, Arc<BufferPool>, crate::format::ArchiveManifest) -> AW,
     {
         archive_prepared_with_writer(
             self.config,
