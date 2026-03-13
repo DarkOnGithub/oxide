@@ -5,7 +5,7 @@ use oxide_core::{
     ARCHIVE_METADATA_SIZE, ArchiveReader, ArchiveWriter, BlockHeader, BufferPool,
     CHUNK_DESCRIPTOR_SIZE, CompressionAlgo, CompressionMeta, CompressionPreset, Footer,
     GLOBAL_HEADER_SIZE, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
-    ReorderBuffer, SeekableArchiveWriter, StoredDictionary, TextStrategy,
+    ReorderBuffer, SeekableArchiveWriter, TextStrategy,
 };
 
 fn block(
@@ -61,7 +61,7 @@ fn compression_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let header = GlobalHeader::new(56, 64, 96, 128, 160, 224);
+    let header = GlobalHeader::new(48, 56, 88, 120, 184);
     let mut encoded = Vec::new();
     header.write(&mut encoded)?;
     assert_eq!(encoded.len(), GLOBAL_HEADER_SIZE);
@@ -231,7 +231,10 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
         .map(|entry| entry.map(|(_, payload)| payload))
         .collect::<Result<Vec<_>, _>>()?;
 
-    assert_eq!(payloads, vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]);
+    assert_eq!(
+        payloads,
+        vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]
+    );
     Ok(())
 }
 
@@ -267,29 +270,6 @@ fn seekable_archive_writer_streams_payload_and_round_trips()
     let (header, payload) = reader.read_block(1)?;
     assert_eq!(payload, b"beta");
     assert!(header.payload_offset > 0);
-    Ok(())
-}
-
-#[test]
-fn archive_reader_exposes_dictionary_store() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = Arc::new(BufferPool::new(128, 8));
-    let dictionaries = vec![StoredDictionary::new(1, b"shared-prefix".to_vec())?];
-    let mut writer =
-        ArchiveWriter::with_dictionaries(Vec::new(), Arc::clone(&pool), dictionaries.clone());
-    writer.write_global_header(1)?;
-
-    let mut payload = block(
-        0,
-        b"payload",
-        PreProcessingStrategy::None,
-        CompressionAlgo::Lz4,
-    );
-    payload.dict_id = 1;
-    writer.write_block(&payload)?;
-
-    let archive = writer.write_footer()?;
-    let reader = ArchiveReader::new(Cursor::new(archive))?;
-    assert_eq!(reader.dictionary(1), Some(dictionaries[0].data.as_slice()));
     Ok(())
 }
 

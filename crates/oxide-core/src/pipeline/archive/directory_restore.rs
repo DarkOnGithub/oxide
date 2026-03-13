@@ -3,9 +3,9 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::OxideError;
 use crate::format::ArchiveManifest;
 use crate::types::Result;
-use crate::OxideError;
 
 use super::super::directory;
 use super::reorder_writer::OrderedChunkWriter;

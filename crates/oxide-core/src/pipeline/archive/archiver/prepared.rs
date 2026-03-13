@@ -28,7 +28,7 @@ pub fn archive_prepared_with_writer<W, AW, F>(
 where
     W: Write,
     AW: ArchiveBlockWriter<InnerWriter = W>,
-    F: FnOnce(W, Arc<BufferPool>, Vec<crate::format::StoredDictionary>, ArchiveManifest) -> AW,
+    F: FnOnce(W, Arc<BufferPool>, ArchiveManifest) -> AW,
 {
     let PreparedInput {
         source_kind,
@@ -39,7 +39,6 @@ where
     let total_blocks = batches.len();
     let block_count = u32::try_from(total_blocks)
         .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
-    let dictionary_bytes = 0;
     let manifest_bytes = manifest.encode()?.len();
     let max_inflight_blocks = max_inflight_blocks(
         total_blocks,
@@ -68,16 +67,10 @@ where
         )
     });
 
-    let mut archive_writer = writer_factory(
-        writer,
-        Arc::clone(&config.buffer_pool),
-        Vec::new(),
-        manifest,
-    );
+    let mut archive_writer = writer_factory(writer, Arc::clone(&config.buffer_pool), manifest);
     archive_writer
         .write_global_header_with_flags(block_count, directory::source_kind_flags(source_kind))?;
-    let mut output_bytes_written =
-        container_prefix_bytes(block_count, dictionary_bytes, manifest_bytes);
+    let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
     let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
     let mut next_write_id = 0usize;
 

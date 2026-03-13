@@ -25,7 +25,6 @@ pub fn process_batch(
             data: compression_input,
             algo: plan.algo,
             preset: plan.preset,
-            dictionary: None,
         },
         scratch.compression(),
     )?;

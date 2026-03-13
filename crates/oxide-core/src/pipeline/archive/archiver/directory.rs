@@ -1,10 +1,10 @@
-use crossbeam_channel::{bounded, RecvTimeoutError, TryRecvError};
+use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,15 +33,7 @@ pub fn archive_directory_streaming_with_writer<W, AW, F>(
 where
     W: Write + Send + 'static,
     AW: ArchiveBlockWriter<InnerWriter = W> + Send + 'static,
-    F: FnOnce(
-            W,
-            Arc<BufferPool>,
-            Vec<crate::format::StoredDictionary>,
-            ArchiveManifest,
-            usize,
-        ) -> AW
-        + Send
-        + 'static,
+    F: FnOnce(W, Arc<BufferPool>, ArchiveManifest, usize) -> AW + Send + 'static,
 {
     let mut stage_timings = StageTimings::default();
 
@@ -66,7 +58,6 @@ where
     )?;
     let manifest = directory::manifest_from_discovery(&discovery);
     let input_bytes_total = discovery.input_bytes_total;
-    let dictionary_bytes = 0;
     let manifest_bytes = manifest.encode()?.len();
     let total_blocks = usize::try_from(block_count)
         .map_err(|_| crate::OxideError::InvalidFormat("block count exceeds usize range"))?;
@@ -106,18 +97,15 @@ where
     let (writer_tx, writer_rx) = bounded::<CompressedBlock>(writer_queue_capacity);
     let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes(
         block_count,
-        dictionary_bytes,
         manifest_bytes,
     )));
     let writer_output_bytes_shared = Arc::clone(&writer_output_bytes);
     let writer_buffer_pool = Arc::clone(&config.buffer_pool);
-    let writer_dictionaries = Vec::new();
     let writer_manifest = manifest.clone();
     let writer_handle = thread::spawn(move || -> Result<DirectoryWriterOutcome<W>> {
         let mut archive_writer = writer_factory(
             writer,
             writer_buffer_pool,
-            writer_dictionaries,
             writer_manifest,
             writer_reorder_limit,
         );
@@ -126,8 +114,7 @@ where
             directory::source_kind_flags(ArchiveSourceKind::Directory),
         )?;
 
-        let mut output_bytes_written =
-            container_prefix_bytes(block_count, dictionary_bytes, manifest_bytes);
+        let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
         let mut pending_sizes = BTreeMap::<usize, usize>::new();
         let mut next_written_id = 0usize;
         let mut pending_write_peak = 0usize;
@@ -186,8 +173,7 @@ where
     let mut received_count = 0usize;
     let mut submitted_count = 0usize;
     let mut first_error: Option<crate::OxideError> = None;
-    let mut output_bytes_written =
-        container_prefix_bytes(block_count, dictionary_bytes, manifest_bytes);
+    let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
     let mut raw_passthrough_blocks = 0u64;
     let mut writer_queue_peak = 0usize;
     let result_wait_timeout = config

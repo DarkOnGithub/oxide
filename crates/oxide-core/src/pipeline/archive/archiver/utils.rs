@@ -14,17 +14,12 @@ pub const MIN_INFLIGHT_BLOCKS: usize = 64;
 pub const MAX_INFLIGHT_BLOCKS: usize = 4096;
 
 #[inline]
-pub fn container_prefix_bytes(
-    block_count: u32,
-    dictionary_bytes: usize,
-    manifest_bytes: usize,
-) -> u64 {
+pub fn container_prefix_bytes(block_count: u32, manifest_bytes: usize) -> u64 {
     GLOBAL_HEADER_SIZE as u64
         + ARCHIVE_METADATA_SIZE as u64
         + manifest_bytes as u64
         + CHUNK_TABLE_HEADER_SIZE as u64
         + block_count as u64 * CHUNK_DESCRIPTOR_SIZE as u64
-        + dictionary_bytes as u64
 }
 
 pub fn max_inflight_blocks(

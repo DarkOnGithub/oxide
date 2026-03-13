@@ -207,7 +207,10 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
         let (header, payload) = block?;
         assert_eq!(payload.len(), header.encoded_len as usize);
         if let Some(previous_offset) = previous_offset {
-            assert!(header.payload_offset > previous_offset, "block {expected} did not advance");
+            assert!(
+                header.payload_offset > previous_offset,
+                "block {expected} did not advance"
+            );
         }
         previous_offset = Some(header.payload_offset);
     }
@@ -375,7 +378,10 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
         )?
         .writer;
     let reader = ArchiveReader::new(Cursor::new(archive))?;
-    assert_eq!(reader.source_kind(), oxide_core::ArchiveSourceKind::Directory);
+    assert_eq!(
+        reader.source_kind(),
+        oxide_core::ArchiveSourceKind::Directory
+    );
     Ok(())
 }
 
@@ -627,9 +633,8 @@ fn extract_archive_ignores_payload_checksum_mismatch() -> Result<(), Box<dyn std
         )?
         .writer;
     let reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
-    let payload_checksum_offset = reader.global_header().chunk_table_offset as usize
-        + CHUNK_TABLE_HEADER_SIZE
-        + 16;
+    let payload_checksum_offset =
+        reader.global_header().chunk_table_offset as usize + CHUNK_TABLE_HEADER_SIZE + 16;
     archive[payload_checksum_offset] ^= 0xA5;
 
     let (restored, _report) =

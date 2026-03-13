@@ -280,11 +280,7 @@ impl Extractor {
 
                 while let Ok(task) = local_task_rx.recv() {
                     let decode_started = Instant::now();
-                    let decoded = decode_block_payload(
-                        task.header,
-                        task.block_data,
-                        task.dictionary.as_deref(),
-                    );
+                    let decoded = decode_block_payload(task.header, task.block_data);
                     let busy_elapsed = decode_started.elapsed();
                     busy += busy_elapsed;
                     local_runtime.record_worker_task(worker_id, busy_elapsed);
@@ -356,15 +352,11 @@ impl Extractor {
             }
 
             let submit_started = Instant::now();
-            let dictionary = archive
-                .dictionary(header.dict_id)
-                .map(|bytes| bytes.to_vec());
             task_tx
                 .send(DecodeTask {
                     index: submitted,
                     header,
                     block_data,
-                    dictionary,
                 })
                 .map_err(|_| {
                     crate::OxideError::CompressionError(
@@ -628,11 +620,7 @@ pub fn join_decode_workers(
     Ok(workers)
 }
 
-pub fn decode_block_payload(
-    header: BlockHeader,
-    block_data: Vec<u8>,
-    dictionary: Option<&[u8]>,
-) -> Result<Vec<u8>> {
+pub fn decode_block_payload(header: BlockHeader, block_data: Vec<u8>) -> Result<Vec<u8>> {
     let compression_meta = header.compression_meta()?;
     let decoded = if compression_meta.raw_passthrough {
         block_data
@@ -640,7 +628,6 @@ pub fn decode_block_payload(
         crate::compression::reverse_compression_request(crate::compression::DecompressionRequest {
             data: &block_data,
             algo: compression_meta.algo,
-            dictionary,
         })?
     };
     let strategy = header.strategy()?;
