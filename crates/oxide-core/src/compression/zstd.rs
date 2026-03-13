@@ -15,8 +15,13 @@ fn level_for_preset(preset: CompressionPreset) -> i32 {
     }
 }
 
-pub fn apply(data: &[u8], preset: CompressionPreset) -> Result<Vec<u8>> {
-    zstd::bulk::compress(data, level_for_preset(preset))
+#[inline]
+fn resolve_level(preset: CompressionPreset, zstd_level: Option<i32>) -> i32 {
+    zstd_level.unwrap_or_else(|| level_for_preset(preset))
+}
+
+pub fn apply(data: &[u8], preset: CompressionPreset, zstd_level: Option<i32>) -> Result<Vec<u8>> {
+    zstd::bulk::compress(data, resolve_level(preset, zstd_level))
         .map_err(|err| OxideError::CompressionError(format!("zstd encode failed: {err}")))
 }
 
@@ -31,7 +36,7 @@ pub fn reverse(data: &[u8], raw_len: Option<usize>) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ZSTD_BALANCED_LEVEL, ZSTD_ULTRA_LEVEL, level_for_preset};
+    use super::{ZSTD_BALANCED_LEVEL, ZSTD_ULTRA_LEVEL, level_for_preset, resolve_level};
     use crate::CompressionPreset;
 
     #[test]
@@ -41,5 +46,10 @@ mod tests {
             ZSTD_BALANCED_LEVEL
         );
         assert_eq!(level_for_preset(CompressionPreset::High), ZSTD_ULTRA_LEVEL);
+    }
+
+    #[test]
+    fn explicit_level_override_wins_over_preset_mapping() {
+        assert_eq!(resolve_level(CompressionPreset::Fast, Some(19)), 19);
     }
 }

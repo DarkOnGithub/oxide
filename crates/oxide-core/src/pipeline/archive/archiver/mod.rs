@@ -210,7 +210,8 @@ impl<'a> Archiver<'a> {
             ChunkEncodingPlan::new(
                 self.config.compression_algo,
                 self.config.performance.compression_preset,
-            ),
+            )
+            .with_zstd_level(self.config.performance.zstd_level),
         );
         let batches = scanner.scan_file(path)?;
         let input_bytes_total = batches.iter().map(|batch| batch.len() as u64).sum();
