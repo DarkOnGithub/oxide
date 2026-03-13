@@ -292,6 +292,13 @@ pub(super) fn estimate_directory_block_count(
     block_size: usize,
     preserve_format_boundaries: bool,
 ) -> Result<u32> {
+    if !preserve_format_boundaries {
+        let block_size = block_size.max(1) as u64;
+        let block_count = discovery.input_bytes_total.div_ceil(block_size);
+        return u32::try_from(block_count)
+            .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v2"));
+    }
+
     if discovery.files.len() != file_formats.len() {
         return Err(crate::OxideError::InvalidFormat(
             "directory file format plan mismatch",
@@ -362,6 +369,19 @@ mod tests {
             estimate_directory_block_count(&discovery, &formats, 4, true).expect("plan");
 
         assert_eq!(block_count, 4);
+    }
+
+    #[test]
+    fn block_count_without_boundaries_uses_total_bytes_only() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::write(root.join("alpha.txt"), b"alpha\n").expect("write alpha");
+        fs::write(root.join("beta.bin"), [0, 159, 146, 150, 42]).expect("write beta");
+
+        let discovery = discover_directory_tree(root).expect("discover directory");
+        let block_count = estimate_directory_block_count(&discovery, &[], 4, false).expect("plan");
+
+        assert_eq!(block_count, 3);
     }
 }
 
