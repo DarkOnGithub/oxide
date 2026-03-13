@@ -8,18 +8,18 @@ use oxide_core::{
     PipelinePerformanceOptions, RunTelemetryOptions,
 };
 
-use crate::AppResult;
 use crate::cli::{
-    ArchiveArgs, ExtractArgs, TreeArgs, default_extract_output_path, default_output_path,
+    default_extract_output_path, default_output_path, ArchiveArgs, ExtractArgs, TreeArgs,
 };
-use crate::presets::{ArchiveOverrides, ResolvedArchiveSettings, resolve_archive_settings};
+use crate::presets::{resolve_archive_settings, ArchiveOverrides, ResolvedArchiveSettings};
 use crate::progress::{ArchiveCliSink, ExtractCliSink, LiveRateStats};
 use crate::report::{
-    ArchiveReportSummary, ExtractReportSummary, print_archive_report_summary,
-    print_extract_report_summary,
+    print_archive_report_summary, print_extract_report_summary, ArchiveReportSummary,
+    ExtractReportSummary,
 };
 use crate::tree::print_archive_tree;
-use crate::ui::{StreamTarget, Tone, tagged_message};
+use crate::ui::{tagged_message, StreamTarget, Tone};
+use crate::AppResult;
 
 pub fn archive(args: ArchiveArgs) -> AppResult {
     let ArchiveArgs {
@@ -28,6 +28,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         block_size,
         workers,
         compression,
+        zstd_level,
         preset,
         preset_file,
         pool_capacity,
@@ -48,6 +49,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         preset.as_deref(),
         ArchiveOverrides {
             compression: compression.map(Into::into),
+            zstd_level,
             block_size,
             workers,
             pool_capacity,

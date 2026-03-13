@@ -6,10 +6,10 @@ use std::path::Path;
 use oxide_core::{CompressionAlgo, CompressionPreset};
 use serde::Deserialize;
 
+use crate::cli::{parse_size, CompressionArg};
 use crate::AppResult;
-use crate::cli::{CompressionArg, parse_size};
 
-const BUNDLED_PRESETS: &str = include_str!("../presets.json");
+const DEFAULT_PRESETS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/presets.json");
 
 #[derive(Debug, Clone)]
 pub struct ResolvedArchiveSettings {
@@ -36,6 +36,7 @@ pub struct ResolvedArchiveSettings {
 #[derive(Debug, Default)]
 pub struct ArchiveOverrides {
     pub compression: Option<CompressionAlgo>,
+    pub zstd_level: Option<i32>,
     pub block_size: Option<usize>,
     pub workers: Option<usize>,
     pub pool_capacity: Option<usize>,
@@ -58,7 +59,18 @@ pub fn resolve_archive_settings(
 ) -> AppResult<ResolvedArchiveSettings> {
     let (source, source_label) = match preset_file {
         Some(path) => (fs::read_to_string(path)?, path.display().to_string()),
-        None => (BUNDLED_PRESETS.to_string(), "bundled presets".to_string()),
+        None => (
+            fs::read_to_string(DEFAULT_PRESETS_PATH).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to read default preset file '{}': {error}",
+                        DEFAULT_PRESETS_PATH
+                    ),
+                )
+            })?,
+            DEFAULT_PRESETS_PATH.to_string(),
+        ),
     };
 
     let file: PresetFile = serde_json::from_str(&source)?;
@@ -168,7 +180,7 @@ impl ArchivePresetConfig {
             .map(parse_compression_preset)
             .transpose()?
             .ok_or_else(|| invalid_input("archive preset is missing compression_preset"))?;
-        let zstd_level = resolve_zstd_level(compression, self.zstd_level)?;
+        let zstd_level = resolve_zstd_level(compression, overrides.zstd_level.or(self.zstd_level))?;
 
         Ok(ResolvedArchiveSettings {
             profile_name: preset_name.to_string(),
@@ -332,9 +344,11 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use oxide_core::{CompressionAlgo, CompressionPreset};
 
-    use super::{ArchiveOverrides, BUNDLED_PRESETS, PresetFile};
+    use super::{ArchiveOverrides, PresetFile, DEFAULT_PRESETS_PATH};
 
     fn parse_fixture(json: &str) -> PresetFile {
         serde_json::from_str(json).expect("fixture should parse")
@@ -389,6 +403,7 @@ mod tests {
                 "compact",
                 "fixture",
                 ArchiveOverrides {
+                    zstd_level: None,
                     block_size: Some(16 * 1024 * 1024),
                     ..ArchiveOverrides::default()
                 },
@@ -403,24 +418,26 @@ mod tests {
     }
 
     #[test]
-    fn bundled_balanced_and_ultra_use_zstd() {
-        let file = parse_fixture(BUNDLED_PRESETS);
+    fn default_preset_file_balanced_and_ultra_use_zstd() {
+        let file = parse_fixture(
+            &fs::read_to_string(DEFAULT_PRESETS_PATH).expect("default presets should be readable"),
+        );
 
         let mut balanced = file.archive.defaults.clone();
         balanced.merge_from(file.archive.presets.get("balanced").unwrap());
         let balanced = balanced
-            .resolve("balanced", "bundled", ArchiveOverrides::default())
+            .resolve("balanced", "default file", ArchiveOverrides::default())
             .expect("balanced should resolve");
 
         let mut ultra = file.archive.defaults.clone();
         ultra.merge_from(file.archive.presets.get("ultra").unwrap());
         let ultra = ultra
-            .resolve("ultra", "bundled", ArchiveOverrides::default())
+            .resolve("ultra", "default file", ArchiveOverrides::default())
             .expect("ultra should resolve");
 
         assert_eq!(balanced.compression, CompressionAlgo::Zstd);
         assert_eq!(balanced.compression_preset, CompressionPreset::Default);
-        assert_eq!(balanced.zstd_level, Some(3));
+        assert_eq!(balanced.zstd_level, Some(6));
         assert_eq!(ultra.compression, CompressionAlgo::Zstd);
         assert_eq!(ultra.compression_preset, CompressionPreset::High);
         assert_eq!(ultra.zstd_level, Some(19));

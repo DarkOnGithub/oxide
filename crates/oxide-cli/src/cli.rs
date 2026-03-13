@@ -46,11 +46,15 @@ pub struct ArchiveArgs {
     #[arg(long, value_enum)]
     pub compression: Option<CompressionArg>,
 
+    /// Explicit zstd level (1-22). Only valid with `--compression zstd` or zstd presets.
+    #[arg(long)]
+    pub zstd_level: Option<i32>,
+
     /// Archive tuning preset name from the preset config file.
     #[arg(long)]
     pub preset: Option<String>,
 
-    /// Archive preset config file path. Defaults to the bundled presets file.
+    /// Archive preset config file path. Defaults to the crate's `presets.json` file.
     #[arg(long)]
     pub preset_file: Option<PathBuf>,
 
@@ -219,7 +223,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, Commands, default_extract_output_path, default_output_path, parse_size};
+    use super::{default_extract_output_path, default_output_path, parse_size, Cli, Commands};
 
     #[test]
     fn parse_size_supports_binary_suffixes() {
@@ -282,6 +286,17 @@ mod tests {
                     Some(super::CompressionArg::Zstd)
                 ));
             }
+            _ => panic!("expected archive command"),
+        }
+    }
+
+    #[test]
+    fn archive_command_accepts_zstd_level_flag() {
+        let cli = Cli::try_parse_from(["oxide", "archive", "demo/input", "--zstd-level", "19"])
+            .expect("archive arguments should parse");
+
+        match cli.command {
+            Commands::Archive(args) => assert_eq!(args.zstd_level, Some(19)),
             _ => panic!("expected archive command"),
         }
     }
