@@ -230,8 +230,28 @@ fn resolve_archive_workers(requested_workers: usize, producer_threads: usize) ->
     }
 
     let physical_cores = num_cpus::get_physical().max(1);
-    let reserved_threads = producer_threads.saturating_add(1);
+    let reserved_producers = producer_threads.min(2);
+    let reserved_threads = reserved_producers.saturating_add(1);
     physical_cores.saturating_sub(reserved_threads).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_archive_workers;
+
+    #[test]
+    fn explicit_worker_count_is_preserved() {
+        assert_eq!(resolve_archive_workers(6, 8), 6);
+    }
+
+    #[test]
+    fn auto_worker_count_caps_reserved_producer_threads() {
+        let physical_cores = num_cpus::get_physical().max(1);
+        let expected = physical_cores.saturating_sub(3).max(1);
+
+        assert_eq!(resolve_archive_workers(0, 4), expected);
+        assert_eq!(resolve_archive_workers(0, 8), expected);
+    }
 }
 
 fn compression_name(compression: CompressionAlgo) -> &'static str {

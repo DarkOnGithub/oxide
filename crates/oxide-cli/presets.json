@@ -12,7 +12,7 @@
       "inflight_bytes": "2G",
       "inflight_blocks_per_worker": 256,
       "stream_read_buffer": "64M",
-      "producer_threads": 1,
+      "producer_threads": 2,
       "directory_mmap_threshold": "8M",
       "writer_queue_blocks": 1024,
       "preserve_format_boundaries": false,
@@ -23,7 +23,8 @@
         "compression_preset": "fast",
         "block_size": "2M",
         "stream_read_buffer": "128M",
-        "inflight_bytes": "2G"
+        "inflight_bytes": "2G",
+        "producer_threads": 4
       },
       "balanced": {
         "compression_preset": "default",

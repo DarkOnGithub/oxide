@@ -26,7 +26,7 @@ use crate::preprocessing::{
 use crate::telemetry;
 use crate::telemetry::profile;
 use crate::telemetry::tags;
-use crate::types::{Batch, FileFormat, Result};
+use crate::types::{Batch, ChunkEncodingPlan, FileFormat, Result};
 
 /// Tag stack for scanner profiling events.
 const PROFILE_TAG_STACK_SCANNER: &[&str] = &[tags::TAG_SCANNER];
@@ -77,6 +77,7 @@ fn next_aligned_after(start: usize, alignment: usize) -> usize {
 #[derive(Debug, Clone)]
 pub struct InputScanner {
     chunking_policy: ChunkingPolicy,
+    compression_plan: ChunkEncodingPlan,
 }
 
 impl InputScanner {
@@ -87,7 +88,18 @@ impl InputScanner {
 
     /// Creates a new scanner with an explicit chunking policy.
     pub fn with_chunking_policy(chunking_policy: ChunkingPolicy) -> Self {
-        Self { chunking_policy }
+        Self::with_chunking_policy_and_plan(chunking_policy, ChunkEncodingPlan::default())
+    }
+
+    /// Creates a new scanner with an explicit chunking policy and compression plan.
+    pub fn with_chunking_policy_and_plan(
+        chunking_policy: ChunkingPolicy,
+        compression_plan: ChunkEncodingPlan,
+    ) -> Self {
+        Self {
+            chunking_policy,
+            compression_plan,
+        }
     }
 
     /// Returns configured target block size.
@@ -203,7 +215,7 @@ impl InputScanner {
                 file_type_hint: format,
                 preprocessing_metadata: scan_detection.preprocessing_metadata,
                 stream_id: 0,
-                compression_plan: crate::ChunkEncodingPlan::default(),
+                compression_plan: self.compression_plan,
             });
             start = end;
             id += 1;

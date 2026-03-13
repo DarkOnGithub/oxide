@@ -1,4 +1,4 @@
-use crossbeam_channel::{RecvTimeoutError, TryRecvError, bounded};
+use crossbeam_channel::{Receiver, TryRecvError, bounded, select};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -16,7 +16,7 @@ use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
-use crate::types::{Batch, CompressedBlock, FileFormat, Result};
+use crate::types::{Batch, ChunkEncodingPlan, CompressedBlock, FileFormat, Result};
 
 use super::super::telemetry::*;
 use super::super::types::*;
@@ -193,13 +193,21 @@ where
     let producer_files = discovery.files.clone();
     let producer_file_formats = file_formats;
     let producer_block_size = block_size;
+    let producer_compression_plan = ChunkEncodingPlan::new(
+        config.compression_algo,
+        config.performance.compression_preset,
+    );
     let stream_read_buffer_size = config.performance.directory_stream_read_buffer_size.max(1);
     let producer_threads = config.performance.producer_threads.max(1);
     let mmap_threshold = config.performance.directory_mmap_threshold_bytes.max(1);
 
     let producer_handle = thread::spawn(move || -> Result<DirectoryProducerOutcome> {
-        let mut submitter =
-            DirectoryBatchSubmitter::new(producer_root, producer_block_size, preserve_boundaries);
+        let mut submitter = DirectoryBatchSubmitter::new_with_plan(
+            producer_root,
+            producer_block_size,
+            preserve_boundaries,
+            producer_compression_plan,
+        );
         let mut producer_read = Duration::ZERO;
 
         let submit_batch = |batch: Batch| -> Result<()> {
@@ -391,6 +399,7 @@ where
         Ok(DirectoryProducerOutcome { producer_read })
     });
 
+    let results_rx = handle.results_receiver().clone();
     let mut producer_done = false;
     let mut shutdown_called = false;
     loop {
@@ -412,42 +421,17 @@ where
             }
         }
 
-        let mut drained = 0usize;
-        while drained < SUBMISSION_DRAIN_BUDGET {
-            let Some(result) = handle.recv_timeout(Duration::from_millis(0)) else {
-                break;
-            };
-            record_result_to_writer_queue(
-                result,
-                &writer_tx,
-                &mut completed_bytes,
-                &mut first_error,
-                &mut raw_passthrough_blocks,
-                &mut writer_queue_peak,
-            );
-            received_count += 1;
-            drained += 1;
-        }
+        let drained = drain_worker_results(
+            &results_rx,
+            SUBMISSION_DRAIN_BUDGET,
+            &writer_tx,
+            &mut completed_bytes,
+            &mut first_error,
+            &mut raw_passthrough_blocks,
+            &mut writer_queue_peak,
+            &mut received_count,
+        );
         progressed |= drained > 0;
-
-        if !producer_done && submitted_count.saturating_sub(received_count) < max_inflight_blocks {
-            let wait_started = Instant::now();
-            match batch_rx.recv_timeout(result_wait_timeout) {
-                Ok(batch) => {
-                    stage_timings.submit_wait += wait_started.elapsed();
-                    handle.submit(batch)?;
-                    submitted_count += 1;
-                    progressed = true;
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    stage_timings.submit_wait += wait_started.elapsed();
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    stage_timings.submit_wait += wait_started.elapsed();
-                    producer_done = true;
-                }
-            }
-        }
 
         if !shutdown_called && producer_done {
             handle.shutdown();
@@ -475,24 +459,67 @@ where
         }
 
         if !progressed {
-            let inflight_full =
-                submitted_count.saturating_sub(received_count) >= max_inflight_blocks;
-            let wait_started = Instant::now();
-            if let Some(result) = handle.recv_timeout(result_wait_timeout) {
-                record_result_to_writer_queue(
+            let inflight = submitted_count.saturating_sub(received_count);
+            if !producer_done && inflight < max_inflight_blocks {
+                let wait_started = Instant::now();
+                select! {
+                    recv(batch_rx) -> batch => {
+                        stage_timings.submit_wait += wait_started.elapsed();
+                        match batch {
+                            Ok(batch) => {
+                                handle.submit(batch)?;
+                                submitted_count += 1;
+                            }
+                            Err(_) => {
+                                producer_done = true;
+                            }
+                        }
+                    }
+                    recv(results_rx) -> result => {
+                        stage_timings.result_wait += wait_started.elapsed();
+                        recv_worker_result(
+                            result,
+                            &writer_tx,
+                            &mut completed_bytes,
+                            &mut first_error,
+                            &mut raw_passthrough_blocks,
+                            &mut writer_queue_peak,
+                            &mut received_count,
+                        )?;
+                    }
+                }
+            } else if received_count < submitted_count {
+                let wait_started = Instant::now();
+                let result = results_rx.recv();
+                let waited = wait_started.elapsed();
+                stage_timings.result_wait += waited;
+                if inflight >= max_inflight_blocks {
+                    stage_timings.submit_wait += waited;
+                }
+                recv_worker_result(
                     result,
                     &writer_tx,
                     &mut completed_bytes,
                     &mut first_error,
                     &mut raw_passthrough_blocks,
                     &mut writer_queue_peak,
-                );
-                received_count += 1;
-            }
-            let waited = wait_started.elapsed();
-            stage_timings.result_wait += waited;
-            if inflight_full {
-                stage_timings.submit_wait += waited;
+                    &mut received_count,
+                )?;
+            } else if !producer_done {
+                let wait_started = Instant::now();
+                match batch_rx.recv() {
+                    Ok(batch) => {
+                        stage_timings.submit_wait += wait_started.elapsed();
+                        handle.submit(batch)?;
+                        submitted_count += 1;
+                    }
+                    Err(_) => {
+                        stage_timings.submit_wait += wait_started.elapsed();
+                        producer_done = true;
+                    }
+                }
+            } else {
+                break;
             }
         }
 
@@ -554,18 +581,17 @@ where
 
     while received_count < submitted_count {
         let wait_started = Instant::now();
-        if let Some(result) = handle.recv_timeout(result_wait_timeout) {
-            record_result_to_writer_queue(
-                result,
-                &writer_tx,
-                &mut completed_bytes,
-                &mut first_error,
-                &mut raw_passthrough_blocks,
-                &mut writer_queue_peak,
-            );
-            received_count += 1;
-        }
+        let result = results_rx.recv();
         stage_timings.result_wait += wait_started.elapsed();
+        recv_worker_result(
+            result,
+            &writer_tx,
+            &mut completed_bytes,
+            &mut first_error,
+            &mut raw_passthrough_blocks,
+            &mut writer_queue_peak,
+            &mut received_count,
+        )?;
         output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
         emit_archive_progress_if_due(
             handle.runtime_snapshot(),
@@ -660,6 +686,65 @@ where
 fn detect_file_format_hint(bytes: &[u8]) -> FileFormat {
     let probe_len = bytes.len().min(DIRECTORY_FORMAT_PROBE_LIMIT);
     FormatDetector::detect(&bytes[..probe_len])
+}
+
+fn drain_worker_results(
+    results_rx: &Receiver<Result<CompressedBlock>>,
+    max_results: usize,
+    writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
+    completed_bytes: &mut u64,
+    first_error: &mut Option<crate::OxideError>,
+    raw_passthrough_blocks: &mut u64,
+    writer_queue_peak: &mut usize,
+    received_count: &mut usize,
+) -> usize {
+    let mut drained = 0usize;
+    while drained < max_results {
+        match results_rx.try_recv() {
+            Ok(result) => {
+                record_result_to_writer_queue(
+                    result,
+                    writer_tx,
+                    completed_bytes,
+                    first_error,
+                    raw_passthrough_blocks,
+                    writer_queue_peak,
+                );
+                *received_count += 1;
+                drained += 1;
+            }
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
+    drained
+}
+
+fn recv_worker_result(
+    result: std::result::Result<Result<CompressedBlock>, crossbeam_channel::RecvError>,
+    writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
+    completed_bytes: &mut u64,
+    first_error: &mut Option<crate::OxideError>,
+    raw_passthrough_blocks: &mut u64,
+    writer_queue_peak: &mut usize,
+    received_count: &mut usize,
+) -> Result<()> {
+    match result {
+        Ok(result) => {
+            record_result_to_writer_queue(
+                result,
+                writer_tx,
+                completed_bytes,
+                first_error,
+                raw_passthrough_blocks,
+                writer_queue_peak,
+            );
+            *received_count += 1;
+            Ok(())
+        }
+        Err(_) => Err(crate::OxideError::CompressionError(
+            "worker result channel closed before completion".to_string(),
+        )),
+    }
 }
 
 pub fn record_result_to_writer_queue(

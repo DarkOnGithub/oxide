@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader,
-    BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo, ExtractProgressEvent, FOOTER_SIZE,
-    PreProcessingStrategy, ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink,
+    BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo, CompressionPreset, ExtractProgressEvent,
+    FOOTER_SIZE, PreProcessingStrategy, ReportValue, RunTelemetryOptions, TelemetryEvent,
+    TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -246,6 +247,36 @@ fn pipeline_records_preprocessing_strategy_in_block_headers()
 }
 
 #[test]
+fn file_archive_uses_requested_compression_preset() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(64 * 1024);
+    let file = write_fixture(&data)?;
+
+    let mut config = ArchivePipelineConfig::new(
+        8 * 1024,
+        2,
+        Arc::new(BufferPool::new(16 * 1024, 64)),
+        CompressionAlgo::Lz4,
+    );
+    config.performance.compression_preset = CompressionPreset::High;
+    let pipeline = ArchivePipeline::new(config);
+
+    let archive = pipeline
+        .archive_file(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let mut reader = ArchiveReader::new(Cursor::new(archive))?;
+    let (header, _payload) = reader.read_block(0)?;
+
+    assert_eq!(header.compression_meta()?.preset, CompressionPreset::High);
+    Ok(())
+}
+
+#[test]
 fn pipeline_reaches_buffer_pool_steady_state() -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
@@ -418,6 +449,36 @@ fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode()
         assert_eq!(header.strategy()?, PreProcessingStrategy::None);
     }
 
+    Ok(())
+}
+
+#[test]
+fn directory_archive_uses_requested_compression_preset() -> Result<(), Box<dyn std::error::Error>> {
+    let source = TempDir::new()?;
+    write_directory_file(&source, "sample.txt", &build_text_fixture(64 * 1024))?;
+
+    let mut config = ArchivePipelineConfig::new(
+        8 * 1024,
+        2,
+        Arc::new(BufferPool::new(16 * 1024, 64)),
+        CompressionAlgo::Lz4,
+    );
+    config.performance.compression_preset = CompressionPreset::High;
+    let pipeline = ArchivePipeline::new(config);
+
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let mut reader = ArchiveReader::new(Cursor::new(archive))?;
+    let (header, _payload) = reader.read_block(0)?;
+
+    assert_eq!(header.compression_meta()?.preset, CompressionPreset::High);
     Ok(())
 }
 

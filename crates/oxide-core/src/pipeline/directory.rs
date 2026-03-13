@@ -7,7 +7,7 @@ use bytes::Bytes;
 use jwalk::WalkDir;
 
 use crate::format::FormatDetector;
-use crate::types::{Batch, FileFormat, Result};
+use crate::types::{Batch, ChunkEncodingPlan, FileFormat, Result};
 
 use super::types::{ArchiveEntryKind, ArchiveListingEntry, ArchiveSourceKind};
 
@@ -36,6 +36,7 @@ pub struct DirectoryBatchSubmitter {
     source_path: PathBuf,
     block_size: usize,
     preserve_format_boundaries: bool,
+    compression_plan: ChunkEncodingPlan,
     next_block_id: usize,
     pending: Vec<u8>,
     pending_format: Option<FileFormat>,
@@ -43,10 +44,25 @@ pub struct DirectoryBatchSubmitter {
 
 impl DirectoryBatchSubmitter {
     pub fn new(source_path: PathBuf, block_size: usize, preserve_format_boundaries: bool) -> Self {
+        Self::new_with_plan(
+            source_path,
+            block_size,
+            preserve_format_boundaries,
+            ChunkEncodingPlan::default(),
+        )
+    }
+
+    pub fn new_with_plan(
+        source_path: PathBuf,
+        block_size: usize,
+        preserve_format_boundaries: bool,
+        compression_plan: ChunkEncodingPlan,
+    ) -> Self {
         Self {
             source_path,
             block_size: block_size.max(1),
             preserve_format_boundaries,
+            compression_plan,
             next_block_id: 0,
             pending: Vec::with_capacity(block_size.max(1)),
             pending_format: None,
@@ -109,12 +125,15 @@ impl DirectoryBatchSubmitter {
     {
         let file_type_hint = self.pending_format.unwrap_or(FileFormat::Common);
         let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(self.block_size));
-        let batch = Batch::with_hint(
-            self.next_block_id,
-            self.source_path.clone(),
-            Bytes::from(chunk),
+        let batch = Batch {
+            id: self.next_block_id,
+            source_path: self.source_path.clone(),
+            data: crate::BatchData::Owned(Bytes::from(chunk)),
             file_type_hint,
-        );
+            preprocessing_metadata: None,
+            stream_id: 0,
+            compression_plan: self.compression_plan,
+        };
         submit(batch)?;
         self.next_block_id += 1;
         self.pending_format = None;
