@@ -8,6 +8,7 @@ use crate::format::{ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter};
 use crate::io::{ChunkingPolicy, InputScanner};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetrySink};
+use crate::types::ChunkEncodingPlan;
 use crate::types::Result;
 
 pub mod directory;
@@ -204,10 +205,13 @@ impl<'a> Archiver<'a> {
     }
 
     pub fn prepare_file(&self, path: &Path, block_size: usize) -> Result<PreparedInput> {
-        let scanner = InputScanner::with_chunking_policy(ChunkingPolicy::for_preset(
-            block_size,
-            self.config.performance.compression_preset,
-        ));
+        let scanner = InputScanner::with_chunking_policy_and_plan(
+            ChunkingPolicy::for_preset(block_size, self.config.performance.compression_preset),
+            ChunkEncodingPlan::new(
+                self.config.compression_algo,
+                self.config.performance.compression_preset,
+            ),
+        );
         let batches = scanner.scan_file(path)?;
         let input_bytes_total = batches.iter().map(|batch| batch.len() as u64).sum();
         let manifest = file_manifest(path, input_bytes_total)?;
