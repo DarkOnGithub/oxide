@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,6 +18,7 @@ use super::super::directory;
 use super::super::types::ArchiveSourceKind;
 use super::directory_restore::{
     DirectoryExtractSelection, DirectoryRestoreWriter, FilteredDirectoryRestoreWriter,
+    apply_entry_metadata,
 };
 use super::reorder_writer::{BoundedReorderWriter, OrderedChunkWriter};
 use super::telemetry::*;
@@ -47,21 +48,26 @@ impl OrderedChunkWriter for VecChunkWriter {
 
 struct FileChunkWriter {
     writer: BufWriter<fs::File>,
+    path: PathBuf,
+    entry: crate::ArchiveListingEntry,
 }
 
 impl FileChunkWriter {
-    fn create(path: &Path) -> Result<Self> {
+    fn create(path: &Path, entry: crate::ArchiveListingEntry) -> Result<Self> {
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
         let file = fs::File::create(path)?;
         Ok(Self {
             writer: BufWriter::new(file),
+            path: path.to_path_buf(),
+            entry,
         })
     }
 
-    fn flush(&mut self) -> Result<()> {
+    fn flush_and_apply_metadata(&mut self) -> Result<()> {
         self.writer.flush()?;
+        apply_entry_metadata(&self.path, &self.entry)?;
         Ok(())
     }
 }
@@ -135,6 +141,63 @@ impl DecodePlan {
 
     fn includes(&self, block_index: usize) -> bool {
         self.selected_blocks[block_index]
+    }
+
+    fn project_ranges(&self, headers: &[BlockHeader], ranges: &[Range<u64>]) -> Vec<Range<u64>> {
+        let mut projected: Vec<Range<u64>> = Vec::new();
+        let mut range_index = 0usize;
+        let mut decoded_offset = 0u64;
+        let mut selected_offset = 0u64;
+
+        for (block_index, header) in headers.iter().enumerate() {
+            let block_start = decoded_offset;
+            let block_end = block_start.saturating_add(header.raw_len as u64);
+            decoded_offset = block_end;
+
+            if !self.includes(block_index) {
+                continue;
+            }
+
+            while range_index < ranges.len() && ranges[range_index].end <= block_start {
+                range_index += 1;
+            }
+
+            let mut local_index = range_index;
+            while let Some(range) = ranges.get(local_index) {
+                if range.start >= block_end {
+                    break;
+                }
+
+                let overlap_start = range.start.max(block_start);
+                let overlap_end = range.end.min(block_end);
+                if overlap_start < overlap_end {
+                    let projected_start =
+                        selected_offset + overlap_start.saturating_sub(block_start);
+                    let projected_end = selected_offset + overlap_end.saturating_sub(block_start);
+
+                    if let Some(last) = projected.last_mut() {
+                        if last.end == projected_start {
+                            last.end = projected_end;
+                        } else {
+                            projected.push(projected_start..projected_end);
+                        }
+                    } else {
+                        projected.push(projected_start..projected_end);
+                    }
+                }
+
+                if range.end <= block_end {
+                    local_index += 1;
+                } else {
+                    break;
+                }
+            }
+
+            range_index = local_index.min(ranges.len());
+            selected_offset = selected_offset.saturating_add(header.raw_len as u64);
+        }
+
+        projected
     }
 }
 
@@ -214,8 +277,23 @@ impl Extractor {
         let archive_started = Instant::now();
         let archive = ArchiveReader::new_for_sequential_extract(reader)?;
         let archive_read_elapsed = archive_started.elapsed();
-        let mut writer = FileChunkWriter::create(output_path)?;
-        let decoded = self.decode_archive_to_writer(
+        if archive.source_kind() != ArchiveSourceKind::File {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive is not a file payload",
+            ));
+        }
+
+        let entry = archive.manifest().entries().first().cloned().ok_or(
+            crate::OxideError::InvalidFormat("file archive manifest is empty"),
+        )?;
+        if !matches!(entry.kind, crate::ArchiveEntryKind::File) {
+            return Err(crate::OxideError::InvalidFormat(
+                "file archive manifest does not describe a file entry",
+            ));
+        }
+
+        let mut writer = FileChunkWriter::create(output_path, entry)?;
+        let mut decoded = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
             started_at,
@@ -224,7 +302,9 @@ impl Extractor {
             None,
             &mut writer,
         )?;
-        writer.flush()?;
+        let output_started = Instant::now();
+        writer.flush_and_apply_metadata()?;
+        decoded.stage_timings.output_write += output_started.elapsed();
 
         if !matches!(
             directory::source_kind_from_flags(decoded.flags),
@@ -326,7 +406,12 @@ impl Extractor {
         let selection =
             DirectoryExtractSelection::from_filters(archive.manifest(), filters, regex_filters)?;
         let selected_ranges = selection.selected_ranges().to_vec();
-        let mut writer = FilteredDirectoryRestoreWriter::create(output_path, selection)?;
+        let decode_plan = DecodePlan::from_ranges(archive.block_descriptors(), &selected_ranges);
+        let projected_ranges =
+            decode_plan.project_ranges(archive.block_descriptors(), &selected_ranges);
+        let manifest = selection.into_manifest();
+        let mut writer =
+            FilteredDirectoryRestoreWriter::create(output_path, manifest, projected_ranges)?;
         let decoded = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,

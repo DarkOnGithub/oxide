@@ -63,7 +63,7 @@ where
         block_size,
         preserve_boundaries,
     )?;
-    let manifest = directory::manifest_from_discovery(&discovery);
+    let manifest = directory::manifest_from_discovery(&discovery)?;
     let input_bytes_total = discovery.input_bytes_total;
     let manifest_bytes = manifest.encode()?.len();
     let total_blocks = usize::try_from(block_count)

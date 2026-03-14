@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use anyhow::anyhow;
 use regex::RegexSet;
 
+use crate::OxideError;
 use crate::format::ArchiveManifest;
 use crate::types::Result;
-use crate::OxideError;
 
 use super::super::directory;
 use super::reorder_writer::OrderedChunkWriter;
@@ -42,8 +42,6 @@ impl DirectoryExtractSelection {
 
         let mut entries = Vec::new();
         let mut selected_ranges = Vec::new();
-        let mut payload_offset = 0u64;
-
         for entry in manifest.entries() {
             let selected = normalized_filters
                 .iter()
@@ -55,12 +53,8 @@ impl DirectoryExtractSelection {
             if selected {
                 entries.push(entry.clone());
                 if matches!(entry.kind, crate::ArchiveEntryKind::File) && entry.size > 0 {
-                    selected_ranges.push(payload_offset..payload_offset.saturating_add(entry.size));
+                    selected_ranges.push(entry.content_range());
                 }
-            }
-
-            if matches!(entry.kind, crate::ArchiveEntryKind::File) {
-                payload_offset = payload_offset.saturating_add(entry.size);
             }
         }
 
@@ -74,12 +68,12 @@ impl DirectoryExtractSelection {
         })
     }
 
-    fn into_parts(self) -> (ArchiveManifest, Vec<Range<u64>>) {
-        (self.manifest, self.selected_ranges)
-    }
-
     pub(crate) fn selected_ranges(&self) -> &[Range<u64>] {
         &self.selected_ranges
+    }
+
+    pub(crate) fn into_manifest(self) -> ArchiveManifest {
+        self.manifest
     }
 }
 
@@ -87,6 +81,14 @@ impl DirectoryExtractSelection {
 struct PendingFile {
     remaining: u64,
     writer: BufWriter<fs::File>,
+    path: PathBuf,
+    entry: crate::ArchiveListingEntry,
+}
+
+#[derive(Debug)]
+struct PendingDirectory {
+    path: PathBuf,
+    entry: crate::ArchiveListingEntry,
 }
 
 #[derive(Debug)]
@@ -95,6 +97,7 @@ pub(crate) struct DirectoryRestoreWriter {
     entries: Vec<crate::ArchiveListingEntry>,
     next_entry: usize,
     pending_file: Option<PendingFile>,
+    pending_directories: Vec<PendingDirectory>,
     stats: DirectoryRestoreStats,
 }
 
@@ -114,6 +117,7 @@ impl DirectoryRestoreWriter {
             entries: manifest.entries().to_vec(),
             next_entry: 0,
             pending_file: None,
+            pending_directories: Vec::new(),
             stats: DirectoryRestoreStats::default(),
         })
     }
@@ -132,6 +136,7 @@ impl DirectoryRestoreWriter {
                 "directory restore ended before all entries completed",
             ));
         }
+        self.finalize_directories()?;
         Ok(self.stats)
     }
 
@@ -145,8 +150,12 @@ impl DirectoryRestoreWriter {
                 crate::ArchiveEntryKind::Directory => {
                     let output_started = Instant::now();
                     let out_path = directory::join_safe(&self.root, &entry.path)?;
-                    fs::create_dir_all(out_path)?;
+                    fs::create_dir_all(&out_path)?;
                     self.stats.output_write += output_started.elapsed();
+                    self.pending_directories.push(PendingDirectory {
+                        path: out_path,
+                        entry,
+                    });
                 }
                 crate::ArchiveEntryKind::File => {
                     let output_started = Instant::now();
@@ -154,16 +163,21 @@ impl DirectoryRestoreWriter {
                     if let Some(parent) = out_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
-                    let file = fs::File::create(out_path)?;
+                    let file = fs::File::create(&out_path)?;
                     self.stats.output_write += output_started.elapsed();
 
                     if entry.size == 0 {
+                        let metadata_started = Instant::now();
+                        apply_entry_metadata(&out_path, &entry)?;
+                        self.stats.output_write += metadata_started.elapsed();
                         continue;
                     }
 
                     self.pending_file = Some(PendingFile {
                         remaining: entry.size,
                         writer: BufWriter::new(file),
+                        path: out_path,
+                        entry,
                     });
                 }
             }
@@ -171,11 +185,23 @@ impl DirectoryRestoreWriter {
 
         Ok(())
     }
+
+    fn finalize_directories(&mut self) -> Result<()> {
+        while let Some(directory) = self.pending_directories.pop() {
+            let started = Instant::now();
+            apply_entry_metadata(&directory.path, &directory.entry)?;
+            self.stats.output_write += started.elapsed();
+        }
+        Ok(())
+    }
 }
 
 impl FilteredDirectoryRestoreWriter {
-    pub(crate) fn create(root: &Path, selection: DirectoryExtractSelection) -> Result<Self> {
-        let (manifest, selected_ranges) = selection.into_parts();
+    pub(crate) fn create(
+        root: &Path,
+        manifest: ArchiveManifest,
+        selected_ranges: Vec<Range<u64>>,
+    ) -> Result<Self> {
         Ok(Self {
             inner: DirectoryRestoreWriter::create(root, manifest)?,
             selected_ranges,
@@ -218,7 +244,12 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
                     pending.writer.flush()?;
                 }
                 self.stats.output_write += output_started.elapsed();
-                self.pending_file = None;
+                let pending = self.pending_file.take().ok_or(OxideError::InvalidFormat(
+                    "directory restore missing pending file after write completion",
+                ))?;
+                let metadata_started = Instant::now();
+                apply_entry_metadata(&pending.path, &pending.entry)?;
+                self.stats.output_write += metadata_started.elapsed();
                 let decode_started = Instant::now();
                 self.advance_entries()?;
                 self.stats.directory_decode += decode_started.elapsed();
@@ -323,4 +354,85 @@ fn path_matches_filter(path: &str, filter: &str) -> bool {
         || path
             .strip_prefix(filter)
             .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+pub(crate) fn apply_entry_metadata(path: &Path, entry: &crate::ArchiveListingEntry) -> Result<()> {
+    apply_owner(path, entry.uid, entry.gid)?;
+    apply_mode(path, entry.mode)?;
+    apply_mtime(path, entry.mtime)?;
+    Ok(())
+}
+
+fn apply_mode(path: &Path, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_readonly(mode & 0o200 == 0);
+        fs::set_permissions(path, permissions)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn apply_owner(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    use std::ffi::CString;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| OxideError::InvalidFormat("path contains interior nul byte"))?;
+    let status = unsafe { libc::chown(path.as_ptr(), uid, gid) };
+    if status == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EPERM | libc::EACCES | libc::ENOTSUP | libc::EINVAL) => Ok(()),
+        _ => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_owner(_: &Path, _: u32, _: u32) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn apply_mtime(path: &Path, mtime: crate::ArchiveTimestamp) -> Result<()> {
+    use std::ffi::CString;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| OxideError::InvalidFormat("path contains interior nul byte"))?;
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: mtime.seconds as libc::time_t,
+            tv_nsec: mtime.nanoseconds as libc::c_long,
+        },
+    ];
+    let status = unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_mtime(_: &Path, _: crate::ArchiveTimestamp) -> Result<()> {
+    Ok(())
 }

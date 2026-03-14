@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 
 use crate::format::ArchiveManifest;
@@ -47,9 +48,13 @@ pub fn file_manifest(path: &Path, size: u64) -> Result<ArchiveManifest> {
             "file archive requires a utf8 file name for manifest metadata",
         ),
     )?;
-    Ok(ArchiveManifest::new(vec![crate::ArchiveListingEntry {
-        path: name.to_string(),
-        kind: crate::ArchiveEntryKind::File,
+    let metadata = fs::metadata(path)?;
+    let entry = crate::ArchiveListingEntry::from_metadata(
+        name.to_string(),
+        crate::ArchiveEntryKind::File,
         size,
-    }]))
+        &metadata,
+        0,
+    )?;
+    Ok(ArchiveManifest::new(vec![entry]))
 }

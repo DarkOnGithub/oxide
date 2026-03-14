@@ -37,6 +37,7 @@ symphonia = "0.5.5"
 jwalk = "0.8"
 zstd = "0.13"
 regex = "1.11"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.8"

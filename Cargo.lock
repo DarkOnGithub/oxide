@@ -1017,6 +1017,7 @@ dependencies = [
  "image",
  "infer",
  "jwalk",
+ "libc",
  "lz4_flex",
  "memchr",
  "memmap2",
