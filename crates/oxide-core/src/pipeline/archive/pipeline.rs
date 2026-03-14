@@ -384,6 +384,111 @@ impl ArchivePipeline {
         sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
         Ok(report)
     }
+
+    /// Extracts only selected paths from a directory archive.
+    ///
+    /// Filters match archive-relative paths. Matching a directory path restores that
+    /// directory entry and all descendants. File archives do not support path
+    /// filters.
+    pub fn extract_path_filtered<R, P, S>(
+        &self,
+        reader: R,
+        output_path: P,
+        filters: &[S],
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ExtractReport>
+    where
+        R: Read + Seek,
+        P: AsRef<Path>,
+        S: AsRef<str>,
+    {
+        self.extract_path_filtered_with_regex(
+            reader,
+            output_path,
+            filters,
+            &[] as &[&str],
+            options,
+            sink,
+        )
+    }
+
+    /// Extracts only selected paths or regex-matching paths from a directory archive.
+    pub fn extract_path_filtered_with_regex<R, P, S, T>(
+        &self,
+        reader: R,
+        output_path: P,
+        filters: &[S],
+        regex_filters: &[T],
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ExtractReport>
+    where
+        R: Read + Seek,
+        P: AsRef<Path>,
+        S: AsRef<str>,
+        T: AsRef<str>,
+    {
+        if filters.is_empty() && regex_filters.is_empty() {
+            return self.extract_path(reader, output_path, options, sink);
+        }
+
+        tracing::info!(output_path = %output_path.as_ref().display(), filter_count = filters.len(), regex_filter_count = regex_filters.len(), "starting filtered path extraction");
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
+        begin_extract_run_telemetry();
+        let started_at = Instant::now();
+        let extractor = Extractor::new(self.num_workers);
+        let mut reader = reader;
+        let source_kind = Extractor::probe_archive_source_kind(&mut reader)?;
+        reader.seek(SeekFrom::Start(0))?;
+
+        if source_kind != ArchiveSourceKind::Directory {
+            return Err(crate::OxideError::InvalidFormat(
+                "path or regex filters require a directory archive",
+            ));
+        }
+
+        let restored = extractor.extract_directory_to_path_filtered_with_metrics(
+            reader,
+            output_path.as_ref(),
+            filters,
+            regex_filters,
+            started_at,
+            &options,
+            sink,
+        )?;
+        let decoded = restored.decoded;
+        let mut extensions = extract_extensions_from_flags(decoded.flags);
+        extensions.insert(
+            "extract.directory_entries".to_string(),
+            crate::telemetry::ReportValue::U64(restored.entry_count),
+        );
+        extensions.insert(
+            "extract.path_filters".to_string(),
+            crate::telemetry::ReportValue::U64(filters.len() as u64),
+        );
+        extensions.insert(
+            "extract.regex_filters".to_string(),
+            crate::telemetry::ReportValue::U64(regex_filters.len() as u64),
+        );
+        let decoded_bytes_total = decoded.decoded_bytes_total;
+        let output_bytes_total = restored.output_bytes_total;
+        let stage_timings = decoded.stage_timings;
+        let elapsed = started_at.elapsed();
+        record_extract_run_telemetry(elapsed, stage_timings);
+        let report = build_extract_report_helper(
+            elapsed,
+            decoded,
+            ArchiveSourceKind::Directory,
+            decoded_bytes_total,
+            output_bytes_total,
+            extensions,
+            options,
+        );
+        sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
+        Ok(report)
+    }
 }
 
 fn extract_extensions_from_flags(
