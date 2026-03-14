@@ -111,15 +111,23 @@ impl<R: Read + Seek> ArchiveReader<R> {
         &self.manifest
     }
 
-    pub fn read_block(&mut self, index: u32) -> Result<(ChunkDescriptor, Vec<u8>)> {
-        let start = Instant::now();
+    pub(crate) fn block_descriptor(&self, index: u32) -> Result<ChunkDescriptor> {
         let index_val = usize::try_from(index)
             .map_err(|_| OxideError::InvalidFormat("block index exceeds usize range"))?;
 
-        let descriptor = *self
-            .chunk_descriptors
+        self.chunk_descriptors
             .get(index_val)
-            .ok_or(OxideError::InvalidFormat("block index out of range"))?;
+            .copied()
+            .ok_or(OxideError::InvalidFormat("block index out of range"))
+    }
+
+    pub(crate) fn block_descriptors(&self) -> &[ChunkDescriptor] {
+        &self.chunk_descriptors
+    }
+
+    pub fn read_block(&mut self, index: u32) -> Result<(ChunkDescriptor, Vec<u8>)> {
+        let start = Instant::now();
+        let descriptor = self.block_descriptor(index)?;
 
         self.reader
             .seek(SeekFrom::Start(descriptor.payload_offset))?;

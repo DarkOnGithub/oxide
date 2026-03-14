@@ -1,11 +1,15 @@
 use std::fs;
 use std::io::{BufWriter, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::OxideError;
+use anyhow::anyhow;
+use regex::RegexSet;
+
 use crate::format::ArchiveManifest;
 use crate::types::Result;
+use crate::OxideError;
 
 use super::super::directory;
 use super::reorder_writer::OrderedChunkWriter;
@@ -16,6 +20,67 @@ pub(crate) struct DirectoryRestoreStats {
     pub(crate) output_write: Duration,
     pub(crate) output_bytes_total: u64,
     pub(crate) entry_count: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct DirectoryExtractSelection {
+    manifest: ArchiveManifest,
+    selected_ranges: Vec<Range<u64>>,
+}
+
+impl DirectoryExtractSelection {
+    pub(crate) fn from_filters<S: AsRef<str>, T: AsRef<str>>(
+        manifest: &ArchiveManifest,
+        filters: &[S],
+        regex_filters: &[T],
+    ) -> Result<Self> {
+        let normalized_filters = normalize_filters(filters)?;
+        let regex_set = compile_regex_filters(regex_filters)?;
+        if normalized_filters.is_empty() && regex_set.is_none() {
+            return Err(anyhow!("path filters cannot be empty").into());
+        }
+
+        let mut entries = Vec::new();
+        let mut selected_ranges = Vec::new();
+        let mut payload_offset = 0u64;
+
+        for entry in manifest.entries() {
+            let selected = normalized_filters
+                .iter()
+                .any(|filter| path_matches_filter(&entry.path, filter))
+                || regex_set
+                    .as_ref()
+                    .is_some_and(|patterns| patterns.is_match(&entry.path));
+
+            if selected {
+                entries.push(entry.clone());
+                if matches!(entry.kind, crate::ArchiveEntryKind::File) && entry.size > 0 {
+                    selected_ranges.push(payload_offset..payload_offset.saturating_add(entry.size));
+                }
+            }
+
+            if matches!(entry.kind, crate::ArchiveEntryKind::File) {
+                payload_offset = payload_offset.saturating_add(entry.size);
+            }
+        }
+
+        if entries.is_empty() {
+            return Err(anyhow!("path filters did not match any archive entries").into());
+        }
+
+        Ok(Self {
+            manifest: ArchiveManifest::new(entries),
+            selected_ranges,
+        })
+    }
+
+    fn into_parts(self) -> (ArchiveManifest, Vec<Range<u64>>) {
+        (self.manifest, self.selected_ranges)
+    }
+
+    pub(crate) fn selected_ranges(&self) -> &[Range<u64>] {
+        &self.selected_ranges
+    }
 }
 
 #[derive(Debug)]
@@ -31,6 +96,14 @@ pub(crate) struct DirectoryRestoreWriter {
     next_entry: usize,
     pending_file: Option<PendingFile>,
     stats: DirectoryRestoreStats,
+}
+
+#[derive(Debug)]
+pub(crate) struct FilteredDirectoryRestoreWriter {
+    inner: DirectoryRestoreWriter,
+    selected_ranges: Vec<Range<u64>>,
+    next_range: usize,
+    input_offset: u64,
 }
 
 impl DirectoryRestoreWriter {
@@ -100,6 +173,22 @@ impl DirectoryRestoreWriter {
     }
 }
 
+impl FilteredDirectoryRestoreWriter {
+    pub(crate) fn create(root: &Path, selection: DirectoryExtractSelection) -> Result<Self> {
+        let (manifest, selected_ranges) = selection.into_parts();
+        Ok(Self {
+            inner: DirectoryRestoreWriter::create(root, manifest)?,
+            selected_ranges,
+            next_range: 0,
+            input_offset: 0,
+        })
+    }
+
+    pub(crate) fn finish(&mut self) -> Result<DirectoryRestoreStats> {
+        self.inner.finish()
+    }
+}
+
 impl OrderedChunkWriter for DirectoryRestoreWriter {
     fn write_chunk(&mut self, mut bytes: &[u8]) -> Result<()> {
         let decode_started = Instant::now();
@@ -138,4 +227,100 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
 
         Ok(())
     }
+}
+
+impl OrderedChunkWriter for FilteredDirectoryRestoreWriter {
+    fn write_chunk(&mut self, bytes: &[u8]) -> Result<()> {
+        let chunk_start = self.input_offset;
+        let chunk_end = chunk_start.saturating_add(bytes.len() as u64);
+
+        while self.next_range < self.selected_ranges.len()
+            && self.selected_ranges[self.next_range].end <= chunk_start
+        {
+            self.next_range += 1;
+        }
+
+        let mut range_index = self.next_range;
+        while range_index < self.selected_ranges.len() {
+            let range = &self.selected_ranges[range_index];
+            if range.start >= chunk_end {
+                break;
+            }
+
+            let write_start = range.start.max(chunk_start) - chunk_start;
+            let write_end = range.end.min(chunk_end) - chunk_start;
+            if write_start < write_end {
+                self.inner
+                    .write_chunk(&bytes[write_start as usize..write_end as usize])?;
+            }
+
+            if range.end <= chunk_end {
+                range_index += 1;
+            } else {
+                break;
+            }
+        }
+
+        self.next_range = range_index;
+        self.input_offset = chunk_end;
+        Ok(())
+    }
+}
+
+fn normalize_filters<S: AsRef<str>>(filters: &[S]) -> Result<Vec<String>> {
+    filters
+        .iter()
+        .map(|filter| normalize_filter(filter.as_ref()))
+        .collect()
+}
+
+fn compile_regex_filters<S: AsRef<str>>(filters: &[S]) -> Result<Option<RegexSet>> {
+    if filters.is_empty() {
+        return Ok(None);
+    }
+
+    let patterns = filters
+        .iter()
+        .map(|filter| filter.as_ref().trim())
+        .collect::<Vec<_>>();
+    if patterns.iter().any(|pattern| pattern.is_empty()) {
+        return Err(anyhow!("regex filters must be non-empty").into());
+    }
+
+    let set = RegexSet::new(&patterns)
+        .map_err(|error| crate::OxideError::Other(anyhow!("invalid regex filter: {error}")))?;
+    Ok(Some(set))
+}
+
+fn normalize_filter(raw: &str) -> Result<String> {
+    let replaced = raw.trim().replace('\\', "/");
+    if replaced.is_empty() {
+        return Err(anyhow!("path filters must be non-empty relative paths").into());
+    }
+
+    let mut parts = Vec::new();
+    for part in replaced.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => {
+                return Err(
+                    anyhow!("path filters must not contain parent directory traversal").into(),
+                );
+            }
+            _ => parts.push(part),
+        }
+    }
+
+    if parts.is_empty() || raw.trim_start().starts_with('/') {
+        return Err(anyhow!("path filters must be non-empty relative paths").into());
+    }
+
+    Ok(parts.join("/"))
+}
+
+fn path_matches_filter(path: &str, filter: &str) -> bool {
+    path == filter
+        || path
+            .strip_prefix(filter)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
