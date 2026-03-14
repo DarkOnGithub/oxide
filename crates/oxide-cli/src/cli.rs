@@ -125,6 +125,18 @@ pub struct ExtractArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
+    /// Restore only matching archive-relative paths.
+    ///
+    /// Repeat this flag to extract multiple files or directory subtrees.
+    #[arg(long = "only")]
+    pub only: Vec<String>,
+
+    /// Restore paths whose archive-relative path matches the regex.
+    ///
+    /// Repeat this flag to supply multiple regex patterns.
+    #[arg(long = "only-regex")]
+    pub only_regex: Vec<String>,
+
     /// Progress refresh interval in milliseconds.
     #[arg(long, default_value_t = 250)]
     pub stats_interval_ms: u64,
@@ -223,7 +235,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{default_extract_output_path, default_output_path, parse_size, Cli, Commands};
+    use super::{Cli, Commands, default_extract_output_path, default_output_path, parse_size};
 
     #[test]
     fn parse_size_supports_binary_suffixes() {
@@ -309,6 +321,44 @@ mod tests {
 
         match cli.command {
             Commands::Extract(args) => assert!(args.telemetry_details),
+            _ => panic!("expected extract command"),
+        }
+    }
+
+    #[test]
+    fn extract_command_accepts_repeated_only_flags() {
+        let cli = Cli::try_parse_from([
+            "oxide",
+            "extract",
+            "demo/input.oxz",
+            "--only",
+            "nested",
+            "--only",
+            "assets/logo.png",
+        ])
+        .expect("extract arguments should parse");
+
+        match cli.command {
+            Commands::Extract(args) => assert_eq!(args.only, ["nested", "assets/logo.png"]),
+            _ => panic!("expected extract command"),
+        }
+    }
+
+    #[test]
+    fn extract_command_accepts_repeated_only_regex_flags() {
+        let cli = Cli::try_parse_from([
+            "oxide",
+            "extract",
+            "demo/input.oxz",
+            "--only-regex",
+            ".*\\.png$",
+            "--only-regex",
+            "^docs/",
+        ])
+        .expect("extract arguments should parse");
+
+        match cli.command {
+            Commands::Extract(args) => assert_eq!(args.only_regex, [".*\\.png$", "^docs/"]),
             _ => panic!("expected extract command"),
         }
     }
