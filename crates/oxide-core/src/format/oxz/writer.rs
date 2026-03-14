@@ -41,7 +41,7 @@ pub trait ArchiveBlockWriter {
 }
 
 /// Writes OXZ archives by staging chunk descriptors and payloads, then
-/// emitting the fixed-layout v2 container at finalization.
+/// emitting the fixed-layout v1 container at finalization.
 #[derive(Debug)]
 pub struct ArchiveWriter<W: Write> {
     writer: W,
