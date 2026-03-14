@@ -1,7 +1,7 @@
-use crate::{ArchiveEntryKind, ArchiveListingEntry, OxideError, Result};
+use crate::{ArchiveEntryKind, ArchiveListingEntry, ArchiveTimestamp, OxideError, Result};
 
 pub const ARCHIVE_MANIFEST_MAGIC: [u8; 4] = *b"OXMF";
-pub const ARCHIVE_MANIFEST_VERSION: u16 = 1;
+pub const ARCHIVE_MANIFEST_VERSION: u16 = 2;
 const ARCHIVE_MANIFEST_HEADER_SIZE: usize = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -19,6 +19,7 @@ impl ArchiveManifest {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
+        validate_entries(&self.entries)?;
         let entry_count = u32::try_from(self.entries.len())
             .map_err(|_| OxideError::InvalidFormat("manifest entry count overflow"))?;
         let mut out = Vec::with_capacity(ARCHIVE_MANIFEST_HEADER_SIZE);
@@ -28,12 +29,15 @@ impl ArchiveManifest {
         out.extend_from_slice(&entry_count.to_le_bytes());
 
         for entry in &self.entries {
-            out.push(match entry.kind {
-                ArchiveEntryKind::File => 1,
-                ArchiveEntryKind::Directory => 0,
-            });
+            out.push(entry.kind.to_flags());
             encode_path(&mut out, &entry.path)?;
             out.extend_from_slice(&entry.size.to_le_bytes());
+            out.extend_from_slice(&entry.mode.to_le_bytes());
+            out.extend_from_slice(&entry.mtime.seconds.to_le_bytes());
+            out.extend_from_slice(&entry.mtime.nanoseconds.to_le_bytes());
+            out.extend_from_slice(&entry.uid.to_le_bytes());
+            out.extend_from_slice(&entry.gid.to_le_bytes());
+            out.extend_from_slice(&entry.content_offset.to_le_bytes());
         }
 
         Ok(out)
@@ -72,21 +76,16 @@ impl ArchiveManifest {
                 ));
             }
 
-            let kind = match bytes[cursor] {
-                0 => ArchiveEntryKind::Directory,
-                1 => ArchiveEntryKind::File,
-                _ => {
-                    return Err(OxideError::InvalidFormat(
-                        "invalid archive manifest entry kind",
-                    ));
-                }
-            };
+            let flags = bytes[cursor];
+            let kind = ArchiveEntryKind::from_flags(flags).ok_or(OxideError::InvalidFormat(
+                "invalid archive manifest entry flags",
+            ))?;
             cursor += 1;
 
             let path = decode_path(bytes, &mut cursor)?;
-            if cursor + 8 > bytes.len() {
+            if cursor + 32 > bytes.len() {
                 return Err(OxideError::InvalidFormat(
-                    "truncated archive manifest entry size",
+                    "truncated archive manifest entry metadata",
                 ));
             }
             let size = u64::from_le_bytes([
@@ -100,8 +99,81 @@ impl ArchiveManifest {
                 bytes[cursor + 7],
             ]);
             cursor += 8;
+            let mode = u32::from_le_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+            ]);
+            cursor += 4;
+            let mtime_seconds = i64::from_le_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+                bytes[cursor + 4],
+                bytes[cursor + 5],
+                bytes[cursor + 6],
+                bytes[cursor + 7],
+            ]);
+            cursor += 8;
+            let mtime_nanoseconds = u32::from_le_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+            ]);
+            cursor += 4;
+            if mtime_nanoseconds >= 1_000_000_000 {
+                return Err(OxideError::InvalidFormat(
+                    "archive manifest mtime nanoseconds out of range",
+                ));
+            }
+            let uid = u32::from_le_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+            ]);
+            cursor += 4;
+            let gid = u32::from_le_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+            ]);
+            cursor += 4;
+            let content_offset = u64::from_le_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+                bytes[cursor + 4],
+                bytes[cursor + 5],
+                bytes[cursor + 6],
+                bytes[cursor + 7],
+            ]);
+            cursor += 8;
 
-            entries.push(ArchiveListingEntry { path, kind, size });
+            if matches!(kind, ArchiveEntryKind::Directory) && (size != 0 || content_offset != 0) {
+                return Err(OxideError::InvalidFormat(
+                    "directory manifest entries must not carry content ranges",
+                ));
+            }
+
+            entries.push(ArchiveListingEntry {
+                path,
+                kind,
+                size,
+                mode,
+                mtime: ArchiveTimestamp {
+                    seconds: mtime_seconds,
+                    nanoseconds: mtime_nanoseconds,
+                },
+                uid,
+                gid,
+                content_offset,
+            });
         }
 
         if cursor != bytes.len() {
@@ -110,7 +182,78 @@ impl ArchiveManifest {
             ));
         }
 
+        validate_entries(&entries)?;
+
         Ok(Self { entries })
+    }
+}
+
+fn validate_entries(entries: &[ArchiveListingEntry]) -> Result<()> {
+    let mut expected_content_offset = 0u64;
+
+    for entry in entries {
+        match entry.kind {
+            ArchiveEntryKind::Directory => {
+                if entry.size != 0 || entry.content_offset != 0 {
+                    return Err(OxideError::InvalidFormat(
+                        "directory manifest entries must not carry content ranges",
+                    ));
+                }
+            }
+            ArchiveEntryKind::File => {
+                if entry.content_offset != expected_content_offset {
+                    return Err(OxideError::InvalidFormat(
+                        "file manifest content offsets must be contiguous",
+                    ));
+                }
+                expected_content_offset = expected_content_offset
+                    .checked_add(entry.size)
+                    .ok_or(OxideError::InvalidFormat("manifest content range overflow"))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArchiveManifest;
+    use crate::{ArchiveEntryKind, ArchiveListingEntry, ArchiveTimestamp};
+
+    #[test]
+    fn manifest_round_trips_extended_entry_metadata() {
+        let manifest = ArchiveManifest::new(vec![
+            ArchiveListingEntry::directory(
+                "nested".to_string(),
+                0o755,
+                ArchiveTimestamp {
+                    seconds: 1_710_000_000,
+                    nanoseconds: 42,
+                },
+                1000,
+                100,
+            ),
+            ArchiveListingEntry::file(
+                "nested/data.bin".to_string(),
+                7,
+                0o640,
+                ArchiveTimestamp {
+                    seconds: 1_710_000_123,
+                    nanoseconds: 99,
+                },
+                1000,
+                100,
+                0,
+            ),
+        ]);
+
+        let bytes = manifest.encode().expect("encode manifest");
+        let decoded = ArchiveManifest::decode(&bytes).expect("decode manifest");
+
+        assert_eq!(decoded, manifest);
+        assert_eq!(decoded.entries()[0].kind, ArchiveEntryKind::Directory);
+        assert_eq!(decoded.entries()[1].content_offset, 0);
     }
 }
 
