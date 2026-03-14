@@ -51,6 +51,36 @@ fn write_directory_file(
     Ok(())
 }
 
+fn assert_manifest_entry(
+    entry: &oxide_core::ArchiveListingEntry,
+    path: &str,
+    kind: ArchiveEntryKind,
+    size: u64,
+    content_offset: u64,
+) {
+    assert_eq!(entry.path, path);
+    assert_eq!(entry.kind, kind);
+    assert_eq!(entry.size, size);
+    assert_eq!(entry.content_offset, content_offset);
+}
+
+#[cfg(unix)]
+fn assert_unix_metadata_matches(
+    source: &std::path::Path,
+    restored: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let source = std::fs::metadata(source)?;
+    let restored = std::fs::metadata(restored)?;
+    assert_eq!(source.mode(), restored.mode());
+    assert_eq!(source.uid(), restored.uid());
+    assert_eq!(source.gid(), restored.gid());
+    assert_eq!(source.mtime(), restored.mtime());
+    assert_eq!(source.mtime_nsec(), restored.mtime_nsec());
+    Ok(())
+}
+
 fn build_pipeline(
     block_size: usize,
     workers: usize,
@@ -565,6 +595,241 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
+fn extract_path_filtered_restores_selected_subtree() -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "nested/data.bin", &[9, 8, 7])?;
+    write_directory_file(&source, "nested/deeper/keep.txt", b"keep")?;
+    write_directory_file(&source, "other/drop.bin", &[1, 2, 3, 4])?;
+    std::fs::create_dir_all(source.path().join("nested/empty"))?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let out_root = tempfile::tempdir()?;
+    let out_dir = out_root.path().join("restored-tree");
+    let report = pipeline.extract_path_filtered(
+        Cursor::new(archive),
+        &out_dir,
+        &["nested/"],
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(report.source_kind, oxide_core::ArchiveSourceKind::Directory);
+    assert_eq!(
+        std::fs::read(out_dir.join("nested/data.bin"))?,
+        vec![9, 8, 7]
+    );
+    assert_eq!(
+        std::fs::read(out_dir.join("nested/deeper/keep.txt"))?,
+        b"keep"
+    );
+    assert!(out_dir.join("nested/empty").is_dir());
+    assert!(!out_dir.join("other/drop.bin").exists());
+    assert_eq!(report.output_bytes_total, 7);
+    assert!(matches!(
+        report.extensions.get("extract.directory_entries"),
+        Some(ReportValue::U64(5))
+    ));
+    assert!(matches!(
+        report.extensions.get("extract.path_filters"),
+        Some(ReportValue::U64(1))
+    ));
+    Ok(())
+}
+
+#[test]
+fn extract_path_filtered_skips_unselected_blocks() -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "keep.bin", &vec![1u8; 24])?;
+    write_directory_file(&source, "skip/drop.bin", &vec![2u8; 24])?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let out_root = tempfile::tempdir()?;
+    let out_dir = out_root.path().join("restored-tree");
+    let report = pipeline.extract_path_filtered(
+        Cursor::new(archive),
+        &out_dir,
+        &["keep.bin"],
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(std::fs::read(out_dir.join("keep.bin"))?, vec![1u8; 24]);
+    assert!(!out_dir.join("skip/drop.bin").exists());
+    assert_eq!(report.output_bytes_total, 24);
+    assert_eq!(report.decoded_bytes_total, 24);
+    assert_eq!(report.blocks_total, 3);
+    Ok(())
+}
+
+#[test]
+fn extract_path_filtered_handles_skipped_prefix_blocks() -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "skip.bin", &vec![0u8; 24])?;
+    write_directory_file(&source, "keep.jpg", &vec![7u8; 24])?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let out_root = tempfile::tempdir()?;
+    let out_dir = out_root.path().join("restored-tree");
+    let report = pipeline.extract_path_filtered_with_regex(
+        Cursor::new(archive),
+        &out_dir,
+        &[] as &[&str],
+        &[r"\.jpg$"],
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(std::fs::read(out_dir.join("keep.jpg"))?, vec![7u8; 24]);
+    assert!(!out_dir.join("skip.bin").exists());
+    assert_eq!(report.output_bytes_total, 24);
+    assert_eq!(report.decoded_bytes_total, 24);
+    assert_eq!(report.blocks_total, 3);
+    Ok(())
+}
+
+#[test]
+fn extract_path_filtered_with_regex_restores_matching_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "assets/logo.png", b"png")?;
+    write_directory_file(&source, "docs/readme.txt", b"txt")?;
+    write_directory_file(&source, "images/banner.png", b"banner")?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let out_root = tempfile::tempdir()?;
+    let out_dir = out_root.path().join("restored-tree");
+    let report = pipeline.extract_path_filtered_with_regex(
+        Cursor::new(archive),
+        &out_dir,
+        &[] as &[&str],
+        &[r".*\.png$"],
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(std::fs::read(out_dir.join("assets/logo.png"))?, b"png");
+    assert_eq!(std::fs::read(out_dir.join("images/banner.png"))?, b"banner");
+    assert!(!out_dir.join("docs/readme.txt").exists());
+    assert!(matches!(
+        report.extensions.get("extract.regex_filters"),
+        Some(ReportValue::U64(1))
+    ));
+    Ok(())
+}
+
+#[test]
+fn extract_path_filtered_rejects_file_archives() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(16 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let out_root = tempfile::tempdir()?;
+    let out_file = out_root.path().join("restored.txt");
+    let error = pipeline
+        .extract_path_filtered(
+            Cursor::new(archive),
+            &out_file,
+            &["restored.txt"],
+            RunTelemetryOptions::default(),
+            None,
+        )
+        .expect_err("file archives should reject path filters");
+
+    assert!(
+        error
+            .to_string()
+            .contains("path or regex filters require a directory archive")
+    );
+    Ok(())
+}
+
+#[test]
+fn extract_path_filtered_errors_when_no_paths_match() -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "nested/data.bin", &[9, 8, 7])?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let out_root = tempfile::tempdir()?;
+    let out_dir = out_root.path().join("restored-tree");
+    let error = pipeline
+        .extract_path_filtered(
+            Cursor::new(archive),
+            &out_dir,
+            &["missing"],
+            RunTelemetryOptions::default(),
+            None,
+        )
+        .expect_err("missing filters should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("path filters did not match any archive entries")
+    );
+    Ok(())
+}
+
+#[test]
 fn archive_reader_exposes_directory_manifest() -> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(&source, "nested/data.bin", &[9, 8, 7])?;
@@ -584,35 +849,18 @@ fn archive_reader_exposes_directory_manifest() -> Result<(), Box<dyn std::error:
         .writer;
     let reader = ArchiveReader::new(Cursor::new(archive))?;
     let manifest = reader.manifest();
-    assert_eq!(
-        manifest.entries(),
-        vec![
-            oxide_core::ArchiveListingEntry {
-                path: "empty".to_string(),
-                kind: ArchiveEntryKind::Directory,
-                size: 0,
-            },
-            oxide_core::ArchiveListingEntry {
-                path: "empty/leaf".to_string(),
-                kind: ArchiveEntryKind::Directory,
-                size: 0,
-            },
-            oxide_core::ArchiveListingEntry {
-                path: "nested".to_string(),
-                kind: ArchiveEntryKind::Directory,
-                size: 0,
-            },
-            oxide_core::ArchiveListingEntry {
-                path: "nested/data.bin".to_string(),
-                kind: ArchiveEntryKind::File,
-                size: 3,
-            },
-            oxide_core::ArchiveListingEntry {
-                path: "nested/empty.bin".to_string(),
-                kind: ArchiveEntryKind::File,
-                size: 0,
-            },
-        ]
+    let entries = manifest.entries();
+    assert_eq!(entries.len(), 5);
+    assert_manifest_entry(&entries[0], "empty", ArchiveEntryKind::Directory, 0, 0);
+    assert_manifest_entry(&entries[1], "empty/leaf", ArchiveEntryKind::Directory, 0, 0);
+    assert_manifest_entry(&entries[2], "nested", ArchiveEntryKind::Directory, 0, 0);
+    assert_manifest_entry(&entries[3], "nested/data.bin", ArchiveEntryKind::File, 3, 0);
+    assert_manifest_entry(
+        &entries[4],
+        "nested/empty.bin",
+        ArchiveEntryKind::File,
+        0,
+        3,
     );
     Ok(())
 }
@@ -635,19 +883,98 @@ fn archive_reader_exposes_file_manifest() -> Result<(), Box<dyn std::error::Erro
         .writer;
     let reader = ArchiveReader::new(Cursor::new(archive))?;
     let manifest = reader.manifest();
-    assert_eq!(
-        manifest.entries(),
-        vec![oxide_core::ArchiveListingEntry {
-            path: file
-                .path()
-                .file_name()
-                .and_then(|value| value.to_str())
-                .expect("utf8 file name")
-                .to_string(),
-            kind: ArchiveEntryKind::File,
-            size: data.len() as u64,
-        }]
+    let entries = manifest.entries();
+    assert_eq!(entries.len(), 1);
+    assert_manifest_entry(
+        &entries[0],
+        file.path()
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("utf8 file name"),
+        ArchiveEntryKind::File,
+        data.len() as u64,
+        0,
     );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn extract_path_preserves_file_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let data = build_text_fixture(16 * 1024);
+    let file = write_fixture(&data)?;
+    std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o640))?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let restored = tempfile::tempdir()?;
+    let output = restored.path().join("restored.bin");
+    pipeline.extract_path(
+        Cursor::new(archive),
+        &output,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(std::fs::read(&output)?, data);
+    assert_unix_metadata_matches(file.path(), &output)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn extract_directory_archive_preserves_entry_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = tempfile::tempdir()?;
+    std::fs::create_dir_all(source.path().join("nested"))?;
+    write_directory_file(&source, "nested/data.bin", b"payload")?;
+    std::fs::set_permissions(
+        source.path().join("nested"),
+        std::fs::Permissions::from_mode(0o750),
+    )?;
+    std::fs::set_permissions(
+        source.path().join("nested/data.bin"),
+        std::fs::Permissions::from_mode(0o640),
+    )?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let restored_root = tempfile::tempdir()?;
+    let restored = restored_root.path().join("out");
+    pipeline.extract_path(
+        Cursor::new(archive),
+        &restored,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(std::fs::read(restored.join("nested/data.bin"))?, b"payload");
+    assert_unix_metadata_matches(&source.path().join("nested"), &restored.join("nested"))?;
+    assert_unix_metadata_matches(
+        &source.path().join("nested/data.bin"),
+        &restored.join("nested/data.bin"),
+    )?;
     Ok(())
 }
 
