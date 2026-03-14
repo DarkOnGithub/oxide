@@ -1,7 +1,7 @@
 use crate::{ArchiveEntryKind, ArchiveListingEntry, ArchiveTimestamp, OxideError, Result};
 
 pub const ARCHIVE_MANIFEST_MAGIC: [u8; 4] = *b"OXMF";
-pub const ARCHIVE_MANIFEST_VERSION: u16 = 2;
+pub const ARCHIVE_MANIFEST_VERSION: u16 = 1;
 const ARCHIVE_MANIFEST_HEADER_SIZE: usize = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
