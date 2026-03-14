@@ -17,7 +17,7 @@ const CHUNK_TABLE_VERSION: u16 = 1;
 
 /// Global header for an OXZ archive.
 ///
-/// v2 archives use a fixed layout with explicit offsets instead of a generic
+/// v1 archives use a fixed layout with explicit offsets instead of a generic
 /// section table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlobalHeader {

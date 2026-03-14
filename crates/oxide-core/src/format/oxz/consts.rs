@@ -3,7 +3,7 @@ pub const OXZ_MAGIC: [u8; 4] = *b"OXZ\0";
 /// Magic bytes at the start of the OXZ footer.
 pub const OXZ_END_MAGIC: [u8; 4] = *b"END\0";
 /// Current version of the OXZ format.
-pub const OXZ_VERSION: u16 = 3;
+pub const OXZ_VERSION: u16 = 1;
 
 /// Fixed size of the global header in bytes.
 pub const GLOBAL_HEADER_SIZE: usize = 48;
