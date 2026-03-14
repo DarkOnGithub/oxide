@@ -5,5 +5,5 @@ pub mod types;
 pub use archive::ArchivePipeline;
 pub use types::{
     ArchiveEntryKind, ArchiveListingEntry, ArchivePipelineConfig, ArchiveSourceKind,
-    PipelinePerformanceOptions,
+    ArchiveTimestamp, PipelinePerformanceOptions,
 };

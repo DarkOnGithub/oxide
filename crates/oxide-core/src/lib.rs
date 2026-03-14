@@ -39,7 +39,7 @@ pub use format::{
 pub use io::{BoundaryMode, ChunkingMode, ChunkingPolicy, InputScanner, MmapInput};
 pub use pipeline::{
     ArchiveEntryKind, ArchiveListingEntry, ArchivePipeline, ArchivePipelineConfig,
-    ArchiveSourceKind, PipelinePerformanceOptions,
+    ArchiveSourceKind, ArchiveTimestamp, PipelinePerformanceOptions,
 };
 pub use preprocessing::{
     AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat,

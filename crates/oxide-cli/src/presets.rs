@@ -6,8 +6,8 @@ use std::path::Path;
 use oxide_core::{CompressionAlgo, CompressionPreset};
 use serde::Deserialize;
 
-use crate::cli::{parse_size, CompressionArg};
 use crate::AppResult;
+use crate::cli::{CompressionArg, parse_size};
 
 const DEFAULT_PRESETS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/presets.json");
 
@@ -348,7 +348,7 @@ mod tests {
 
     use oxide_core::{CompressionAlgo, CompressionPreset};
 
-    use super::{ArchiveOverrides, PresetFile, DEFAULT_PRESETS_PATH};
+    use super::{ArchiveOverrides, DEFAULT_PRESETS_PATH, PresetFile};
 
     fn parse_fixture(json: &str) -> PresetFile {
         serde_json::from_str(json).expect("fixture should parse")

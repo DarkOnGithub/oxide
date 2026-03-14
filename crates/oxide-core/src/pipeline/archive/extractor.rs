@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,7 +16,10 @@ use crate::types::Result;
 
 use super::super::directory;
 use super::super::types::ArchiveSourceKind;
-use super::directory_restore::DirectoryRestoreWriter;
+use super::directory_restore::{
+    DirectoryExtractSelection, DirectoryRestoreWriter, FilteredDirectoryRestoreWriter,
+    apply_entry_metadata,
+};
 use super::reorder_writer::{BoundedReorderWriter, OrderedChunkWriter};
 use super::telemetry::*;
 use super::types::*;
@@ -44,21 +48,26 @@ impl OrderedChunkWriter for VecChunkWriter {
 
 struct FileChunkWriter {
     writer: BufWriter<fs::File>,
+    path: PathBuf,
+    entry: crate::ArchiveListingEntry,
 }
 
 impl FileChunkWriter {
-    fn create(path: &Path) -> Result<Self> {
+    fn create(path: &Path, entry: crate::ArchiveListingEntry) -> Result<Self> {
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
         let file = fs::File::create(path)?;
         Ok(Self {
             writer: BufWriter::new(file),
+            path: path.to_path_buf(),
+            entry,
         })
     }
 
-    fn flush(&mut self) -> Result<()> {
+    fn flush_and_apply_metadata(&mut self) -> Result<()> {
         self.writer.flush()?;
+        apply_entry_metadata(&self.path, &self.entry)?;
         Ok(())
     }
 }
@@ -79,6 +88,117 @@ struct DecodeStreamOutcome {
     workers: Vec<WorkerRuntimeSnapshot>,
     stage_timings: ExtractStageTimings,
     pipeline_stats: ExtractPipelineStats,
+}
+
+#[derive(Debug)]
+struct DecodePlan {
+    selected_blocks: Vec<bool>,
+    block_count: usize,
+}
+
+impl DecodePlan {
+    fn all(block_count: usize) -> Self {
+        Self {
+            selected_blocks: vec![true; block_count],
+            block_count,
+        }
+    }
+
+    fn from_ranges(headers: &[BlockHeader], ranges: &[Range<u64>]) -> Self {
+        let mut selected_blocks = vec![false; headers.len()];
+        let mut block_count = 0usize;
+        let mut range_index = 0usize;
+        let mut decoded_offset = 0u64;
+
+        for (block_index, header) in headers.iter().enumerate() {
+            let block_start = decoded_offset;
+            let block_end = block_start.saturating_add(header.raw_len as u64);
+            decoded_offset = block_end;
+
+            while range_index < ranges.len() && ranges[range_index].end <= block_start {
+                range_index += 1;
+            }
+
+            let Some(range) = ranges.get(range_index) else {
+                break;
+            };
+
+            if range.start < block_end && block_start < range.end {
+                selected_blocks[block_index] = true;
+                block_count += 1;
+            }
+        }
+
+        Self {
+            selected_blocks,
+            block_count,
+        }
+    }
+
+    fn block_count(&self) -> usize {
+        self.block_count
+    }
+
+    fn includes(&self, block_index: usize) -> bool {
+        self.selected_blocks[block_index]
+    }
+
+    fn project_ranges(&self, headers: &[BlockHeader], ranges: &[Range<u64>]) -> Vec<Range<u64>> {
+        let mut projected: Vec<Range<u64>> = Vec::new();
+        let mut range_index = 0usize;
+        let mut decoded_offset = 0u64;
+        let mut selected_offset = 0u64;
+
+        for (block_index, header) in headers.iter().enumerate() {
+            let block_start = decoded_offset;
+            let block_end = block_start.saturating_add(header.raw_len as u64);
+            decoded_offset = block_end;
+
+            if !self.includes(block_index) {
+                continue;
+            }
+
+            while range_index < ranges.len() && ranges[range_index].end <= block_start {
+                range_index += 1;
+            }
+
+            let mut local_index = range_index;
+            while let Some(range) = ranges.get(local_index) {
+                if range.start >= block_end {
+                    break;
+                }
+
+                let overlap_start = range.start.max(block_start);
+                let overlap_end = range.end.min(block_end);
+                if overlap_start < overlap_end {
+                    let projected_start =
+                        selected_offset + overlap_start.saturating_sub(block_start);
+                    let projected_end = selected_offset + overlap_end.saturating_sub(block_start);
+
+                    if let Some(last) = projected.last_mut() {
+                        if last.end == projected_start {
+                            last.end = projected_end;
+                        } else {
+                            projected.push(projected_start..projected_end);
+                        }
+                    } else {
+                        projected.push(projected_start..projected_end);
+                    }
+                }
+
+                if range.end <= block_end {
+                    local_index += 1;
+                } else {
+                    break;
+                }
+            }
+
+            range_index = local_index.min(ranges.len());
+            selected_offset = selected_offset.saturating_add(header.raw_len as u64);
+        }
+
+        projected
+    }
 }
 
 pub(crate) struct DirectoryRestoreOutcome {
@@ -123,6 +243,7 @@ impl Extractor {
             started_at,
             options,
             sink,
+            None,
             &mut writer,
         )?;
         let payload = writer.into_inner();
@@ -156,16 +277,34 @@ impl Extractor {
         let archive_started = Instant::now();
         let archive = ArchiveReader::new_for_sequential_extract(reader)?;
         let archive_read_elapsed = archive_started.elapsed();
-        let mut writer = FileChunkWriter::create(output_path)?;
-        let decoded = self.decode_archive_to_writer(
+        if archive.source_kind() != ArchiveSourceKind::File {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive is not a file payload",
+            ));
+        }
+
+        let entry = archive.manifest().entries().first().cloned().ok_or(
+            crate::OxideError::InvalidFormat("file archive manifest is empty"),
+        )?;
+        if !matches!(entry.kind, crate::ArchiveEntryKind::File) {
+            return Err(crate::OxideError::InvalidFormat(
+                "file archive manifest does not describe a file entry",
+            ));
+        }
+
+        let mut writer = FileChunkWriter::create(output_path, entry)?;
+        let mut decoded = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
             started_at,
             options,
             sink,
+            None,
             &mut writer,
         )?;
-        writer.flush()?;
+        let output_started = Instant::now();
+        writer.flush_and_apply_metadata()?;
+        decoded.stage_timings.output_write += output_started.elapsed();
 
         if !matches!(
             directory::source_kind_from_flags(decoded.flags),
@@ -213,6 +352,73 @@ impl Extractor {
             started_at,
             options,
             sink,
+            None,
+            &mut writer,
+        )?;
+
+        let restore_stats = writer.finish()?;
+        let mut stage_timings = decoded.stage_timings;
+        let restore_time = restore_stats.directory_decode + restore_stats.output_write;
+        stage_timings.ordered_write = stage_timings.ordered_write.saturating_sub(restore_time);
+        stage_timings.directory_decode += restore_stats.directory_decode;
+        stage_timings.output_write += restore_stats.output_write;
+
+        Ok(DirectoryRestoreOutcome {
+            decoded: DecodedArchivePayload {
+                flags: decoded.flags,
+                payload: Vec::new(),
+                decoded_bytes_total: decoded.decoded_bytes_total,
+                archive_bytes_total: decoded.archive_bytes_total,
+                blocks_total: decoded.blocks_total,
+                workers: decoded.workers,
+                stage_timings,
+                pipeline_stats: decoded.pipeline_stats,
+            },
+            output_bytes_total: restore_stats.output_bytes_total,
+            entry_count: restore_stats.entry_count,
+        })
+    }
+
+    pub(crate) fn extract_directory_to_path_filtered_with_metrics<R, S, T>(
+        &self,
+        reader: R,
+        output_path: &Path,
+        filters: &[S],
+        regex_filters: &[T],
+        started_at: Instant,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<DirectoryRestoreOutcome>
+    where
+        R: Read + Seek,
+        S: AsRef<str>,
+        T: AsRef<str>,
+    {
+        let archive_started = Instant::now();
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
+        let archive_read_elapsed = archive_started.elapsed();
+        if archive.source_kind() != ArchiveSourceKind::Directory {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive is not a directory payload",
+            ));
+        }
+
+        let selection =
+            DirectoryExtractSelection::from_filters(archive.manifest(), filters, regex_filters)?;
+        let selected_ranges = selection.selected_ranges().to_vec();
+        let decode_plan = DecodePlan::from_ranges(archive.block_descriptors(), &selected_ranges);
+        let projected_ranges =
+            decode_plan.project_ranges(archive.block_descriptors(), &selected_ranges);
+        let manifest = selection.into_manifest();
+        let mut writer =
+            FilteredDirectoryRestoreWriter::create(output_path, manifest, projected_ranges)?;
+        let decoded = self.decode_archive_to_writer(
+            archive,
+            archive_read_elapsed,
+            started_at,
+            options,
+            sink,
+            Some(&selected_ranges),
             &mut writer,
         )?;
 
@@ -246,6 +452,7 @@ impl Extractor {
         started_at: Instant,
         options: &RunTelemetryOptions,
         sink: &mut dyn TelemetrySink,
+        selected_ranges: Option<&[Range<u64>]>,
         writer: &mut W,
     ) -> Result<DecodeStreamOutcome>
     where
@@ -256,7 +463,11 @@ impl Extractor {
         stage_timings.archive_read += archive_read_elapsed;
         let source_kind = archive.source_kind();
         let flags = directory::source_kind_flags(source_kind);
-        let block_capacity = archive.block_count() as usize;
+        let decode_plan = match selected_ranges {
+            Some(ranges) => DecodePlan::from_ranges(archive.block_descriptors(), ranges),
+            None => DecodePlan::all(archive.block_count() as usize),
+        };
+        let block_capacity = decode_plan.block_count();
         let worker_count = self.num_workers.max(1);
         let queue_capacity = worker_count.saturating_mul(DECODE_QUEUE_MULTIPLIER).max(1);
         let reorder_pending_limit = queue_capacity
@@ -316,12 +527,27 @@ impl Extractor {
         let mut decode_result_queue_peak = 0usize;
         let mut reorder = BoundedReorderWriter::with_limit(writer, reorder_pending_limit);
 
-        for block_index in 0..block_capacity {
-            let read_started = Instant::now();
-            let (header, block_data) = archive.read_block(block_index as u32)?;
-            stage_timings.archive_read += read_started.elapsed();
+        for block_index in 0..archive.block_count() as usize {
+            let header = archive.block_descriptor(block_index as u32)?;
             archive_bytes_completed =
                 archive_bytes_completed.saturating_add(header.encoded_len as u64);
+
+            if !decode_plan.includes(block_index) {
+                emit_extract_progress_if_due(
+                    source_kind,
+                    started_at,
+                    archive_bytes_completed,
+                    decoded_bytes_completed,
+                    block_capacity as u32,
+                    received as u32,
+                    runtime_state.snapshot(),
+                    emit_every,
+                    &mut last_emit_at,
+                    false,
+                    sink,
+                );
+                continue;
+            }
 
             while submitted.saturating_sub(received) >= queue_capacity {
                 receive_decode_result_to_writer(
@@ -350,6 +576,10 @@ impl Extractor {
                     sink,
                 );
             }
+
+            let read_started = Instant::now();
+            let (_header, block_data) = archive.read_block(block_index as u32)?;
+            stage_timings.archive_read += read_started.elapsed();
 
             let submit_started = Instant::now();
             task_tx
