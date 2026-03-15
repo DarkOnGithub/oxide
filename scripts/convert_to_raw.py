@@ -1,16 +1,5 @@
-#!/usr/bin/env python3
-"""
-Convert compressed images and audio to raw uncompressed formats in-place.
-- Images: JPEG/PNG -> BMP (uncompressed standard format)
-- Audio: Keep as WAV (PCM uncompressed)
-Total image output limited to ~0.5GB
-"""
-
-import os
-import sys
 from pathlib import Path
 from PIL import Image
-import wave
 
 
 def get_image_files(directory):
