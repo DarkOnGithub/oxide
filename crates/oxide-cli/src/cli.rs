@@ -46,6 +46,14 @@ pub struct ArchiveArgs {
     #[arg(long, value_enum)]
     pub compression: Option<CompressionArg>,
 
+    /// Store blocks without preprocessing.
+    #[arg(long, default_value_t = false)]
+    pub skip_preprocessing: bool,
+
+    /// Store blocks without compression.
+    #[arg(long, default_value_t = false)]
+    pub skip_compression: bool,
+
     /// Explicit zstd level (1-22). Only valid with `--compression zstd` or zstd presets.
     #[arg(long)]
     pub zstd_level: Option<i32>,
@@ -309,6 +317,26 @@ mod tests {
 
         match cli.command {
             Commands::Archive(args) => assert_eq!(args.zstd_level, Some(19)),
+            _ => panic!("expected archive command"),
+        }
+    }
+
+    #[test]
+    fn archive_command_accepts_skip_processing_flags_together() {
+        let cli = Cli::try_parse_from([
+            "oxide",
+            "archive",
+            "demo/input",
+            "--skip-preprocessing",
+            "--skip-compression",
+        ])
+        .expect("archive arguments should parse");
+
+        match cli.command {
+            Commands::Archive(args) => {
+                assert!(args.skip_preprocessing);
+                assert!(args.skip_compression);
+            }
             _ => panic!("expected archive command"),
         }
     }
