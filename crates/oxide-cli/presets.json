@@ -27,7 +27,8 @@
         "inflight_bytes": "3G",
         "producer_threads": 4,
         "result_wait_ms": 0,
-        "directory_mmap_threshold": "1M"
+        "directory_mmap_threshold": "1M",
+        "worker_threads": 6
       },
       "balanced": {
         "compression": "zstd",
