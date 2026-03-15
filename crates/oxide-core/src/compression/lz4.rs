@@ -15,7 +15,6 @@ const HASH_LOG: u32 = 12;
 const HASH_SIZE: usize = 1 << HASH_LOG;
 const HASH_SEED: u32 = 2_654_435_761;
 const MAX_OFFSET: usize = u16::MAX as usize;
-const MAX_DICTIONARY_BYTES: usize = MAX_OFFSET;
 
 #[derive(Debug, Default)]
 pub(crate) struct Lz4Scratch {
@@ -54,13 +53,12 @@ impl CompressionTuning {
 /// Compresses data using the LZ4 algorithm.
 pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     let mut scratch = Lz4Scratch::default();
-    apply_with_scratch(data, CompressionPreset::Default, None, &mut scratch)
+    apply_with_scratch(data, CompressionPreset::Default, &mut scratch)
 }
 
 pub(crate) fn apply_with_scratch(
     data: &[u8],
     preset: CompressionPreset,
-    dictionary: Option<&[u8]>,
     scratch: &mut Lz4Scratch,
 ) -> Result<Vec<u8>> {
     if data.len() > u32::MAX as usize {
@@ -73,32 +71,14 @@ pub(crate) fn apply_with_scratch(
     output.extend_from_slice(&(data.len() as u32).to_le_bytes());
 
     let tuning = CompressionTuning::for_preset(preset);
-    let dictionary = dictionary.filter(|dictionary| !dictionary.is_empty());
-    if let Some(dictionary) = dictionary {
-        let prefix = trim_dictionary(dictionary);
-        scratch.history.clear();
-        scratch
-            .history
-            .reserve(prefix.len().saturating_add(data.len()));
-        scratch.history.extend_from_slice(prefix);
-        scratch.history.extend_from_slice(data);
-        let history = scratch.history.as_slice();
-        let table = &mut scratch.table;
-        compress_block(history, prefix.len(), &mut output, table, tuning);
-    } else {
-        let table = &mut scratch.table;
-        compress_block(data, 0, &mut output, table, tuning);
-    }
+    let table = &mut scratch.table;
+    compress_block(data, 0, &mut output, table, tuning);
 
     Ok(output)
 }
 
 /// Decompresses data using the LZ4 algorithm.
 pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
-    reverse_with_dictionary(data, None)
-}
-
-pub(crate) fn reverse_with_dictionary(data: &[u8], dictionary: Option<&[u8]>) -> Result<Vec<u8>> {
     if data.len() < 4 {
         return Err(OxideError::DecompressionError(
             "lz4 decode failed: missing 4-byte size prefix".to_string(),
@@ -106,7 +86,7 @@ pub(crate) fn reverse_with_dictionary(data: &[u8], dictionary: Option<&[u8]>) ->
     }
 
     let expected_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    decode::decompress_block(&data[4..], expected_size, dictionary)
+    decode::decompress_block(&data[4..], expected_size)
         .map_err(|err| OxideError::DecompressionError(format!("lz4 decode failed: {err}")))
 }
 
@@ -129,7 +109,6 @@ fn compress_block(
     }
 
     Lz4Scratch::prepare_table(table);
-    seed_dictionary_table(history, input_start, table);
     let mut anchor = input_start;
     let mut search_pos = input_start + 1;
     let mflimit = history.len() - MFLIMIT;
@@ -215,30 +194,6 @@ fn compress_block(
     }
 
     emit_last_literals(output, history, anchor);
-}
-
-fn seed_dictionary_table(history: &[u8], input_start: usize, table: &mut [u32]) {
-    if input_start == 0 {
-        return;
-    }
-
-    let seed_start = input_start.saturating_sub(MAX_OFFSET);
-    let seed_end = input_start.saturating_sub(MIN_MATCH - 1);
-    for position in seed_start..seed_end {
-        let hash = hash_sequence(unsafe {
-            // SAFETY: seed_end is capped so position + 4 <= history.len().
-            load_u32(history.as_ptr().add(position))
-        });
-        table[hash] = (position as u32) + 1;
-    }
-}
-
-fn trim_dictionary(dictionary: &[u8]) -> &[u8] {
-    if dictionary.len() > MAX_DICTIONARY_BYTES {
-        &dictionary[dictionary.len() - MAX_DICTIONARY_BYTES..]
-    } else {
-        dictionary
-    }
 }
 
 #[inline]

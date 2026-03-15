@@ -1,11 +1,15 @@
 use std::fs;
 use std::io::{BufWriter, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use anyhow::anyhow;
+use regex::RegexSet;
+
+use crate::OxideError;
 use crate::format::ArchiveManifest;
 use crate::types::Result;
-use crate::OxideError;
 
 use super::super::directory;
 use super::reorder_writer::OrderedChunkWriter;
@@ -19,9 +23,72 @@ pub(crate) struct DirectoryRestoreStats {
 }
 
 #[derive(Debug)]
+pub(crate) struct DirectoryExtractSelection {
+    manifest: ArchiveManifest,
+    selected_ranges: Vec<Range<u64>>,
+}
+
+impl DirectoryExtractSelection {
+    pub(crate) fn from_filters<S: AsRef<str>, T: AsRef<str>>(
+        manifest: &ArchiveManifest,
+        filters: &[S],
+        regex_filters: &[T],
+    ) -> Result<Self> {
+        let normalized_filters = normalize_filters(filters)?;
+        let regex_set = compile_regex_filters(regex_filters)?;
+        if normalized_filters.is_empty() && regex_set.is_none() {
+            return Err(anyhow!("path filters cannot be empty").into());
+        }
+
+        let mut entries = Vec::new();
+        let mut selected_ranges = Vec::new();
+        for entry in manifest.entries() {
+            let selected = normalized_filters
+                .iter()
+                .any(|filter| path_matches_filter(&entry.path, filter))
+                || regex_set
+                    .as_ref()
+                    .is_some_and(|patterns| patterns.is_match(&entry.path));
+
+            if selected {
+                entries.push(entry.clone());
+                if matches!(entry.kind, crate::ArchiveEntryKind::File) && entry.size > 0 {
+                    selected_ranges.push(entry.content_range());
+                }
+            }
+        }
+
+        if entries.is_empty() {
+            return Err(anyhow!("path filters did not match any archive entries").into());
+        }
+
+        Ok(Self {
+            manifest: ArchiveManifest::new(entries),
+            selected_ranges,
+        })
+    }
+
+    pub(crate) fn selected_ranges(&self) -> &[Range<u64>] {
+        &self.selected_ranges
+    }
+
+    pub(crate) fn into_manifest(self) -> ArchiveManifest {
+        self.manifest
+    }
+}
+
+#[derive(Debug)]
 struct PendingFile {
     remaining: u64,
     writer: BufWriter<fs::File>,
+    path: PathBuf,
+    entry: crate::ArchiveListingEntry,
+}
+
+#[derive(Debug)]
+struct PendingDirectory {
+    path: PathBuf,
+    entry: crate::ArchiveListingEntry,
 }
 
 #[derive(Debug)]
@@ -30,7 +97,16 @@ pub(crate) struct DirectoryRestoreWriter {
     entries: Vec<crate::ArchiveListingEntry>,
     next_entry: usize,
     pending_file: Option<PendingFile>,
+    pending_directories: Vec<PendingDirectory>,
     stats: DirectoryRestoreStats,
+}
+
+#[derive(Debug)]
+pub(crate) struct FilteredDirectoryRestoreWriter {
+    inner: DirectoryRestoreWriter,
+    selected_ranges: Vec<Range<u64>>,
+    next_range: usize,
+    input_offset: u64,
 }
 
 impl DirectoryRestoreWriter {
@@ -41,6 +117,7 @@ impl DirectoryRestoreWriter {
             entries: manifest.entries().to_vec(),
             next_entry: 0,
             pending_file: None,
+            pending_directories: Vec::new(),
             stats: DirectoryRestoreStats::default(),
         })
     }
@@ -59,6 +136,7 @@ impl DirectoryRestoreWriter {
                 "directory restore ended before all entries completed",
             ));
         }
+        self.finalize_directories()?;
         Ok(self.stats)
     }
 
@@ -72,8 +150,12 @@ impl DirectoryRestoreWriter {
                 crate::ArchiveEntryKind::Directory => {
                     let output_started = Instant::now();
                     let out_path = directory::join_safe(&self.root, &entry.path)?;
-                    fs::create_dir_all(out_path)?;
+                    fs::create_dir_all(&out_path)?;
                     self.stats.output_write += output_started.elapsed();
+                    self.pending_directories.push(PendingDirectory {
+                        path: out_path,
+                        entry,
+                    });
                 }
                 crate::ArchiveEntryKind::File => {
                     let output_started = Instant::now();
@@ -81,22 +163,55 @@ impl DirectoryRestoreWriter {
                     if let Some(parent) = out_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
-                    let file = fs::File::create(out_path)?;
+                    let file = fs::File::create(&out_path)?;
                     self.stats.output_write += output_started.elapsed();
 
                     if entry.size == 0 {
+                        let metadata_started = Instant::now();
+                        apply_entry_metadata(&out_path, &entry)?;
+                        self.stats.output_write += metadata_started.elapsed();
                         continue;
                     }
 
                     self.pending_file = Some(PendingFile {
                         remaining: entry.size,
                         writer: BufWriter::new(file),
+                        path: out_path,
+                        entry,
                     });
                 }
             }
         }
 
         Ok(())
+    }
+
+    fn finalize_directories(&mut self) -> Result<()> {
+        while let Some(directory) = self.pending_directories.pop() {
+            let started = Instant::now();
+            apply_entry_metadata(&directory.path, &directory.entry)?;
+            self.stats.output_write += started.elapsed();
+        }
+        Ok(())
+    }
+}
+
+impl FilteredDirectoryRestoreWriter {
+    pub(crate) fn create(
+        root: &Path,
+        manifest: ArchiveManifest,
+        selected_ranges: Vec<Range<u64>>,
+    ) -> Result<Self> {
+        Ok(Self {
+            inner: DirectoryRestoreWriter::create(root, manifest)?,
+            selected_ranges,
+            next_range: 0,
+            input_offset: 0,
+        })
+    }
+
+    pub(crate) fn finish(&mut self) -> Result<DirectoryRestoreStats> {
+        self.inner.finish()
     }
 }
 
@@ -129,7 +244,12 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
                     pending.writer.flush()?;
                 }
                 self.stats.output_write += output_started.elapsed();
-                self.pending_file = None;
+                let pending = self.pending_file.take().ok_or(OxideError::InvalidFormat(
+                    "directory restore missing pending file after write completion",
+                ))?;
+                let metadata_started = Instant::now();
+                apply_entry_metadata(&pending.path, &pending.entry)?;
+                self.stats.output_write += metadata_started.elapsed();
                 let decode_started = Instant::now();
                 self.advance_entries()?;
                 self.stats.directory_decode += decode_started.elapsed();
@@ -138,4 +258,181 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
 
         Ok(())
     }
+}
+
+impl OrderedChunkWriter for FilteredDirectoryRestoreWriter {
+    fn write_chunk(&mut self, bytes: &[u8]) -> Result<()> {
+        let chunk_start = self.input_offset;
+        let chunk_end = chunk_start.saturating_add(bytes.len() as u64);
+
+        while self.next_range < self.selected_ranges.len()
+            && self.selected_ranges[self.next_range].end <= chunk_start
+        {
+            self.next_range += 1;
+        }
+
+        let mut range_index = self.next_range;
+        while range_index < self.selected_ranges.len() {
+            let range = &self.selected_ranges[range_index];
+            if range.start >= chunk_end {
+                break;
+            }
+
+            let write_start = range.start.max(chunk_start) - chunk_start;
+            let write_end = range.end.min(chunk_end) - chunk_start;
+            if write_start < write_end {
+                self.inner
+                    .write_chunk(&bytes[write_start as usize..write_end as usize])?;
+            }
+
+            if range.end <= chunk_end {
+                range_index += 1;
+            } else {
+                break;
+            }
+        }
+
+        self.next_range = range_index;
+        self.input_offset = chunk_end;
+        Ok(())
+    }
+}
+
+fn normalize_filters<S: AsRef<str>>(filters: &[S]) -> Result<Vec<String>> {
+    filters
+        .iter()
+        .map(|filter| normalize_filter(filter.as_ref()))
+        .collect()
+}
+
+fn compile_regex_filters<S: AsRef<str>>(filters: &[S]) -> Result<Option<RegexSet>> {
+    if filters.is_empty() {
+        return Ok(None);
+    }
+
+    let patterns = filters
+        .iter()
+        .map(|filter| filter.as_ref().trim())
+        .collect::<Vec<_>>();
+    if patterns.iter().any(|pattern| pattern.is_empty()) {
+        return Err(anyhow!("regex filters must be non-empty").into());
+    }
+
+    let set = RegexSet::new(&patterns)
+        .map_err(|error| crate::OxideError::Other(anyhow!("invalid regex filter: {error}")))?;
+    Ok(Some(set))
+}
+
+fn normalize_filter(raw: &str) -> Result<String> {
+    let replaced = raw.trim().replace('\\', "/");
+    if replaced.is_empty() {
+        return Err(anyhow!("path filters must be non-empty relative paths").into());
+    }
+
+    let mut parts = Vec::new();
+    for part in replaced.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => {
+                return Err(
+                    anyhow!("path filters must not contain parent directory traversal").into(),
+                );
+            }
+            _ => parts.push(part),
+        }
+    }
+
+    if parts.is_empty() || raw.trim_start().starts_with('/') {
+        return Err(anyhow!("path filters must be non-empty relative paths").into());
+    }
+
+    Ok(parts.join("/"))
+}
+
+fn path_matches_filter(path: &str, filter: &str) -> bool {
+    path == filter
+        || path
+            .strip_prefix(filter)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+pub(crate) fn apply_entry_metadata(path: &Path, entry: &crate::ArchiveListingEntry) -> Result<()> {
+    apply_owner(path, entry.uid, entry.gid)?;
+    apply_mode(path, entry.mode)?;
+    apply_mtime(path, entry.mtime)?;
+    Ok(())
+}
+
+fn apply_mode(path: &Path, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_readonly(mode & 0o200 == 0);
+        fs::set_permissions(path, permissions)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn apply_owner(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    use std::ffi::CString;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| OxideError::InvalidFormat("path contains interior nul byte"))?;
+    let status = unsafe { libc::chown(path.as_ptr(), uid, gid) };
+    if status == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EPERM | libc::EACCES | libc::ENOTSUP | libc::EINVAL) => Ok(()),
+        _ => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_owner(_: &Path, _: u32, _: u32) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn apply_mtime(path: &Path, mtime: crate::ArchiveTimestamp) -> Result<()> {
+    use std::ffi::CString;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| OxideError::InvalidFormat("path contains interior nul byte"))?;
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: mtime.seconds as libc::time_t,
+            tv_nsec: mtime.nanoseconds as libc::c_long,
+        },
+    ];
+    let status = unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_mtime(_: &Path, _: crate::ArchiveTimestamp) -> Result<()> {
+    Ok(())
 }

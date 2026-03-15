@@ -305,6 +305,10 @@ impl WorkerPoolHandle {
         }
     }
 
+    pub(crate) fn results_receiver(&self) -> &Receiver<Result<CompressedBlock>> {
+        &self.results_rx
+    }
+
     /// Shuts down the pool, drains all submitted results, and joins workers.
     pub fn finish(mut self) -> Result<Vec<CompressedBlock>> {
         self.shutdown();

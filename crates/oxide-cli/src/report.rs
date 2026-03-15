@@ -843,6 +843,7 @@ fn thread_stage_summary(thread: &ThreadReport, order: &[(&str, &str)]) -> Option
 fn compression_label(compression: CompressionAlgo) -> &'static str {
     match compression {
         CompressionAlgo::Lz4 => "lz4",
+        CompressionAlgo::Zstd => "zstd",
     }
 }
 

@@ -28,6 +28,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         block_size,
         workers,
         compression,
+        zstd_level,
         preset,
         preset_file,
         pool_capacity,
@@ -48,6 +49,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         preset.as_deref(),
         ArchiveOverrides {
             compression: compression.map(Into::into),
+            zstd_level,
             block_size,
             workers,
             pool_capacity,
@@ -142,6 +144,8 @@ pub fn extract(args: ExtractArgs) -> AppResult {
     let ExtractArgs {
         input,
         output,
+        only,
+        only_regex,
         stats_interval_ms,
         workers,
         telemetry_details,
@@ -156,12 +160,23 @@ pub fn extract(args: ExtractArgs) -> AppResult {
     };
 
     let mut sink = ExtractCliSink::new();
-    let report = pipeline.extract_path(
-        File::open(&input)?,
-        &output_path,
-        telemetry_options,
-        Some(&mut sink),
-    )?;
+    let report = if only.is_empty() && only_regex.is_empty() {
+        pipeline.extract_path(
+            File::open(&input)?,
+            &output_path,
+            telemetry_options,
+            Some(&mut sink),
+        )?
+    } else {
+        pipeline.extract_path_filtered_with_regex(
+            File::open(&input)?,
+            &output_path,
+            &only,
+            &only_regex,
+            telemetry_options,
+            Some(&mut sink),
+        )?
+    };
     if sink.rendered_line() {
         eprintln!();
     }
@@ -189,6 +204,7 @@ fn build_archive_pipeline(
 ) -> ArchivePipeline {
     let mut performance = PipelinePerformanceOptions::default();
     performance.compression_preset = settings.compression_preset;
+    performance.zstd_level = settings.zstd_level;
     performance.max_inflight_bytes = settings.inflight_bytes.max(1);
     performance.max_inflight_blocks_per_worker = settings.inflight_blocks_per_worker.max(1);
     performance.directory_stream_read_buffer_size = settings.stream_read_buffer.max(1);
@@ -230,13 +246,34 @@ fn resolve_archive_workers(requested_workers: usize, producer_threads: usize) ->
     }
 
     let physical_cores = num_cpus::get_physical().max(1);
-    let reserved_threads = producer_threads.saturating_add(1);
+    let reserved_producers = producer_threads.min(2);
+    let reserved_threads = reserved_producers.saturating_add(1);
     physical_cores.saturating_sub(reserved_threads).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_archive_workers;
+
+    #[test]
+    fn explicit_worker_count_is_preserved() {
+        assert_eq!(resolve_archive_workers(6, 8), 6);
+    }
+
+    #[test]
+    fn auto_worker_count_caps_reserved_producer_threads() {
+        let physical_cores = num_cpus::get_physical().max(1);
+        let expected = physical_cores.saturating_sub(3).max(1);
+
+        assert_eq!(resolve_archive_workers(0, 4), expected);
+        assert_eq!(resolve_archive_workers(0, 8), expected);
+    }
 }
 
 fn compression_name(compression: CompressionAlgo) -> &'static str {
     match compression {
         CompressionAlgo::Lz4 => "lz4",
+        CompressionAlgo::Zstd => "zstd",
     }
 }
 

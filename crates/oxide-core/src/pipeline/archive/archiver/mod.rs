@@ -8,6 +8,7 @@ use crate::format::{ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter};
 use crate::io::{ChunkingPolicy, InputScanner};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetrySink};
+use crate::types::ChunkEncodingPlan;
 use crate::types::Result;
 
 pub mod directory;
@@ -56,14 +57,7 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries, manifest| {
-                ArchiveWriter::with_dictionaries_and_manifest(
-                    writer,
-                    pool,
-                    dictionaries,
-                    Some(manifest),
-                )
-            },
+            |writer, pool, manifest| ArchiveWriter::with_manifest(writer, pool, Some(manifest)),
         )
     }
 
@@ -89,13 +83,8 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries, manifest| {
-                SeekableArchiveWriter::with_dictionaries_and_manifest(
-                    writer,
-                    pool,
-                    dictionaries,
-                    Some(manifest),
-                )
+            |writer, pool, manifest| {
+                SeekableArchiveWriter::with_manifest(writer, pool, Some(manifest))
             },
         )
     }
@@ -114,12 +103,11 @@ impl<'a> Archiver<'a> {
             writer,
             options,
             sink,
-            |writer, pool, dictionaries, manifest, reorder_limit| {
+            |writer, pool, manifest, reorder_limit| {
                 ArchiveWriter::with_reorder_limit_and_manifest(
                     writer,
                     pool,
                     reorder_limit,
-                    dictionaries,
                     Some(manifest),
                 )
             },
@@ -140,12 +128,11 @@ impl<'a> Archiver<'a> {
             writer,
             options,
             sink,
-            |writer, pool, dictionaries, manifest, reorder_limit| {
+            |writer, pool, manifest, reorder_limit| {
                 SeekableArchiveWriter::with_reorder_limit_and_manifest(
                     writer,
                     pool,
                     reorder_limit,
-                    dictionaries,
                     Some(manifest),
                 )
             },
@@ -167,14 +154,7 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries, manifest| {
-                ArchiveWriter::with_dictionaries_and_manifest(
-                    writer,
-                    pool,
-                    dictionaries,
-                    Some(manifest),
-                )
-            },
+            |writer, pool, manifest| ArchiveWriter::with_manifest(writer, pool, Some(manifest)),
         )
     }
 
@@ -193,13 +173,8 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, dictionaries, manifest| {
-                SeekableArchiveWriter::with_dictionaries_and_manifest(
-                    writer,
-                    pool,
-                    dictionaries,
-                    Some(manifest),
-                )
+            |writer, pool, manifest| {
+                SeekableArchiveWriter::with_manifest(writer, pool, Some(manifest))
             },
         )
     }
@@ -216,12 +191,7 @@ impl<'a> Archiver<'a> {
     where
         W: Write,
         AW: ArchiveBlockWriter<InnerWriter = W>,
-        F: FnOnce(
-            W,
-            Arc<BufferPool>,
-            Vec<crate::format::StoredDictionary>,
-            crate::format::ArchiveManifest,
-        ) -> AW,
+        F: FnOnce(W, Arc<BufferPool>, crate::format::ArchiveManifest) -> AW,
     {
         archive_prepared_with_writer(
             self.config,
@@ -235,10 +205,14 @@ impl<'a> Archiver<'a> {
     }
 
     pub fn prepare_file(&self, path: &Path, block_size: usize) -> Result<PreparedInput> {
-        let scanner = InputScanner::with_chunking_policy(ChunkingPolicy::for_preset(
-            block_size,
-            self.config.performance.compression_preset,
-        ));
+        let scanner = InputScanner::with_chunking_policy_and_plan(
+            ChunkingPolicy::for_preset(block_size, self.config.performance.compression_preset),
+            ChunkEncodingPlan::new(
+                self.config.compression_algo,
+                self.config.performance.compression_preset,
+            )
+            .with_zstd_level(self.config.performance.zstd_level),
+        );
         let batches = scanner.scan_file(path)?;
         let input_bytes_total = batches.iter().map(|batch| batch.len() as u64).sum();
         let manifest = file_manifest(path, input_bytes_total)?;

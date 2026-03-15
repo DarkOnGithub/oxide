@@ -2,6 +2,7 @@ use crate::{CompressionAlgo, CompressionPreset, Result};
 
 pub mod lz4;
 pub(crate) mod scratch;
+pub mod zstd;
 
 pub(crate) use scratch::CompressionScratchArena;
 
@@ -11,7 +12,7 @@ pub struct CompressionRequest<'a> {
     pub data: &'a [u8],
     pub algo: CompressionAlgo,
     pub preset: CompressionPreset,
-    pub dictionary: Option<&'a [u8]>,
+    pub zstd_level: Option<i32>,
 }
 
 impl<'a> CompressionRequest<'a> {
@@ -20,7 +21,7 @@ impl<'a> CompressionRequest<'a> {
             data,
             algo,
             preset: CompressionPreset::Default,
-            dictionary: None,
+            zstd_level: None,
         }
     }
 }
@@ -30,7 +31,7 @@ impl<'a> CompressionRequest<'a> {
 pub struct DecompressionRequest<'a> {
     pub data: &'a [u8],
     pub algo: CompressionAlgo,
-    pub dictionary: Option<&'a [u8]>,
+    pub raw_len: Option<usize>,
 }
 
 impl<'a> DecompressionRequest<'a> {
@@ -38,8 +39,13 @@ impl<'a> DecompressionRequest<'a> {
         Self {
             data,
             algo,
-            dictionary: None,
+            raw_len: None,
         }
+    }
+
+    pub fn with_raw_len(mut self, raw_len: usize) -> Self {
+        self.raw_len = Some(raw_len);
+        self
     }
 }
 
@@ -54,12 +60,10 @@ pub(crate) fn apply_compression_request_with_scratch(
     scratch: &mut CompressionScratchArena,
 ) -> Result<Vec<u8>> {
     match request.algo {
-        CompressionAlgo::Lz4 => lz4::apply_with_scratch(
-            request.data,
-            request.preset,
-            request.dictionary,
-            scratch.lz4(),
-        ),
+        CompressionAlgo::Lz4 => {
+            lz4::apply_with_scratch(request.data, request.preset, scratch.lz4())
+        }
+        CompressionAlgo::Zstd => zstd::apply(request.data, request.preset, request.zstd_level),
     }
 }
 
@@ -70,6 +74,7 @@ pub fn reverse_compression(data: &[u8], algo: CompressionAlgo) -> Result<Vec<u8>
 
 pub(crate) fn reverse_compression_request(request: DecompressionRequest<'_>) -> Result<Vec<u8>> {
     match request.algo {
-        CompressionAlgo::Lz4 => lz4::reverse_with_dictionary(request.data, request.dictionary),
+        CompressionAlgo::Lz4 => lz4::reverse(request.data),
+        CompressionAlgo::Zstd => zstd::reverse(request.data, request.raw_len),
     }
 }
