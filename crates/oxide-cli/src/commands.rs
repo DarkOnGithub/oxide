@@ -28,6 +28,8 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         block_size,
         workers,
         compression,
+        skip_preprocessing,
+        skip_compression,
         zstd_level,
         preset,
         preset_file,
@@ -49,6 +51,8 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         preset.as_deref(),
         ArchiveOverrides {
             compression: compression.map(Into::into),
+            skip_preprocessing,
+            skip_compression,
             zstd_level,
             block_size,
             workers,
@@ -220,6 +224,8 @@ fn build_archive_pipeline(
         buffer_pool,
         settings.compression,
     );
+    config.skip_preprocessing = settings.skip_preprocessing;
+    config.skip_compression = settings.skip_compression;
     config.performance = performance;
     ArchivePipeline::new(config)
 }

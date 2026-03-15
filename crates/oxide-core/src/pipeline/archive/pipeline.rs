@@ -30,6 +30,8 @@ pub struct ArchivePipeline {
     pub(crate) scanner: InputScanner,
     pub(crate) num_workers: usize,
     pub(crate) compression_algo: CompressionAlgo,
+    pub(crate) skip_preprocessing: bool,
+    pub(crate) skip_compression: bool,
     pub(crate) buffer_pool: Arc<BufferPool>,
     pub(crate) performance: PipelinePerformanceOptions,
 }
@@ -41,6 +43,8 @@ impl ArchivePipeline {
             scanner: InputScanner::new(config.target_block_size),
             num_workers: config.workers.max(1),
             compression_algo: config.compression_algo,
+            skip_preprocessing: config.skip_preprocessing,
+            skip_compression: config.skip_compression,
             buffer_pool: config.buffer_pool,
             performance: config.performance,
         }
@@ -51,6 +55,8 @@ impl ArchivePipeline {
             target_block_size: self.scanner.target_block_size(),
             workers: self.num_workers,
             compression_algo: self.compression_algo,
+            skip_preprocessing: self.skip_preprocessing,
+            skip_compression: self.skip_compression,
             buffer_pool: Arc::clone(&self.buffer_pool),
             performance: self.performance.clone(),
         }

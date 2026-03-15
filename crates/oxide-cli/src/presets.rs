@@ -16,6 +16,8 @@ pub struct ResolvedArchiveSettings {
     pub profile_name: String,
     pub profile_source: String,
     pub compression: CompressionAlgo,
+    pub skip_preprocessing: bool,
+    pub skip_compression: bool,
     pub compression_preset: CompressionPreset,
     pub zstd_level: Option<i32>,
     pub block_size: usize,
@@ -36,6 +38,8 @@ pub struct ResolvedArchiveSettings {
 #[derive(Debug, Default)]
 pub struct ArchiveOverrides {
     pub compression: Option<CompressionAlgo>,
+    pub skip_preprocessing: bool,
+    pub skip_compression: bool,
     pub zstd_level: Option<i32>,
     pub block_size: Option<usize>,
     pub workers: Option<usize>,
@@ -186,6 +190,8 @@ impl ArchivePresetConfig {
             profile_name: preset_name.to_string(),
             profile_source: source_label.to_string(),
             compression,
+            skip_preprocessing: overrides.skip_preprocessing,
+            skip_compression: overrides.skip_compression,
             compression_preset,
             zstd_level,
             block_size: resolve_usize(overrides.block_size, self.block_size, "block_size")?,
@@ -412,6 +418,8 @@ mod tests {
 
         assert_eq!(preset.profile_name, "compact");
         assert_eq!(preset.compression, CompressionAlgo::Lz4);
+        assert!(!preset.skip_preprocessing);
+        assert!(!preset.skip_compression);
         assert_eq!(preset.compression_preset, CompressionPreset::High);
         assert_eq!(preset.zstd_level, None);
         assert_eq!(preset.block_size, 16 * 1024 * 1024);

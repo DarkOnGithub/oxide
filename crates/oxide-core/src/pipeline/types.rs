@@ -276,6 +276,10 @@ pub struct ArchivePipelineConfig {
     pub buffer_pool: Arc<BufferPool>,
     /// Compression algorithm to use.
     pub compression_algo: CompressionAlgo,
+    /// Whether preprocessing should be skipped entirely.
+    pub skip_preprocessing: bool,
+    /// Whether compression should be skipped entirely.
+    pub skip_compression: bool,
     /// Performance tuning options.
     pub performance: PipelinePerformanceOptions,
 }
@@ -293,6 +297,8 @@ impl ArchivePipelineConfig {
             workers,
             buffer_pool,
             compression_algo,
+            skip_preprocessing: false,
+            skip_compression: false,
             performance: PipelinePerformanceOptions::default(),
         }
     }
