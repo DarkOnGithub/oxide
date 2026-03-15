@@ -28,9 +28,6 @@ anyhow = "1.0"
 
 # Logging/tracing
 tracing = "0.1"
-
-# Utilities
-byteorder = "1.5"
 infer = "0.16"
 image = "0.25.9"
 symphonia = "0.5.5"
