@@ -1,0 +1,244 @@
+\documentclass{article}
+
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage[T1]{fontenc}
+\usepackage{bbding}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{pgfgantt}
+\usepackage[margin=2cm]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{verbatim}
+\usepackage{setspace}
+\usepackage{tabularx}
+\usepackage{titling}
+
+\newcommand\Tstrut{\rule{0pt}{2.6ex}}
+\newcommand\Bstrut{\rule[-0.9ex]{0pt}{0pt}}
+\newcommand{\TBstrut}{\Tstrut\Bstrut}
+\renewcommand{\contentsname}{Sommaire}
+\newcommand{\stepimage}[3][0.3\textwidth]{%
+  \minipage{#1}
+    \includegraphics[width=\linewidth]{ressources/#2}
+    \caption{#3}
+  \endminipage\hfill
+}
+
+\title{\vspace{-3.0cm}
+\rule{0.65\linewidth}{3pt}\\[0.7em]  % Upper line, 3pt thick
+Rapport de soutenance 1 - Oxide\\[0.5em]
+\rule{0.65\linewidth}{1pt}           % Lower line, 1pt thick
+}
+
+\author{
+    \begin{tabular}{cc}
+        \textbf{Alexandre Joaquim Lima Salgueiro} & \textbf{Romain Bailly} \\
+        \texttt{alexandre-joaquim.lima-salgueiro} & \texttt{romain.bailly} \\[2ex]
+        \textbf{Willian Huang Hong} & \textbf{Tom Huynh} \\
+        \texttt{william.huang-hong} & \texttt{tom.huynh}
+    \end{tabular}
+}
+
+\date{13 mars 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{spacing}{0.9}
+\tableofcontents
+\end{spacing}
+
+\vspace{1cm}
+
+\section{Rôle et mission de chaque membre}
+
+\subsection{Tom Huynh}
+
+\subsubsection{Mission principale}
+
+En tant que responsable de l'infrastructure technique, ma mission consiste à définir et à mettre en œuvre le socle logiciel du projet Oxide. Mon rôle s'articule autour de la conception du format de fichier et de l'orchestration des flux de données, garantissant ainsi la performance et la fiabilité de la chaîne de traitement.
+
+\subsubsection*{Responsabilités et axes de développement}
+
+\begin{itemize}
+    \item Conception et implémentation du format natif \texttt{.oxz} (manifeste, métadonnées, blocs de données) ;
+    \item Intégration et orchestration des algorithmes de compression dans la chaîne de traitement ;
+    \item Mise en place du système de routage intelligent basé sur le type de contenu ;
+    \item Développement d'une architecture de traitement parallèle pour l'extraction et la compression.
+\end{itemize}
+
+
+
+\section{Objectifs et état d'avancement}
+
+\subsection{Tom Huynh}
+
+\subsubsection{Objectifs du projet}
+
+Pour la première soutenance, les objectifs portent principalement sur l'infrastructure du projet. Ils concernent la mise en place du format natif \texttt{.oxz}, du routage des données dans le pipeline de traitement, ainsi que l'intégration des premiers algorithmes de compression.
+
+\subsubsection*{Éléments attendus et état pour la première soutenance}
+
+
+\begin{itemize}
+    \item Un format \texttt{.oxz} fonctionnel, utilisable pour l'archivage et l'extraction ;
+    \item Une logique de routage capable d'identifier le type global d'un fichier et de préparer son pré-traitement ;
+    \item Un pipeline parallèle de compression et d'extraction en place ;
+    \item L'intégration de la compression universelle avec \texttt{LZ4} ;
+\end{itemize}
+
+\newpage
+\section{Choix technologiques et algorithmiques}
+
+\subsection{Tom Huynh}
+
+\subsubsection{Conception du format natif \texttt{.oxz}}
+
+Le développement du format \texttt{.oxz} a été dicté par la nécessité de disposer d'une structure de fichier flexible, capable de stocker des métadonnées riches tout en permettant un accès rapide aux données. L'objectif était de s'écarter d'une lecture séquentielle stricte pour privilégier un accès indexé aux différents segments de l'archive.
+
+\subsubsection*{Organisation et structure du conteneur}
+
+Le format repose sur une organisation linéaire structurée autour de zones clés : un en-tête global, un manifeste pour la structure logique, une table des blocs pour la gestion physique, et enfin le stockage des données utiles (\textit{payloads}).
+
+L'en-tête principal contient directement l'emplacement des sections importantes. Cela permet de retrouver rapidement les informations utiles sans devoir relire tout le fichier dans l'ordre.
+
+Le manifeste sert à décrire la structure logique de l'archive. C'est lui qui permet de savoir quels fichiers et quels répertoires doivent être recréés à l'extraction.
+
+La table des blocs décrit ensuite la partie physique du stockage. Chaque entrée indique où se trouve un segment de données, quelle taille il occupe, et quels traitements lui ont été appliqués.
+
+Les données sont ensuite stockées à la suite, dans un ordre stable et contigu. Enfin, le pied de page (\textit{footer}) ferme l'archive avec une signature de fin et une valeur de contrôle globale.
+
+\begin{center}
+  \fcolorbox{black!20}{black!3}{%
+  \parbox{0.94\linewidth}{%
+  \ttfamily\small
+  EN-TÊTE GLOBAL (48 octets)\\
+  \hspace*{1.5em}signature = "OXZ\textbackslash0"\\
+  \hspace*{1.5em}version = 1\\
+  \hspace*{1.5em}réservé (2 octets)\\
+  \hspace*{1.5em}positions (métadonnées, manifeste, table blocs, données, footer)\\[0.5em]
+  MÉTADONNÉES DE L'ARCHIVE (8 octets)\\
+  \hspace*{1.5em}signature = "OXMD"\\
+  \hspace*{1.5em}version = 1\\
+  \hspace*{1.5em}source = fichier | dossier\\[0.5em]
+  MANIFESTE DES ENTRÉES\\
+  \hspace*{1.5em}signature = "OXMF"\\
+  \hspace*{1.5em}version = 1\\
+  \hspace*{1.5em}nombre d'entrées\\
+  \hspace*{1.5em}entrées[]\\
+  \hspace*{3em}type = dossier | fichier\\
+  \hspace*{3em}chemin (longueur + contenu UTF-8)\\
+  \hspace*{3em}taille, mode, mtime\\
+  \hspace*{3em}position du contenu utile\\[0.5em]
+  TABLE DES BLOCS\\
+  \hspace*{1.5em}signature = "OXCI"\\
+  \hspace*{1.5em}version = 1\\
+  \hspace*{1.5em}nombre de blocs\\
+  \hspace*{1.5em}descripteurs de blocs[]\\
+  \hspace*{3em}offset relatif du payload\\
+  \hspace*{3em}tailles (compressée et originale)\\
+  \hspace*{3em}somme de contrôle (CRC32)\\
+  \hspace*{3em}indicateurs (compression et stratégie)\\[0.5em]
+  SECTION DES DONNÉES\\
+  \hspace*{1.5em}bloc\_0, bloc\_1, ..., bloc\_n-1\\[0.5em]
+  PIED DE PAGE (8 octets)\\
+  \hspace*{1.5em}signature = "END\textbackslash0"\\
+  \hspace*{1.5em}checksum globale%
+  }}
+  \end{center}
+
+\subsubsection{Intégration de la compression universelle}
+
+Un algorithme de compression est dit "universel" lorsqu'il est capable de réduire la taille de n'importe quel flux de données sans connaissance préalable de ses propriétés statistiques. Contrairement aux filtres spécialisés qui exploitent la sémantique de types de fichiers spécifiques (images, texte, audio), il s'appuie sur des modèles mathématiques généraux pour identifier et éliminer les redondances, garantissant une efficacité robuste quel que soit le contenu traité.
+\newline\newline
+L'implémentation initiale repose sur l'algorithme \texttt{LZ4}. Ce choix permet de valider l'architecture du pipeline avec une solution robuste, tout en garantissant des performances optimales.
+
+
+\subsubsection*{Détails de fonctionnement et implémentation}
+
+\texttt{LZ4} appartient à la famille des algorithmes LZ77 et se distingue par sa conception orientée vers la performance brute. Son fonctionnement repose sur une structure de "blocs" composée de séquences de littéraux et de copies de données déjà rencontrées :
+
+\begin{itemize}
+    \item Chaque séquence commence par un octet de contrôle (token). Les 4 bits de poids fort indiquent la longueur des littéraux qui suivent. Si cette longueur dépasse 15, des octets supplémentaires sont ajoutés. Les littéraux sont ensuite copiés tels quels du flux d'entrée vers la sortie.
+    \item Les 4 bits de poids faible du token indiquent la longueur de la répétition. Une répétition est définie par un décalage arrière de 16 bits, pointant vers une séquence identique déjà traitée dans un dictionnaire glissant de 64~KiB.
+    \item Contrairement à des algorithmes comme Deflate, LZ4 n'utilise aucun codage entropique final (comme Huffman). Le traitement s'effectue quasi exclusivement par des copies de mémoire et des manipulations d'octets entiers, évitant les opérations coûteuses au niveau du bit.
+\end{itemize}
+
+Cette architecture permet à LZ4 d'atteindre des débits de compression et de décompression symétriques extrêmement élevés, limités principalement par la bande passante de la mémoire vive, comme illustré dans les mesures de performance suivantes :
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}l>{\raggedleft\arraybackslash}X>{\raggedleft\arraybackslash}X@{}}
+\toprule
+\textbf{Jeu de données} & \textbf{Compression} & \textbf{Décompression} \\
+\midrule
+Texte 1 MiB & 13.4 GiB/s & 9.9 GiB/s \\
+Mixte 1 MiB & 13.0 GiB/s & 14.1 GiB/s \\
+Aléatoire 1 MiB & 2.9 GiB/s & 13.1 GiB/s \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsubsection{Analyse et aiguillage dynamique des données}
+
+Le système de routage analyse les flux entrants pour déterminer dynamiquement la chaîne de traitement la plus adaptée. Cette approche sensible au contenu permet d'appliquer des pré-traitements spécialisés (images, texte, binaire) avant la compression finale, optimisant ainsi le ratio global de l'archive.
+
+\subsubsection*{Stratégie de détection multi-niveaux}
+
+Le routage repose sur un système de détection hybride (\textit{FormatDetector}) qui combine la précision des signatures binaires avec la flexibilité d'analyses heuristiques :
+
+\begin{itemize}
+    \item \textbf{Signatures binaires :} Utilisation de la bibliothèque \textit{infer} pour identifier les formats standards (JPEG, PNG, WAV, etc.) via leurs \textit{magic numbers} ;
+    \item \textbf{Analyse heuristique du texte :} Évaluation de la validité UTF-8 et calcul des ratios de caractères imprimables vs octets de contrôle sur un échantillon de 16~KiB ;
+    \item \textbf{Heuristique binaire :} Recherche de prologues de fonctions x86/x86\_64 (ex: \texttt{push rbp; mov rbp, rsp}) pour identifier les exécutables non signés ;
+    \item \textbf{Performance :} L'analyse est strictement limitée aux premiers 64~KiB de chaque fichier, garantissant une détection quasi-instantanée quelle que soit la taille du fichier.
+\end{itemize}
+
+\subsubsection*{Logique de segmentation et d'aiguillage}
+
+L'identification de la catégorie de fichier définit une stratégie de découpage alignée sur la structure des données :
+\begin{itemize}
+    \item \textbf{Texte :} Recherche du caractère de saut de ligne (\texttt{\textbackslash n}) le plus proche de la taille cible pour préserver l'intégrité des lignes ;
+    \item \textbf{Image :} Calcul de la taille d'une ligne de pixels à partir des métadonnées (largeur $\times$ octets par pixel). Les segments sont systématiquement alignés sur des multiples de cette taille pour garantir que chaque bloc contient des lignes complètes ;
+    \item \textbf{Audio :} Identification de la taille des trames PCM (canaux $\times$ profondeur de bit $\times$ échantillons par paquet). Le découpage respecte ces frontières pour éviter de couper une trame sonore ;
+    \item \textbf{Binaire/Générique :} Découpage brut à la taille cible sans alignement spécifique.
+\end{itemize}
+Cette organisation permet aux algorithmes de pré-traitement de travailler sur des unités logiques cohérentes, maximisant l'efficacité des transformations (ex: YCoCg-R sur des lignes d'images entières) plutôt que sur des suites d'octets arbitraires.
+
+\subsubsection{Architecture de traitement parallèle et optimisations système}
+
+L'infrastructure d'Oxide est conçue pour une saturation maximale des ressources matérielles à travers plusieurs couches d'optimisation, allant de la gestion des fils d'exécution jusqu'au contrôle fin des accès disque.
+
+\subsubsection*{Algorithme de Work-Stealing}
+
+Le pipeline repose sur un modèle de parallélisme par tâches orchestré par un pool de threads. L'algorithme de \textit{work-stealing} assure un équilibrage dynamique de la charge via une architecture à double file d'attente :
+\begin{itemize}
+    \item \textbf{Gestion des files :} Chaque thread possède une file locale. Cela favorise la localité du cache en traitant les données les plus récentes. Une file globale reçoit les nouvelles tâches du thread principal ;
+    \item \textbf{Stratégie de vol :} Un thread inactif tente d'abord de vider sa file locale, puis la file globale. S'il reste inoccupé, il devient un « voleur » et récupère une tâche au fond de la file d'un autre thread. Cette approche réduit la contention entre le propriétaire de la file et les voleurs tout en garantissant qu'aucun cœur ne reste inactif tant qu'il reste du travail.
+\end{itemize}
+
+\subsubsection*{Réordonnancement séquentiel et déterminisme}
+
+Malgré un traitement concurrent où les blocs peuvent être finalisés dans un ordre arbitraire (ex: le bloc 10 finit avant le 1), ainsi on garantit un format de sortie strictement déterministe grâce à un algorithme de réordonnancement par fenêtre glissante :
+\begin{itemize}
+    \item \textbf{Tampon de réordonnancement :} Un gestionnaire stocke les blocs terminés dans une structure de données triée (\texttt{BTreeMap}). Si un bloc arrive hors-séquence, il est mis en attente jusqu'à ce que tous ses prédécesseurs soient complétés ;
+    \item \textbf{Libération contiguë :} Dès que le bloc attendu arrive, le système libère immédiatement ce bloc ainsi que tous les blocs suivants déjà présents en mémoire, permettant une écriture disque \textbf{strictement séquentielle}. Ce mécanisme inclut un contrôle de flux pour éviter que les threads de calcul ne saturent la mémoire vive en attendant le thread d'écriture.
+\end{itemize}
+
+\subsubsection*{Optimisations des entrées/sorties (I/O)}
+
+La performance est souvent limitée par le stockage ; Ainsi on intègre plusieurs stratégies pour lever ces verrous :
+\begin{itemize}
+    \item \textbf{Memory Mapping (mmap) :} L'accès aux fichiers sources utilise les fonctions de projection mémoire du kernel. Cela permet des lectures à très haute vitesse sans copie intermédiaire entre l'espace noyau et l'espace utilisateur (\textit{zero-copy}) ;
+    \item \textbf{Buffer Pooling :} Pour éviter les ralentissements liés aux allocations fréquentes, Oxide réutilise systématiquement des zones mémoire pré-allouées via un pool de tampons, réduisant la pression sur l'allocateur système.
+\end{itemize}
+
+
+\end{document}

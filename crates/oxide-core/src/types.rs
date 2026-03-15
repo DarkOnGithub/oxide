@@ -46,18 +46,24 @@ pub struct ChunkEncodingPlan {
     pub algo: CompressionAlgo,
     /// Compression preset selected for the chunk.
     pub preset: CompressionPreset,
-    /// Optional dictionary identifier referenced by the chunk descriptor.
-    pub dict_id: u16,
+    /// Optional explicit zstd compression level used only by the encoder.
+    pub zstd_level: Option<i32>,
 }
 
 impl ChunkEncodingPlan {
     /// Creates a new chunk encoding plan.
-    pub const fn new(algo: CompressionAlgo, preset: CompressionPreset, dict_id: u16) -> Self {
+    pub const fn new(algo: CompressionAlgo, preset: CompressionPreset) -> Self {
         Self {
             algo,
             preset,
-            dict_id,
+            zstd_level: None,
         }
+    }
+
+    /// Attaches an explicit zstd level override for encoding.
+    pub const fn with_zstd_level(mut self, zstd_level: Option<i32>) -> Self {
+        self.zstd_level = zstd_level;
+        self
     }
 
     /// Builds compression metadata for the final stored payload.
@@ -68,7 +74,7 @@ impl ChunkEncodingPlan {
 
 impl Default for ChunkEncodingPlan {
     fn default() -> Self {
-        Self::new(CompressionAlgo::Lz4, CompressionPreset::Default, 0)
+        Self::new(CompressionAlgo::Lz4, CompressionPreset::Default)
     }
 }
 
@@ -296,7 +302,7 @@ impl CompressionMeta {
     /// Encodes compression metadata into OXZ compression flags.
     ///
     /// Layout:
-    /// - Bits 0..=1: algorithm (01 LZ4)
+    /// - Bits 0..=1: algorithm (01 LZ4, 10 Zstd)
     /// - Bit 2: raw passthrough marker
     /// - Bits 3..=4: preset (00 Fast, 01 Default, 10 High)
     /// - Bits 5..=7: reserved (must be zero)
@@ -345,8 +351,6 @@ pub struct CompressedBlock {
     pub compression: CompressionAlgo,
     /// Preset used for compression.
     pub compression_preset: CompressionPreset,
-    /// Optional dictionary identifier used for compression.
-    pub dict_id: u16,
     /// Whether the data is stored raw.
     pub raw_passthrough: bool,
     /// Original uncompressed length.
@@ -395,7 +399,6 @@ impl CompressedBlock {
             pre_proc,
             compression: compression_meta.algo,
             compression_preset: compression_meta.preset,
-            dict_id: 0,
             raw_passthrough: compression_meta.raw_passthrough,
             original_len,
             crc32: PLACEHOLDER_CHECKSUM,
@@ -419,7 +422,6 @@ impl CompressedBlock {
             pre_proc,
             compression: encoding_plan.algo,
             compression_preset: encoding_plan.preset,
-            dict_id: encoding_plan.dict_id,
             raw_passthrough,
             original_len,
             crc32: PLACEHOLDER_CHECKSUM,
@@ -499,6 +501,8 @@ pub enum BinaryStrategy {
 pub enum CompressionAlgo {
     /// LZ4 fast compression - Fast
     Lz4,
+    /// Zstandard compression with tunable ratio/speed levels.
+    Zstd,
 }
 
 impl PreProcessingStrategy {
@@ -549,14 +553,17 @@ impl PreProcessingStrategy {
 impl CompressionAlgo {
     /// Encodes the compression algorithm into OXZ compression flags.
     pub fn to_flags(self) -> u8 {
-        let _ = self;
-        0x01
+        match self {
+            Self::Lz4 => 0x01,
+            Self::Zstd => 0x02,
+        }
     }
 
     /// Decodes OXZ compression flags into a compression algorithm.
     pub fn from_flags(flags: u8) -> Result<Self> {
         match flags {
             0x01 => Ok(Self::Lz4),
+            0x02 => Ok(Self::Zstd),
             _ => Err(OxideError::InvalidFormat("invalid compression flags")),
         }
     }

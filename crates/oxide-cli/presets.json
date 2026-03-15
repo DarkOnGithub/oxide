@@ -1,47 +1,57 @@
 {
   "archive": {
-    "default_preset": "fast",
+    "default_preset": "balanced",
     "defaults": {
       "compression": "lz4",
       "compression_preset": "fast",
-      "block_size": "2M",
-      "workers": 0,
-      "pool_capacity": "1M",
-      "pool_buffers": 512,
-      "stats_interval_ms": 250,
+      "block_size": "1M",
+      "workers": 14,
+      "pool_capacity": "2M",
+      "pool_buffers": 1024,
+      "stats_interval_ms": 500,
       "inflight_bytes": "2G",
-      "inflight_blocks_per_worker": 256,
-      "stream_read_buffer": "64M",
-      "producer_threads": 1,
+      "inflight_blocks_per_worker": 96,
+      "stream_read_buffer": "128M",
+      "producer_threads": 2,
       "directory_mmap_threshold": "8M",
-      "writer_queue_blocks": 1024,
+      "writer_queue_blocks": 2048,
       "preserve_format_boundaries": false,
       "result_wait_ms": 1
     },
     "presets": {
       "fast": {
+        "compression": "lz4",
         "compression_preset": "fast",
-        "block_size": "2M",
-        "stream_read_buffer": "128M",
-        "inflight_bytes": "2G"
+        "block_size": "1M",
+        "stream_read_buffer": "256M",
+        "inflight_bytes": "3G",
+        "producer_threads": 4,
+        "result_wait_ms": 0,
+        "directory_mmap_threshold": "1M",
+        "worker_threads": 6
       },
       "balanced": {
-        "compression_preset": "default",
-        "block_size": "4M",
-        "stream_read_buffer": "96M",
-        "directory_mmap_threshold": "16M",
-        "inflight_bytes": "1G",
-        "result_wait_ms": 2
-      },
-      "compact": {
-        "compression_preset": "high",
-        "block_size": "8M",
+        "compression": "zstd",
+        "zstd_level": 6,
+        "compression_preset": "balanced",
+        "block_size": "2M",
         "stream_read_buffer": "128M",
-        "directory_mmap_threshold": "16M",
-        "inflight_bytes": "768M",
+        "directory_mmap_threshold": "8M",
+        "inflight_bytes": "3G",
+        "producer_threads": 3,
+        "result_wait_ms": 1
+      },
+      "ultra": {
+        "compression": "zstd",
+        "compression_preset": "high",
+        "zstd_level": 19,
+        "block_size": "4M",
+        "stream_read_buffer": "256M",
+        "inflight_bytes": "4G",
         "inflight_blocks_per_worker": 128,
-        "writer_queue_blocks": 2048,
-        "result_wait_ms": 5
+        "producer_threads": 4,
+        "writer_queue_blocks": 4096,
+        "result_wait_ms": 2
       }
     }
   }

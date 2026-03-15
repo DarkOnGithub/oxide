@@ -1,6 +1,6 @@
 use crate::OxideError;
 use crate::{
-    AudioStrategy, BinaryStrategy, CompressionAlgo, FileFormat, ImageStrategy,
+    AudioStrategy, BinaryStrategy, CompressionPreset, FileFormat, ImageStrategy,
     PreProcessingStrategy, Result, TextStrategy,
 };
 
@@ -75,13 +75,33 @@ fn metadata_as_audio(metadata: Option<&PreprocessingMetadata>) -> Result<Option<
 
 pub fn get_preprocessing_strategy(
     file_type_hint: FileFormat,
-    compression_algo: CompressionAlgo,
+    compression_preset: CompressionPreset,
+    metadata: Option<&PreprocessingMetadata>,
 ) -> PreProcessingStrategy {
-    match (file_type_hint, compression_algo) {
-        (FileFormat::Image, _) => PreProcessingStrategy::Image(ImageStrategy::YCoCgR),
-        (FileFormat::Audio, _) => PreProcessingStrategy::Audio(AudioStrategy::Lpc),
-        (FileFormat::Binary, _) => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
-        _ => PreProcessingStrategy::None,
+    match compression_preset {
+        CompressionPreset::Fast => PreProcessingStrategy::None,
+        CompressionPreset::Default => match file_type_hint {
+            FileFormat::Text => PreProcessingStrategy::Text(TextStrategy::Bpe),
+            FileFormat::Image if matches!(metadata, Some(PreprocessingMetadata::Image(_))) => {
+                PreProcessingStrategy::Image(ImageStrategy::YCoCgR)
+            }
+            FileFormat::Audio if matches!(metadata, Some(PreprocessingMetadata::Audio(_))) => {
+                PreProcessingStrategy::Audio(AudioStrategy::Lpc)
+            }
+            FileFormat::Binary => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
+            _ => PreProcessingStrategy::None,
+        },
+        CompressionPreset::High => match file_type_hint {
+            FileFormat::Text => PreProcessingStrategy::Text(TextStrategy::Bwt),
+            FileFormat::Image if matches!(metadata, Some(PreprocessingMetadata::Image(_))) => {
+                PreProcessingStrategy::Image(ImageStrategy::LocoI)
+            }
+            FileFormat::Audio if matches!(metadata, Some(PreprocessingMetadata::Audio(_))) => {
+                PreProcessingStrategy::Audio(AudioStrategy::Lpc)
+            }
+            FileFormat::Binary => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
+            _ => PreProcessingStrategy::None,
+        },
     }
 }
 

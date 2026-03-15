@@ -168,7 +168,6 @@ pub struct DecodeTask {
     pub index: usize,
     pub header: BlockHeader,
     pub block_data: Vec<u8>,
-    pub dictionary: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]

@@ -9,7 +9,7 @@ use crate::{ArchiveSourceKind, BufferPool, CompressedBlock, OxideError, Result};
 use super::{
     ARCHIVE_METADATA_SIZE, ArchiveManifest, ArchiveMetadata, CHUNK_DESCRIPTOR_SIZE,
     CHUNK_TABLE_HEADER_SIZE, DEFAULT_REORDER_PENDING_LIMIT, Footer, GLOBAL_HEADER_SIZE,
-    GlobalHeader, ReorderBuffer, StoredDictionary, encode_chunk_table, encode_dictionary_store,
+    GlobalHeader, ReorderBuffer, encode_chunk_table,
 };
 
 #[derive(Debug)]
@@ -24,7 +24,6 @@ struct FinalizedLayout {
     metadata_bytes: [u8; ARCHIVE_METADATA_SIZE],
     entry_table_bytes: Vec<u8>,
     chunk_table_bytes: Vec<u8>,
-    dictionary_store_bytes: Vec<u8>,
 }
 
 pub trait ArchiveBlockWriter {
@@ -42,15 +41,13 @@ pub trait ArchiveBlockWriter {
 }
 
 /// Writes OXZ archives by staging chunk descriptors and payloads, then
-/// emitting the fixed-layout v2 container at finalization.
+/// emitting the fixed-layout v1 container at finalization.
 #[derive(Debug)]
 pub struct ArchiveWriter<W: Write> {
     writer: W,
     buffer_pool: Arc<BufferPool>,
-    dictionaries: Vec<StoredDictionary>,
     manifest: ArchiveManifest,
     entry_table_bytes: Vec<u8>,
-    dictionary_store_bytes: Vec<u8>,
     source_kind: Option<ArchiveSourceKind>,
     expected_block_count: Option<u32>,
     blocks_written: u32,
@@ -67,10 +64,8 @@ pub struct ArchiveWriter<W: Write> {
 pub struct SeekableArchiveWriter<W: Write + Seek> {
     writer: W,
     buffer_pool: Arc<BufferPool>,
-    dictionaries: Vec<StoredDictionary>,
     manifest: ArchiveManifest,
     entry_table_bytes: Vec<u8>,
-    dictionary_store_bytes: Vec<u8>,
     source_kind: Option<ArchiveSourceKind>,
     expected_block_count: Option<u32>,
     blocks_written: u32,
@@ -82,28 +77,18 @@ pub struct SeekableArchiveWriter<W: Write + Seek> {
 
 impl<W: Write> ArchiveWriter<W> {
     pub fn new(writer: W, buffer_pool: Arc<BufferPool>) -> Self {
-        Self::with_dictionaries_and_manifest(writer, buffer_pool, Vec::new(), None)
+        Self::with_manifest(writer, buffer_pool, None)
     }
 
-    pub fn with_dictionaries(
+    pub fn with_manifest(
         writer: W,
         buffer_pool: Arc<BufferPool>,
-        dictionaries: Vec<StoredDictionary>,
-    ) -> Self {
-        Self::with_dictionaries_and_manifest(writer, buffer_pool, dictionaries, None)
-    }
-
-    pub fn with_dictionaries_and_manifest(
-        writer: W,
-        buffer_pool: Arc<BufferPool>,
-        dictionaries: Vec<StoredDictionary>,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
         Self::with_reorder_limit_and_manifest(
             writer,
             buffer_pool,
             DEFAULT_REORDER_PENDING_LIMIT,
-            dictionaries,
             manifest,
         )
     }
@@ -112,16 +97,13 @@ impl<W: Write> ArchiveWriter<W> {
         writer: W,
         buffer_pool: Arc<BufferPool>,
         max_pending: usize,
-        dictionaries: Vec<StoredDictionary>,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
         Self {
             writer,
             buffer_pool,
-            dictionaries,
             manifest: manifest.unwrap_or_default(),
             entry_table_bytes: Vec::new(),
-            dictionary_store_bytes: Vec::new(),
             source_kind: None,
             expected_block_count: None,
             blocks_written: 0,
@@ -133,7 +115,7 @@ impl<W: Write> ArchiveWriter<W> {
     }
 
     pub fn with_reorder_limit(writer: W, buffer_pool: Arc<BufferPool>, max_pending: usize) -> Self {
-        Self::with_reorder_limit_and_manifest(writer, buffer_pool, max_pending, Vec::new(), None)
+        Self::with_reorder_limit_and_manifest(writer, buffer_pool, max_pending, None)
     }
 
     pub fn write_global_header(&mut self, block_count: u32) -> Result<()> {
@@ -147,15 +129,9 @@ impl<W: Write> ArchiveWriter<W> {
 
         let source_kind = archive_source_kind_from_flags(flags)?;
         let entry_table_bytes = self.manifest.encode()?;
-        let dictionary_store_bytes = encode_dictionary_store(&self.dictionaries)?;
-        let payload_offset = payload_offset_bytes(
-            block_count,
-            entry_table_bytes.len(),
-            dictionary_store_bytes.len(),
-        )?;
+        let payload_offset = payload_offset_bytes(block_count, entry_table_bytes.len())?;
 
         self.entry_table_bytes = entry_table_bytes;
-        self.dictionary_store_bytes = dictionary_store_bytes;
         self.source_kind = Some(source_kind);
         self.expected_block_count = Some(block_count);
         self.payload_offset = payload_offset;
@@ -233,7 +209,6 @@ impl<W: Write> ArchiveWriter<W> {
             self.source_kind.unwrap_or(ArchiveSourceKind::File),
             &self.entry_table_bytes,
             &descriptors,
-            &self.dictionary_store_bytes,
             self.next_payload_offset,
         )?;
 
@@ -242,8 +217,6 @@ impl<W: Write> ArchiveWriter<W> {
         write_all_timed(&mut self.writer, &layout.entry_table_bytes)?;
         let chunk_table_write_elapsed =
             write_all_timed(&mut self.writer, &layout.chunk_table_bytes)?;
-        let dictionary_store_write_elapsed =
-            write_all_timed(&mut self.writer, &layout.dictionary_store_bytes)?;
 
         let pending_chunks = std::mem::take(&mut self.pending_chunks);
         for chunk in pending_chunks {
@@ -257,7 +230,6 @@ impl<W: Write> ArchiveWriter<W> {
         record_finalize_telemetry(
             header_write_elapsed,
             chunk_table_write_elapsed,
-            dictionary_store_write_elapsed,
             finalize_started.elapsed(),
         );
         Ok(self.writer)
@@ -284,7 +256,6 @@ impl<W: Write> ArchiveWriter<W> {
             pre_proc: block.pre_proc.clone(),
             compression: block.compression,
             compression_preset: block.compression_preset,
-            dict_id: block.dict_id,
             raw_passthrough: block.raw_passthrough,
             original_len: block.original_len,
             crc32: block.crc32,
@@ -343,28 +314,18 @@ impl<W: Write> ArchiveBlockWriter for ArchiveWriter<W> {
 
 impl<W: Write + Seek> SeekableArchiveWriter<W> {
     pub fn new(writer: W, buffer_pool: Arc<BufferPool>) -> Self {
-        Self::with_dictionaries_and_manifest(writer, buffer_pool, Vec::new(), None)
+        Self::with_manifest(writer, buffer_pool, None)
     }
 
-    pub fn with_dictionaries(
+    pub fn with_manifest(
         writer: W,
         buffer_pool: Arc<BufferPool>,
-        dictionaries: Vec<StoredDictionary>,
-    ) -> Self {
-        Self::with_dictionaries_and_manifest(writer, buffer_pool, dictionaries, None)
-    }
-
-    pub fn with_dictionaries_and_manifest(
-        writer: W,
-        buffer_pool: Arc<BufferPool>,
-        dictionaries: Vec<StoredDictionary>,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
         Self::with_reorder_limit_and_manifest(
             writer,
             buffer_pool,
             DEFAULT_REORDER_PENDING_LIMIT,
-            dictionaries,
             manifest,
         )
     }
@@ -373,16 +334,13 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         writer: W,
         buffer_pool: Arc<BufferPool>,
         max_pending: usize,
-        dictionaries: Vec<StoredDictionary>,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
         Self {
             writer,
             buffer_pool,
-            dictionaries,
             manifest: manifest.unwrap_or_default(),
             entry_table_bytes: Vec::new(),
-            dictionary_store_bytes: Vec::new(),
             source_kind: None,
             expected_block_count: None,
             blocks_written: 0,
@@ -394,7 +352,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
     }
 
     pub fn with_reorder_limit(writer: W, buffer_pool: Arc<BufferPool>, max_pending: usize) -> Self {
-        Self::with_reorder_limit_and_manifest(writer, buffer_pool, max_pending, Vec::new(), None)
+        Self::with_reorder_limit_and_manifest(writer, buffer_pool, max_pending, None)
     }
 
     pub fn write_global_header(&mut self, block_count: u32) -> Result<()> {
@@ -414,17 +372,11 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
 
         let source_kind = archive_source_kind_from_flags(flags)?;
         let entry_table_bytes = self.manifest.encode()?;
-        let dictionary_store_bytes = encode_dictionary_store(&self.dictionaries)?;
-        let payload_offset = payload_offset_bytes(
-            block_count,
-            entry_table_bytes.len(),
-            dictionary_store_bytes.len(),
-        )?;
+        let payload_offset = payload_offset_bytes(block_count, entry_table_bytes.len())?;
 
         reserve_prefix(&mut self.writer, payload_offset)?;
 
         self.entry_table_bytes = entry_table_bytes;
-        self.dictionary_store_bytes = dictionary_store_bytes;
         self.source_kind = Some(source_kind);
         self.expected_block_count = Some(block_count);
         self.payload_offset = payload_offset;
@@ -452,7 +404,6 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             pre_proc: block.pre_proc.clone(),
             compression: block.compression,
             compression_preset: block.compression_preset,
-            dict_id: block.dict_id,
             raw_passthrough: block.raw_passthrough,
             original_len: block.original_len,
             crc32: block.crc32,
@@ -509,7 +460,6 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             self.source_kind.unwrap_or(ArchiveSourceKind::File),
             &self.entry_table_bytes,
             &self.pending_descriptors,
-            &self.dictionary_store_bytes,
             self.next_payload_offset,
         )?;
 
@@ -519,8 +469,6 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         write_all_timed(&mut self.writer, &layout.entry_table_bytes)?;
         let chunk_table_write_elapsed =
             write_all_timed(&mut self.writer, &layout.chunk_table_bytes)?;
-        let dictionary_store_write_elapsed =
-            write_all_timed(&mut self.writer, &layout.dictionary_store_bytes)?;
         self.writer
             .seek(SeekFrom::Start(self.next_payload_offset))?;
 
@@ -530,7 +478,6 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         record_finalize_telemetry(
             header_write_elapsed,
             chunk_table_write_elapsed,
-            dictionary_store_write_elapsed,
             finalize_started.elapsed(),
         );
         Ok(self.writer)
@@ -618,18 +565,13 @@ fn validate_completion(
     Ok(())
 }
 
-fn payload_offset_bytes(
-    block_count: u32,
-    entry_table_len: usize,
-    dictionary_store_len: usize,
-) -> Result<u64> {
+fn payload_offset_bytes(block_count: u32, entry_table_len: usize) -> Result<u64> {
     let chunk_table_len =
         CHUNK_TABLE_HEADER_SIZE as u64 + u64::from(block_count) * CHUNK_DESCRIPTOR_SIZE as u64;
     (GLOBAL_HEADER_SIZE as u64)
         .checked_add(ARCHIVE_METADATA_SIZE as u64)
         .and_then(|offset| offset.checked_add(entry_table_len as u64))
         .and_then(|offset| offset.checked_add(chunk_table_len))
-        .and_then(|offset| offset.checked_add(dictionary_store_len as u64))
         .ok_or(OxideError::InvalidFormat("payload offset overflow"))
 }
 
@@ -649,7 +591,6 @@ fn finalize_layout(
     source_kind: ArchiveSourceKind,
     entry_table_bytes: &[u8],
     descriptors: &[super::ChunkDescriptor],
-    dictionary_store_bytes: &[u8],
     footer_offset: u64,
 ) -> Result<FinalizedLayout> {
     if descriptors.len() != block_count as usize {
@@ -665,14 +606,9 @@ fn finalize_layout(
         .ok_or(OxideError::InvalidFormat("entry table offset overflow"))?;
     let chunk_table_len =
         CHUNK_TABLE_HEADER_SIZE as u64 + descriptors.len() as u64 * CHUNK_DESCRIPTOR_SIZE as u64;
-    let dictionary_store_offset = chunk_table_offset
+    let payload_offset = chunk_table_offset
         .checked_add(chunk_table_len)
         .ok_or(OxideError::InvalidFormat("chunk table offset overflow"))?;
-    let payload_offset = dictionary_store_offset
-        .checked_add(dictionary_store_bytes.len() as u64)
-        .ok_or(OxideError::InvalidFormat(
-            "dictionary store offset overflow",
-        ))?;
 
     let mut expected_payload_offset = payload_offset;
     for descriptor in descriptors {
@@ -695,7 +631,6 @@ fn finalize_layout(
         metadata_offset,
         entry_table_offset,
         chunk_table_offset,
-        dictionary_store_offset,
         payload_offset,
         footer_offset,
     )
@@ -706,7 +641,6 @@ fn finalize_layout(
         metadata_bytes,
         entry_table_bytes: entry_table_bytes.to_vec(),
         chunk_table_bytes,
-        dictionary_store_bytes: dictionary_store_bytes.to_vec(),
     })
 }
 
@@ -741,7 +675,6 @@ fn record_stage_telemetry(elapsed: std::time::Duration) {
 fn record_finalize_telemetry(
     header_write_elapsed: std::time::Duration,
     chunk_table_write_elapsed: std::time::Duration,
-    dictionary_store_write_elapsed: std::time::Duration,
     finalize_elapsed: std::time::Duration,
 ) {
     let finalize_elapsed_us = duration_to_us(finalize_elapsed);
@@ -760,14 +693,6 @@ fn record_finalize_telemetry(
         "ok",
         duration_to_us(chunk_table_write_elapsed),
         "oxz chunk table written successfully",
-    );
-    profile::event(
-        tags::PROFILE_OXZ,
-        &[tags::TAG_OXZ],
-        "write_dictionary_store",
-        "ok",
-        duration_to_us(dictionary_store_write_elapsed),
-        "oxz dictionary store written successfully",
     );
     profile::event(
         tags::PROFILE_OXZ,

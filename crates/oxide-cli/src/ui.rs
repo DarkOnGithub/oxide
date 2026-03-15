@@ -164,7 +164,7 @@ pub fn print_startup_banner() {
         "██╔╝    ╚██████╔╝██╔╝ ██╗██║██████╔╝███████╗",
         "╚═╝      ╚═════╝ ╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝",
     ];
-    
+
     for line in banner {
         println!("{}", paint(StreamTarget::Stdout, Tone::Warning, line));
     }

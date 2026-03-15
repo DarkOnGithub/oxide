@@ -1,8 +1,10 @@
+use oxide_core::preprocessing::get_preprocessing_strategy;
 use oxide_core::preprocessing::{audio_lpc, image_locoi, image_paeth, image_ycocgr};
 use oxide_core::{
     apply_preprocessing_with_metadata, AudioEndian, AudioMetadata, AudioSampleEncoding,
-    AudioStrategy, ImageMetadata, ImagePixelFormat, ImageStrategy, OxideError,
-    PreProcessingStrategy, PreprocessingMetadata,
+    AudioStrategy, BinaryStrategy, CompressionPreset, FileFormat, ImageMetadata,
+    ImagePixelFormat, ImageStrategy, OxideError, PreProcessingStrategy,
+    PreprocessingMetadata, TextStrategy,
 };
 
 #[test]
@@ -135,4 +137,108 @@ fn preprocessing_router_validates_metadata_type_for_strategy() {
         audio_err,
         OxideError::InvalidFormat("preprocessing metadata type mismatch for audio strategy")
     ));
+}
+
+#[test]
+fn fast_preset_disables_preprocessing_for_all_formats() {
+    let image_metadata =
+        PreprocessingMetadata::Image(ImageMetadata::packed(ImagePixelFormat::Rgb8));
+    let audio_metadata = PreprocessingMetadata::Audio(AudioMetadata::pcm_i16_le(1));
+
+    assert_eq!(
+        get_preprocessing_strategy(FileFormat::Text, CompressionPreset::Fast, None),
+        PreProcessingStrategy::None
+    );
+    assert_eq!(
+        get_preprocessing_strategy(FileFormat::Binary, CompressionPreset::Fast, None),
+        PreProcessingStrategy::None
+    );
+    assert_eq!(
+        get_preprocessing_strategy(
+            FileFormat::Image,
+            CompressionPreset::Fast,
+            Some(&image_metadata)
+        ),
+        PreProcessingStrategy::None
+    );
+    assert_eq!(
+        get_preprocessing_strategy(
+            FileFormat::Audio,
+            CompressionPreset::Fast,
+            Some(&audio_metadata)
+        ),
+        PreProcessingStrategy::None
+    );
+}
+
+#[test]
+fn balanced_preset_uses_format_aware_defaults() {
+    let image_metadata =
+        PreprocessingMetadata::Image(ImageMetadata::packed(ImagePixelFormat::Rgb8));
+    let audio_metadata = PreprocessingMetadata::Audio(AudioMetadata::pcm_i16_le(1));
+
+    assert_eq!(
+        get_preprocessing_strategy(FileFormat::Text, CompressionPreset::Default, None),
+        PreProcessingStrategy::Text(TextStrategy::Bpe)
+    );
+    assert_eq!(
+        get_preprocessing_strategy(FileFormat::Binary, CompressionPreset::Default, None),
+        PreProcessingStrategy::Binary(BinaryStrategy::Bcj)
+    );
+    assert_eq!(
+        get_preprocessing_strategy(
+            FileFormat::Image,
+            CompressionPreset::Default,
+            Some(&image_metadata)
+        ),
+        PreProcessingStrategy::Image(ImageStrategy::YCoCgR)
+    );
+    assert_eq!(
+        get_preprocessing_strategy(FileFormat::Image, CompressionPreset::Default, None),
+        PreProcessingStrategy::None
+    );
+    assert_eq!(
+        get_preprocessing_strategy(
+            FileFormat::Audio,
+            CompressionPreset::Default,
+            Some(&audio_metadata)
+        ),
+        PreProcessingStrategy::Audio(AudioStrategy::Lpc)
+    );
+    assert_eq!(
+        get_preprocessing_strategy(FileFormat::Audio, CompressionPreset::Default, None),
+        PreProcessingStrategy::None
+    );
+}
+
+#[test]
+fn ultra_preset_uses_stronger_preprocessing() {
+    let image_metadata =
+        PreprocessingMetadata::Image(ImageMetadata::packed(ImagePixelFormat::Rgb8));
+    let audio_metadata = PreprocessingMetadata::Audio(AudioMetadata::pcm_i16_le(1));
+
+    assert_eq!(
+        get_preprocessing_strategy(FileFormat::Text, CompressionPreset::High, None),
+        PreProcessingStrategy::Text(TextStrategy::Bwt)
+    );
+    assert_eq!(
+        get_preprocessing_strategy(FileFormat::Binary, CompressionPreset::High, None),
+        PreProcessingStrategy::Binary(BinaryStrategy::Bcj)
+    );
+    assert_eq!(
+        get_preprocessing_strategy(
+            FileFormat::Image,
+            CompressionPreset::High,
+            Some(&image_metadata)
+        ),
+        PreProcessingStrategy::Image(ImageStrategy::LocoI)
+    );
+    assert_eq!(
+        get_preprocessing_strategy(
+            FileFormat::Audio,
+            CompressionPreset::High,
+            Some(&audio_metadata)
+        ),
+        PreProcessingStrategy::Audio(AudioStrategy::Lpc)
+    );
 }
