@@ -1,6 +1,8 @@
-use crate::Result;
-use crate::preprocessing::utils;
 use crate::error::OxideError;
+use crate::preprocessing::utils;
+use crate::Result;
+
+const TRANSFORM_MARKER: &[u8; 4] = b"YCGR";
 
 /// Converts raw image bytes into RGB pixels for YCoCg-R color transforms.
 pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec<[u8; 3]>> {
@@ -14,7 +16,8 @@ pub fn apply(data: &[u8], metadata: Option<&utils::ImageMetadata>) -> Result<Vec
         None => return Ok(data.to_vec()),
     };
     let pixels = bytes_to_data(data, meta)?;
-    let mut output = Vec::with_capacity(pixels.len() * 6);
+    let mut output = Vec::with_capacity(TRANSFORM_MARKER.len() + pixels.len() * 6);
+    output.extend_from_slice(TRANSFORM_MARKER);
     for pixel in pixels {
         let r = pixel[0] as i16;
         let g = pixel[1] as i16;
@@ -36,17 +39,19 @@ pub fn apply(data: &[u8], metadata: Option<&utils::ImageMetadata>) -> Result<Vec
 ///
 /// Payloads without the transform marker are returned unchanged.
 pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
-    if data.len() % 6 != 0 {
+    let Some(payload) = data.strip_prefix(TRANSFORM_MARKER) else {
         return Ok(data.to_vec());
+    };
+    if payload.len() % 6 != 0 {
+        return Err(OxideError::InvalidFormat("invalid YCoCg-R payload length"));
     }
-    let mut output = Vec::with_capacity(data.len() / 2);
+    let mut output = Vec::with_capacity(payload.len() / 2);
 
-    for chunk in data.chunks_exact(6) {
-        
+    for chunk in payload.chunks_exact(6) {
         let y = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
         let co = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
         let cg = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
-        
+
         let t = y - (cg >> 1);
         let g = cg + t;
         let b = t - (co >> 1);
