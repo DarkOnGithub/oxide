@@ -1,10 +1,10 @@
-use crossbeam_channel::{Receiver, TryRecvError, bounded, select};
+use crossbeam_channel::{bounded, select, Receiver, TryRecvError};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -111,70 +111,82 @@ where
         manifest_bytes,
     )));
     let writer_output_bytes_shared = Arc::clone(&writer_output_bytes);
+    let writer_failure = Arc::new(Mutex::new(None::<String>));
+    let writer_failure_shared = Arc::clone(&writer_failure);
     let writer_buffer_pool = Arc::clone(&config.buffer_pool);
     let writer_manifest = manifest.clone();
     let writer_handle = thread::spawn(move || -> Result<DirectoryWriterOutcome<W>> {
-        let mut archive_writer = writer_factory(
-            writer,
-            writer_buffer_pool,
-            writer_manifest,
-            writer_reorder_limit,
-        );
-        archive_writer.write_global_header_with_flags(
-            block_count,
-            directory::source_kind_flags(ArchiveSourceKind::Directory),
-        )?;
+        let outcome = (|| -> Result<DirectoryWriterOutcome<W>> {
+            let mut archive_writer = writer_factory(
+                writer,
+                writer_buffer_pool,
+                writer_manifest,
+                writer_reorder_limit,
+            );
+            archive_writer.write_global_header_with_flags(
+                block_count,
+                directory::source_kind_flags(ArchiveSourceKind::Directory),
+            )?;
 
-        let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
-        let mut pending_sizes = BTreeMap::<usize, usize>::new();
-        let mut next_written_id = 0usize;
-        let mut pending_write_peak = 0usize;
-        let mut writer_time = Duration::ZERO;
+            let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
+            let mut pending_sizes = BTreeMap::<usize, usize>::new();
+            let mut next_written_id = 0usize;
+            let mut pending_write_peak = 0usize;
+            let mut writer_time = Duration::ZERO;
 
-        while let Ok(block) = writer_rx.recv() {
-            let block_id = block.id;
-            let block_len = block.data.len();
-            if pending_sizes.insert(block_id, block_len).is_some() {
+            while let Ok(block) = writer_rx.recv() {
+                let block_id = block.id;
+                let block_len = block.data.len();
+                if pending_sizes.insert(block_id, block_len).is_some() {
+                    return Err(crate::OxideError::InvalidFormat(
+                        "duplicate block id received by directory writer",
+                    ));
+                }
+
+                let write_started = Instant::now();
+                let written = archive_writer.push_block(block)?;
+                writer_time += write_started.elapsed();
+
+                for _ in 0..written {
+                    let len = pending_sizes.remove(&next_written_id).ok_or(
+                        crate::OxideError::InvalidFormat(
+                            "directory writer pending state drift detected",
+                        ),
+                    )?;
+                    output_bytes_written = output_bytes_written.saturating_add(len as u64);
+                    next_written_id += 1;
+                }
+                pending_write_peak = pending_write_peak.max(archive_writer.pending_blocks());
+                writer_output_bytes_shared.store(output_bytes_written, AtomicOrdering::Release);
+            }
+
+            if !pending_sizes.is_empty() {
                 return Err(crate::OxideError::InvalidFormat(
-                    "duplicate block id received by directory writer",
+                    "directory writer closed with pending blocks",
                 ));
             }
 
-            let write_started = Instant::now();
-            let written = archive_writer.push_block(block)?;
-            writer_time += write_started.elapsed();
-
-            for _ in 0..written {
-                let len = pending_sizes.remove(&next_written_id).ok_or(
-                    crate::OxideError::InvalidFormat(
-                        "directory writer pending state drift detected",
-                    ),
-                )?;
-                output_bytes_written = output_bytes_written.saturating_add(len as u64);
-                next_written_id += 1;
-            }
-            pending_write_peak = pending_write_peak.max(archive_writer.pending_blocks());
+            let footer_started = Instant::now();
+            let writer = archive_writer.write_footer()?;
+            writer_time += footer_started.elapsed();
+            output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
             writer_output_bytes_shared.store(output_bytes_written, AtomicOrdering::Release);
+
+            Ok(DirectoryWriterOutcome {
+                writer,
+                output_bytes_written,
+                pending_write_peak,
+                writer_time,
+            })
+        })();
+
+        if let Err(error) = &outcome {
+            if let Ok(mut failure) = writer_failure_shared.lock() {
+                *failure = Some(error.to_string());
+            }
         }
 
-        if !pending_sizes.is_empty() {
-            return Err(crate::OxideError::InvalidFormat(
-                "directory writer closed with pending blocks",
-            ));
-        }
-
-        let footer_started = Instant::now();
-        let writer = archive_writer.write_footer()?;
-        writer_time += footer_started.elapsed();
-        output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
-        writer_output_bytes_shared.store(output_bytes_written, AtomicOrdering::Release);
-
-        Ok(DirectoryWriterOutcome {
-            writer,
-            output_bytes_written,
-            pending_write_peak,
-            writer_time,
-        })
+        outcome
     });
 
     let started_at = Instant::now();
@@ -426,6 +438,7 @@ where
             &results_rx,
             SUBMISSION_DRAIN_BUDGET,
             &writer_tx,
+            &writer_failure,
             &mut completed_bytes,
             &mut first_error,
             &mut raw_passthrough_blocks,
@@ -481,6 +494,7 @@ where
                         recv_worker_result(
                             result,
                             &writer_tx,
+                            &writer_failure,
                             &mut completed_bytes,
                             &mut first_error,
                             &mut raw_passthrough_blocks,
@@ -500,6 +514,7 @@ where
                 recv_worker_result(
                     result,
                     &writer_tx,
+                    &writer_failure,
                     &mut completed_bytes,
                     &mut first_error,
                     &mut raw_passthrough_blocks,
@@ -587,6 +602,7 @@ where
         recv_worker_result(
             result,
             &writer_tx,
+            &writer_failure,
             &mut completed_bytes,
             &mut first_error,
             &mut raw_passthrough_blocks,
@@ -693,6 +709,7 @@ fn drain_worker_results(
     results_rx: &Receiver<Result<CompressedBlock>>,
     max_results: usize,
     writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
+    writer_failure: &Arc<Mutex<Option<String>>>,
     completed_bytes: &mut u64,
     first_error: &mut Option<crate::OxideError>,
     raw_passthrough_blocks: &mut u64,
@@ -706,6 +723,7 @@ fn drain_worker_results(
                 record_result_to_writer_queue(
                     result,
                     writer_tx,
+                    writer_failure,
                     completed_bytes,
                     first_error,
                     raw_passthrough_blocks,
@@ -723,6 +741,7 @@ fn drain_worker_results(
 fn recv_worker_result(
     result: std::result::Result<Result<CompressedBlock>, crossbeam_channel::RecvError>,
     writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
+    writer_failure: &Arc<Mutex<Option<String>>>,
     completed_bytes: &mut u64,
     first_error: &mut Option<crate::OxideError>,
     raw_passthrough_blocks: &mut u64,
@@ -734,6 +753,7 @@ fn recv_worker_result(
             record_result_to_writer_queue(
                 result,
                 writer_tx,
+                writer_failure,
                 completed_bytes,
                 first_error,
                 raw_passthrough_blocks,
@@ -751,6 +771,7 @@ fn recv_worker_result(
 pub fn record_result_to_writer_queue(
     result: Result<CompressedBlock>,
     writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
+    writer_failure: &Arc<Mutex<Option<String>>>,
     completed_bytes: &mut u64,
     first_error: &mut Option<crate::OxideError>,
     raw_passthrough_blocks: &mut u64,
@@ -766,9 +787,16 @@ pub fn record_result_to_writer_queue(
                 return;
             }
             if writer_tx.send(block).is_err() {
-                first_error.get_or_insert(crate::OxideError::CompressionError(
-                    "directory writer queue closed before completion".to_string(),
-                ));
+                let writer_error = writer_failure
+                    .lock()
+                    .ok()
+                    .and_then(|mut failure| failure.take());
+                first_error.get_or_insert(match writer_error {
+                    Some(message) => crate::OxideError::CompressionError(message),
+                    None => crate::OxideError::CompressionError(
+                        "directory writer queue closed before completion".to_string(),
+                    ),
+                });
                 return;
             }
             *writer_queue_peak = (*writer_queue_peak).max(writer_tx.len());

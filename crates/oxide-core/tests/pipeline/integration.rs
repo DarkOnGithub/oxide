@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader,
-    BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo, CompressionPreset, ExtractProgressEvent,
-    FOOTER_SIZE, PreProcessingStrategy, ReportValue, RunTelemetryOptions, TelemetryEvent,
-    TelemetrySink, TextStrategy,
+    BufferPool, CompressionAlgo, CompressionPreset, ExtractProgressEvent, PreProcessingStrategy,
+    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, TextStrategy,
+    CHUNK_TABLE_HEADER_SIZE, FOOTER_SIZE,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -117,6 +117,30 @@ impl TelemetrySink for CollectExtractProgress {
     }
 }
 
+#[derive(Debug, Default)]
+struct FailOnPayloadWriter {
+    inner: Cursor<Vec<u8>>,
+}
+
+impl Write for FailOnPayloadWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.iter().any(|byte| *byte != 0) {
+            return Err(std::io::Error::other("failing writer"));
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Seek for FailOnPayloadWriter {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
 #[test]
 fn pipeline_roundtrip_reconstructs_original_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(512 * 1024);
@@ -171,8 +195,8 @@ fn pipeline_seekable_archive_path_roundtrips_file_output() -> Result<(), Box<dyn
 }
 
 #[test]
-fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller()
--> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller(
+) -> Result<(), Box<dyn std::error::Error>> {
     let data = build_incompressible_fixture(256 * 1024);
     let file = write_fixture(&data)?;
 
@@ -457,6 +481,26 @@ fn directory_archive_roundtrip_restores_tree() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
+fn directory_archive_surfaces_writer_io_errors() {
+    let source = tempfile::tempdir().expect("tempdir");
+    write_directory_file(&source, "sample.txt", &build_text_fixture(64 * 1024)).expect("write");
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let error = pipeline
+        .archive_directory_seekable(
+            source.path(),
+            FailOnPayloadWriter::default(),
+            RunTelemetryOptions::default(),
+            None,
+        )
+        .expect_err("archive should fail");
+
+    assert!(error.to_string().contains("I/O error: failing writer"));
+}
+
+#[test]
 fn archive_path_supports_directory_inputs() -> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(&source, "sample.txt", b"directory mode")?;
@@ -513,8 +557,8 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode()
--> Result<(), Box<dyn std::error::Error>> {
+fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode(
+) -> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(
         &source,
@@ -784,8 +828,8 @@ fn extract_path_filtered_handles_skipped_prefix_blocks() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn extract_path_filtered_with_regex_restores_matching_paths()
--> Result<(), Box<dyn std::error::Error>> {
+fn extract_path_filtered_with_regex_restores_matching_paths(
+) -> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(&source, "assets/logo.png", b"png")?;
     write_directory_file(&source, "docs/readme.txt", b"txt")?;
@@ -851,11 +895,9 @@ fn extract_path_filtered_rejects_file_archives() -> Result<(), Box<dyn std::erro
         )
         .expect_err("file archives should reject path filters");
 
-    assert!(
-        error
-            .to_string()
-            .contains("path or regex filters require a directory archive")
-    );
+    assert!(error
+        .to_string()
+        .contains("path or regex filters require a directory archive"));
     Ok(())
 }
 
@@ -887,11 +929,9 @@ fn extract_path_filtered_errors_when_no_paths_match() -> Result<(), Box<dyn std:
         )
         .expect_err("missing filters should fail");
 
-    assert!(
-        error
-            .to_string()
-            .contains("path filters did not match any archive entries")
-    );
+    assert!(error
+        .to_string()
+        .contains("path filters did not match any archive entries"));
     Ok(())
 }
 
@@ -1249,11 +1289,10 @@ fn directory_progress_reports_stable_block_total() -> Result<(), Box<dyn std::er
 
     let expected_total = sink.snapshots[0].blocks_total;
     assert!(expected_total > 0);
-    assert!(
-        sink.snapshots
-            .iter()
-            .all(|snapshot| snapshot.blocks_total == expected_total)
-    );
+    assert!(sink
+        .snapshots
+        .iter()
+        .all(|snapshot| snapshot.blocks_total == expected_total));
 
     let final_snapshot = sink.snapshots.last().expect("missing final snapshot");
     assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
@@ -1308,8 +1347,8 @@ fn extract_progress_reports_runtime_worker_snapshots() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn extract_archive_handles_queue_pressure_without_deadlock()
--> Result<(), Box<dyn std::error::Error>> {
+fn extract_archive_handles_queue_pressure_without_deadlock(
+) -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(192 * 1024);
     let file = write_fixture(&data)?;
 
