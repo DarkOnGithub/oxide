@@ -43,18 +43,18 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
 
     for chunk in data.chunks_exact(6) {
         
-        let y = i16::from_le_bytes([chunk[0], chunk[1]]);
-        let co = i16::from_le_bytes([chunk[2], chunk[3]]);
-        let cg = i16::from_le_bytes([chunk[4], chunk[5]]);
+        let y = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+        let co = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
+        let cg = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
         
         let t = y - (cg >> 1);
         let g = cg + t;
         let b = t - (co >> 1);
         let r = b + co;
 
-        output.push(r as u8);
-        output.push(g as u8);
-        output.push(b as u8);
+        output.push(r.clamp(0, 255) as u8);
+        output.push(g.clamp(0, 255) as u8);
+        output.push(b.clamp(0, 255) as u8);
     }
     Ok(output)
 }
