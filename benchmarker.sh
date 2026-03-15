@@ -7,6 +7,7 @@ OXIDE="./target/release/oxide-cli"
 OXIDE_OUTPUT="silesia_corpus.oxz"
 SQUASHFS_OUTPUT="archive.sqfs"
 BENCHMARK_THREADS="${BENCHMARK_THREADS:-16}"
+BENCHMARK_PASSES="${BENCHMARK_PASSES:-3}"
 SOURCE_BYTES="$(du -sb "$SOURCE" | cut -f1)"
 
 MODE_COMPRESSION=""
@@ -73,8 +74,9 @@ format_bytes() {
 run_and_record() {
     local tool=$1
     local mode=$2
-    local output_path=$3
-    shift 3
+    local pass=$3
+    local output_path=$4
+    shift 4
 
     local start_ns end_ns elapsed_ns elapsed_s output_bytes throughput
 
@@ -94,21 +96,22 @@ run_and_record() {
         }
     }')
 
-    RESULT_ROWS+=("$tool|$mode|$elapsed_s|$throughput|$output_bytes")
+    RESULT_ROWS+=("$tool|$mode|$pass|$elapsed_s|$throughput|$output_bytes")
 
     rm -f "$output_path"
 }
 
 print_results_table() {
-    local row tool mode elapsed throughput output_bytes ratio
+    local row tool mode pass elapsed throughput output_bytes ratio
+    local summary
 
     echo "=============================================================="
     echo " PERFORMANCE SUMMARY"
     echo "=============================================================="
-    printf "%-12s %-10s %10s %14s %14s %8s\n" "tool" "mode" "seconds" "MiB/s" "output" "ratio"
+    printf "%-12s %-10s %6s %10s %14s %14s %8s\n" "tool" "mode" "pass" "seconds" "MiB/s" "output" "ratio"
 
     for row in "${RESULT_ROWS[@]}"; do
-        IFS='|' read -r tool mode elapsed throughput output_bytes <<< "$row"
+        IFS='|' read -r tool mode pass elapsed throughput output_bytes <<< "$row"
         ratio=$(awk -v out="$output_bytes" -v inb="$SOURCE_BYTES" 'BEGIN {
             if (inb <= 0) {
                 printf "0.000"
@@ -117,14 +120,51 @@ print_results_table() {
             }
         }')
 
-        printf "%-12s %-10s %10s %14s %14s %8s\n" \
+        printf "%-12s %-10s %6s %10s %14s %14s %8s\n" \
             "$tool" \
             "$mode" \
+            "$pass" \
             "$elapsed" \
             "$throughput" \
             "$(format_bytes "$output_bytes")" \
             "$ratio"
     done
+
+    echo ""
+    echo "=============================================================="
+    echo " AVERAGES"
+    echo "=============================================================="
+    printf "%-12s %-10s %10s %14s %14s %8s\n" "tool" "mode" "avg sec" "avg MiB/s" "avg output" "ratio"
+
+    summary=$(printf '%s\n' "${RESULT_ROWS[@]}" | awk -F'|' -v source_bytes="$SOURCE_BYTES" '
+        {
+            key = $1 FS $2
+            count[key] += 1
+            elapsed[key] += $4
+            throughput[key] += $5
+            output[key] += $6
+        }
+        END {
+            for (key in count) {
+                avg_elapsed = elapsed[key] / count[key]
+                avg_throughput = throughput[key] / count[key]
+                avg_output = output[key] / count[key]
+                ratio = (source_bytes > 0) ? avg_output / source_bytes : 0
+                printf "%s|%.3f|%.2f|%.0f|%.3f\n", key, avg_elapsed, avg_throughput, avg_output, ratio
+            }
+        }
+    ' | sort -t'|' -k2,2 -k1,1)
+
+    while IFS='|' read -r tool mode avg_elapsed avg_throughput avg_output avg_ratio; do
+        [[ -z "$tool" ]] && continue
+        printf "%-12s %-10s %10s %14s %14s %8s\n" \
+            "$tool" \
+            "$mode" \
+            "$avg_elapsed" \
+            "$avg_throughput" \
+            "$(format_bytes "$avg_output")" \
+            "$avg_ratio"
+    done <<< "$summary"
 }
 
 run_oxide() {
@@ -132,7 +172,7 @@ run_oxide() {
 
     set_mode_config "$mode"
 
-    run_and_record "oxide" "$mode" "$OXIDE_OUTPUT" \
+    run_and_record "oxide" "$mode" "$CURRENT_PASS" "$OXIDE_OUTPUT" \
         "$OXIDE" archive "$SOURCE" \
         --output "$OXIDE_OUTPUT" \
         --preset "$mode" \
@@ -146,14 +186,14 @@ run_mksquashfs() {
     set_mode_config "$mode"
 
     if [[ -n "$MODE_LEVEL" ]]; then
-        run_and_record "mksquashfs" "$mode" "$SQUASHFS_OUTPUT" \
+        run_and_record "mksquashfs" "$mode" "$CURRENT_PASS" "$SQUASHFS_OUTPUT" \
             mksquashfs "$SOURCE" "$SQUASHFS_OUTPUT" \
             -comp "$MODE_COMPRESSION" \
             -Xcompression-level "$MODE_LEVEL" \
             -b "$SQUASHFS_BLOCK_SIZE" \
             -processors "$BENCHMARK_THREADS"
     else
-        run_and_record "mksquashfs" "$mode" "$SQUASHFS_OUTPUT" \
+        run_and_record "mksquashfs" "$mode" "$CURRENT_PASS" "$SQUASHFS_OUTPUT" \
             mksquashfs "$SOURCE" "$SQUASHFS_OUTPUT" \
             -comp "$MODE_COMPRESSION" \
             -b "$SQUASHFS_BLOCK_SIZE" \
@@ -167,7 +207,7 @@ run_gensquashfs() {
     set_mode_config "$mode"
 
     if [[ -n "$MODE_LEVEL" ]]; then
-        run_and_record "gensquashfs" "$mode" "$SQUASHFS_OUTPUT" \
+        run_and_record "gensquashfs" "$mode" "$CURRENT_PASS" "$SQUASHFS_OUTPUT" \
             gensquashfs "$SQUASHFS_OUTPUT" \
             -j "$BENCHMARK_THREADS" \
             -q \
@@ -177,7 +217,7 @@ run_gensquashfs() {
             -D "$SOURCE" \
             -f
     else
-        run_and_record "gensquashfs" "$mode" "$SQUASHFS_OUTPUT" \
+        run_and_record "gensquashfs" "$mode" "$CURRENT_PASS" "$SQUASHFS_OUTPUT" \
             gensquashfs "$SQUASHFS_OUTPUT" \
             -j "$BENCHMARK_THREADS" \
             -q \
@@ -194,23 +234,27 @@ run_bench() {
     echo " TESTING MODE: $mode "
     echo "======================================================"
 
-    drop_caches
+    for ((CURRENT_PASS = 1; CURRENT_PASS <= BENCHMARK_PASSES; CURRENT_PASS++)); do
+        echo "Pass $CURRENT_PASS/$BENCHMARK_PASSES"
 
-    echo "--- Oxide ($mode) ---"
-    run_oxide "$mode"
-    echo ""
+        drop_caches
 
-    drop_caches
+        echo "--- Oxide ($mode) ---"
+        run_oxide "$mode"
+        echo ""
 
-    echo "--- mksquashfs ($mode equivalent) ---"
-    run_mksquashfs "$mode"
-    echo ""
+        drop_caches
 
-    drop_caches
+        echo "--- mksquashfs ($mode equivalent) ---"
+        run_mksquashfs "$mode"
+        echo ""
 
-    echo "--- gensquashfs ($mode equivalent) ---"
-    run_gensquashfs "$mode"
-    echo ""
+        drop_caches
+
+        echo "--- gensquashfs ($mode equivalent) ---"
+        run_gensquashfs "$mode"
+        echo ""
+    done
 }
 
 build_oxide
