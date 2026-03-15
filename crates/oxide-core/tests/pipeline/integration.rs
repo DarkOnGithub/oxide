@@ -6,7 +6,7 @@ use oxide_core::{
     ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader,
     BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo, CompressionPreset, ExtractProgressEvent,
     FOOTER_SIZE, PreProcessingStrategy, ReportValue, RunTelemetryOptions, TelemetryEvent,
-    TelemetrySink,
+    TelemetrySink, TextStrategy,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -250,8 +250,7 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn pipeline_records_preprocessing_strategy_in_block_headers()
--> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_records_no_preprocessing_in_fast_mode() -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -273,6 +272,73 @@ fn pipeline_records_preprocessing_strategy_in_block_headers()
     assert_eq!(header.compression()?, CompressionAlgo::Lz4);
     assert_eq!(payload.len(), header.encoded_len as usize);
 
+    Ok(())
+}
+
+#[test]
+fn pipeline_records_text_preprocessing_in_balanced_mode() -> Result<(), Box<dyn std::error::Error>>
+{
+    let data = build_text_fixture(64 * 1024);
+    let file = write_fixture(&data)?;
+
+    let mut config = ArchivePipelineConfig::new(
+        8 * 1024,
+        2,
+        Arc::new(BufferPool::new(16 * 1024, 64)),
+        CompressionAlgo::Lz4,
+    );
+    config.performance.compression_preset = CompressionPreset::Default;
+    let pipeline = ArchivePipeline::new(config);
+
+    let archive = pipeline
+        .archive_file(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let mut reader = ArchiveReader::new(Cursor::new(archive))?;
+    let (header, _payload) = reader.read_block(0)?;
+
+    assert_eq!(
+        header.strategy()?,
+        PreProcessingStrategy::Text(TextStrategy::Bpe)
+    );
+    Ok(())
+}
+
+#[test]
+fn pipeline_records_text_preprocessing_in_ultra_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(64 * 1024);
+    let file = write_fixture(&data)?;
+
+    let mut config = ArchivePipelineConfig::new(
+        8 * 1024,
+        2,
+        Arc::new(BufferPool::new(16 * 1024, 64)),
+        CompressionAlgo::Lz4,
+    );
+    config.performance.compression_preset = CompressionPreset::High;
+    let pipeline = ArchivePipeline::new(config);
+
+    let archive = pipeline
+        .archive_file(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let mut reader = ArchiveReader::new(Cursor::new(archive))?;
+    let (header, _payload) = reader.read_block(0)?;
+
+    assert_eq!(
+        header.strategy()?,
+        PreProcessingStrategy::Text(TextStrategy::Bwt)
+    );
     Ok(())
 }
 
