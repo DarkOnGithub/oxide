@@ -8,7 +8,7 @@ use oxide_core::CompressionAlgo;
     name = "oxide",
     version,
     about = "Oxide archiver CLI",
-    long_about = "Archive and extract .oxz files with processing stats."
+    long_about = "Archive and extract .oxz files with processing stats"
 )]
 pub struct Cli {
     #[command(subcommand)]
