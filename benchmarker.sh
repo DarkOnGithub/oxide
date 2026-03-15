@@ -312,7 +312,7 @@ run_bench() {
 
 build_oxide
 
-for mode in "fast" ; do
+for mode in "fast" "balanced" "ultra"; do
   run_bench "$mode"
 done
 
