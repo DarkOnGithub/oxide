@@ -9,9 +9,10 @@ pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec
 
 /// Applies a reversible YCoCg-R color transform.
 pub fn apply(data: &[u8], metadata: Option<&utils::ImageMetadata>) -> Result<Vec<u8>> {
-    let meta = metadata.ok_or(OxideError::InvalidFormat(
-        "Metadata is required to apply the YCoCg-R transform"
-    ))?;
+    let meta = match metadata {
+        Some(m) => m,
+        None => return Ok(data.to_vec()),
+    };
     let pixels = bytes_to_data(data, meta)?;
     let mut output = Vec::with_capacity(pixels.len() * 6);
     for pixel in pixels {
