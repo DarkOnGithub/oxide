@@ -23,20 +23,18 @@ pub fn process_batch(
         batch.preprocessing_metadata.as_ref(),
     );
 
-    let mut preprocessing_elapsed = Duration::ZERO;
-    let mut preprocessed = None;
-    let compression_input = if strategy == crate::PreProcessingStrategy::None {
-        source
+    let (preprocessed, preprocessing_elapsed) = if strategy == crate::PreProcessingStrategy::None {
+        (None, Duration::ZERO)
     } else {
         let preprocessing_started = Instant::now();
-        preprocessed = Some(apply_preprocessing_with_metadata(
+        let p = apply_preprocessing_with_metadata(
             source,
             &strategy,
             batch.preprocessing_metadata.as_ref(),
-        )?);
-        preprocessing_elapsed = preprocessing_started.elapsed();
-        preprocessed.as_deref().unwrap_or(source)
+        )?;
+        (Some(p), preprocessing_started.elapsed())
     };
+    let compression_input = preprocessed.as_deref().unwrap_or(source);
 
     let compression_started = Instant::now();
     let compressed = apply_compression_request_with_scratch(
