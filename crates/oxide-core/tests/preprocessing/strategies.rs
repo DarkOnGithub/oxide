@@ -1,9 +1,10 @@
 use oxide_core::preprocessing::get_preprocessing_strategy;
 use oxide_core::preprocessing::{audio_lpc, image_locoi, image_paeth, image_ycocgr};
 use oxide_core::{
-    AudioEndian, AudioMetadata, AudioSampleEncoding, AudioStrategy, BinaryStrategy,
-    CompressionPreset, FileFormat, ImageMetadata, ImagePixelFormat, ImageStrategy, OxideError,
-    PreProcessingStrategy, PreprocessingMetadata, TextStrategy, apply_preprocessing_with_metadata,
+    apply_preprocessing_with_metadata, AudioEndian, AudioMetadata, AudioSampleEncoding,
+    AudioStrategy, BinaryStrategy, CompressionPreset, FileFormat, ImageMetadata,
+    ImagePixelFormat, ImageStrategy, OxideError, PreProcessingStrategy,
+    PreprocessingMetadata, TextStrategy,
 };
 
 #[test]
@@ -91,6 +92,18 @@ fn image_and_audio_apply_reverse_keep_raw_bytes() {
         audio_lpc::reverse(&raw).expect("reverse should succeed"),
         raw
     );
+}
+
+#[test]
+fn image_ycocgr_apply_and_reverse_round_trip_with_metadata() {
+    let metadata = ImageMetadata::packed(ImagePixelFormat::Rgb8).with_dimensions(2, 1);
+    let raw = [10u8, 20, 30, 40, 50, 60];
+
+    let transformed = image_ycocgr::apply(&raw, Some(&metadata)).expect("apply should succeed");
+    assert_ne!(transformed, raw, "YCoCg-R should mark transformed payloads");
+
+    let restored = image_ycocgr::reverse(&transformed).expect("reverse should succeed");
+    assert_eq!(restored, raw);
 }
 
 #[test]
