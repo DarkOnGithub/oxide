@@ -6,7 +6,10 @@
 pub mod detector;
 pub mod oxz;
 
-pub use detector::FormatDetector;
+pub use detector::{
+    FormatDetector, should_force_raw_storage, should_force_raw_storage_by_extension,
+    should_force_raw_storage_by_signature,
+};
 pub use oxz::{
     ARCHIVE_METADATA_SIZE, ArchiveBlockWriter, ArchiveManifest, ArchiveMetadata, ArchiveReader,
     ArchiveWriter, BlockHeader, BlockIterator, CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE,

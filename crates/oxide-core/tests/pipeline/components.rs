@@ -69,13 +69,13 @@ mod directory_tests {
         let mut batches = Vec::new();
 
         submitter
-            .push_bytes_with_hint(b"aaaaaa", FileFormat::Text, |batch| {
+            .push_bytes_with_hint(b"aaaaaa", FileFormat::Text, false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
             .expect("text push should succeed");
         submitter
-            .push_bytes_with_hint(b"bbbbbb", FileFormat::Binary, |batch| {
+            .push_bytes_with_hint(b"bbbbbb", FileFormat::Binary, false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
@@ -100,13 +100,13 @@ mod directory_tests {
         let mut batches = Vec::new();
 
         submitter
-            .push_bytes_with_hint(b"aaaaaa", FileFormat::Text, |batch| {
+            .push_bytes_with_hint(b"aaaaaa", FileFormat::Text, false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
             .expect("text push should succeed");
         submitter
-            .push_bytes_with_hint(b"bbbbbb", FileFormat::Binary, |batch| {
+            .push_bytes_with_hint(b"bbbbbb", FileFormat::Binary, false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
@@ -128,15 +128,55 @@ mod directory_tests {
     #[test]
     fn block_count_planner_respects_boundary_toggle() {
         let mut preserving = BlockCountPlanner::new(8, true);
-        preserving.push_len(4, FileFormat::Text);
-        preserving.push_len(4, FileFormat::Binary);
-        preserving.push_len(4, FileFormat::Text);
+        preserving.push_len(4, FileFormat::Text, false);
+        preserving.push_len(4, FileFormat::Binary, false);
+        preserving.push_len(4, FileFormat::Text, false);
         assert_eq!(preserving.finish(), 3);
 
         let mut merging = BlockCountPlanner::new(8, false);
-        merging.push_len(4, FileFormat::Text);
-        merging.push_len(4, FileFormat::Binary);
-        merging.push_len(4, FileFormat::Text);
+        merging.push_len(4, FileFormat::Text, false);
+        merging.push_len(4, FileFormat::Binary, false);
+        merging.push_len(4, FileFormat::Text, false);
         assert_eq!(merging.finish(), 2);
+    }
+
+    #[test]
+    fn submitter_flushes_on_raw_storage_policy_change() {
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8, false);
+        let mut batches = Vec::new();
+
+        submitter
+            .push_bytes_with_hint(b"aaaaaa", FileFormat::Text, false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("text push should succeed");
+        submitter
+            .push_bytes_with_hint(b"bbbbbb", FileFormat::Common, true, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("raw push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert_eq!(batches.len(), 2);
+        assert!(!batches[0].force_raw_storage);
+        assert_eq!(batches[0].len(), 6);
+        assert!(batches[1].force_raw_storage);
+        assert_eq!(batches[1].len(), 6);
+    }
+
+    #[test]
+    fn block_count_planner_flushes_on_raw_storage_policy_change() {
+        let mut planner = BlockCountPlanner::new(8, false);
+        planner.push_len(6, FileFormat::Text, false);
+        planner.push_len(6, FileFormat::Common, true);
+
+        assert_eq!(planner.finish(), 2);
     }
 }

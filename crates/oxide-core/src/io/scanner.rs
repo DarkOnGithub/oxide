@@ -216,6 +216,7 @@ impl InputScanner {
                 preprocessing_metadata: scan_detection.preprocessing_metadata,
                 stream_id: 0,
                 compression_plan: self.compression_plan,
+                force_raw_storage: false,
             });
             start = end;
             id += 1;

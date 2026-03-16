@@ -37,6 +37,8 @@ pub struct Batch {
     pub preprocessing_metadata: Option<PreprocessingMetadata>,
     pub stream_id: u32,
     pub compression_plan: ChunkEncodingPlan,
+    /// Whether this batch must be stored raw without preprocessing or compression.
+    pub force_raw_storage: bool,
 }
 
 /// Planner-selected encoding parameters for a chunk.
@@ -113,6 +115,7 @@ impl Batch {
             preprocessing_metadata: None,
             stream_id: 0,
             compression_plan: ChunkEncodingPlan::default(),
+            force_raw_storage: false,
         }
     }
 
@@ -137,6 +140,7 @@ impl Batch {
             preprocessing_metadata: None,
             stream_id: 0,
             compression_plan: ChunkEncodingPlan::default(),
+            force_raw_storage: false,
         }
     }
 
@@ -165,6 +169,7 @@ impl Batch {
             preprocessing_metadata: None,
             stream_id: 0,
             compression_plan: ChunkEncodingPlan::default(),
+            force_raw_storage: false,
         }
     }
 

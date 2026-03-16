@@ -1,6 +1,6 @@
+use crate::Result;
 use crate::error::OxideError;
 use crate::preprocessing::utils;
-use crate::Result;
 
 const TRANSFORM_MARKER: &[u8; 4] = b"YCGR";
 

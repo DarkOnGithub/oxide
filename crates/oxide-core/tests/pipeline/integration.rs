@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader,
-    BufferPool, CompressionAlgo, CompressionPreset, ExtractProgressEvent, PreProcessingStrategy,
-    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, TextStrategy,
-    CHUNK_TABLE_HEADER_SIZE, FOOTER_SIZE,
+    BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo, CompressionPreset, ExtractProgressEvent,
+    FOOTER_SIZE, PreProcessingStrategy, ReportValue, RunTelemetryOptions, TelemetryEvent,
+    TelemetrySink, TextStrategy,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -195,8 +195,8 @@ fn pipeline_seekable_archive_path_roundtrips_file_output() -> Result<(), Box<dyn
 }
 
 #[test]
-fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_incompressible_fixture(256 * 1024);
     let file = write_fixture(&data)?;
 
@@ -237,6 +237,138 @@ fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller(
     let (restored, _report) =
         pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
     assert_eq!(restored, data);
+    Ok(())
+}
+
+#[test]
+fn pipeline_forces_raw_storage_for_known_compressed_extensions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(64 * 1024);
+    let root = tempfile::tempdir()?;
+    let input = root.path().join("fixture.jpg");
+    std::fs::write(&input, &data)?;
+
+    let mut config = ArchivePipelineConfig::new(
+        8 * 1024,
+        2,
+        Arc::new(BufferPool::new(16 * 1024, 64)),
+        CompressionAlgo::Lz4,
+    );
+    config.performance.compression_preset = CompressionPreset::High;
+    let pipeline = ArchivePipeline::new(config);
+
+    let run = pipeline.archive_path(&input, Vec::new(), RunTelemetryOptions::default(), None)?;
+    assert!(matches!(
+        run.report.extensions.get("compression.raw_passthrough_blocks"),
+        Some(ReportValue::U64(count)) if *count > 0
+    ));
+
+    let archive = run.writer;
+    let mut reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+    let mut raw_blocks = 0usize;
+    for block in reader.iter_blocks() {
+        let (header, payload) = block?;
+        let compression = header.compression_meta()?;
+        assert!(compression.raw_passthrough);
+        assert_eq!(header.strategy()?, PreProcessingStrategy::None);
+        assert_eq!(payload.len(), header.raw_len as usize);
+        raw_blocks += 1;
+    }
+    assert!(raw_blocks > 0);
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, data);
+    Ok(())
+}
+
+#[test]
+fn pipeline_forces_raw_storage_for_known_signatures() -> Result<(), Box<dyn std::error::Error>> {
+    let mut data = build_text_fixture(64 * 1024);
+    data.splice(0..4, [0xFF, 0xD8, 0xFF, 0xE0]);
+    let root = tempfile::tempdir()?;
+    let input = root.path().join("fixture.bin");
+    std::fs::write(&input, &data)?;
+
+    let mut config = ArchivePipelineConfig::new(
+        8 * 1024,
+        2,
+        Arc::new(BufferPool::new(16 * 1024, 64)),
+        CompressionAlgo::Lz4,
+    );
+    config.performance.compression_preset = CompressionPreset::High;
+    let pipeline = ArchivePipeline::new(config);
+
+    let run = pipeline.archive_path(&input, Vec::new(), RunTelemetryOptions::default(), None)?;
+    assert!(matches!(
+        run.report.extensions.get("compression.raw_passthrough_blocks"),
+        Some(ReportValue::U64(count)) if *count > 0
+    ));
+
+    let archive = run.writer;
+    let mut reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+    for block in reader.iter_blocks() {
+        let (header, _payload) = block?;
+        assert!(header.compression_meta()?.raw_passthrough);
+        assert_eq!(header.strategy()?, PreProcessingStrategy::None);
+    }
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, data);
+    Ok(())
+}
+
+#[test]
+fn directory_archives_split_batches_when_raw_storage_signature_changes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let text = build_text_fixture(8 * 1024);
+    let mut image = build_text_fixture(8 * 1024);
+    image.splice(0..4, [0xFF, 0xD8, 0xFF, 0xE0]);
+    write_directory_file(&root, "01-notes.txt", &text)?;
+    write_directory_file(&root, "02-photo.bin", &image)?;
+
+    let mut config = ArchivePipelineConfig::new(
+        64 * 1024,
+        2,
+        Arc::new(BufferPool::new(16 * 1024, 64)),
+        CompressionAlgo::Lz4,
+    );
+    config.performance.compression_preset = CompressionPreset::High;
+    let pipeline = ArchivePipeline::new(config);
+
+    let run = pipeline.archive_path(
+        root.path(),
+        Vec::new(),
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+    assert!(matches!(
+        run.report.extensions.get("compression.raw_passthrough_blocks"),
+        Some(ReportValue::U64(count)) if *count == 1
+    ));
+
+    let archive = run.writer;
+    let mut reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+    let raw_flags = reader
+        .iter_blocks()
+        .map(|block| {
+            let (header, _payload) = block?;
+            Ok(header.compression_meta()?.raw_passthrough)
+        })
+        .collect::<Result<Vec<_>, oxide_core::OxideError>>()?;
+    assert_eq!(raw_flags, vec![false, true]);
+
+    let output = tempfile::tempdir()?;
+    pipeline.extract_directory_archive(
+        Cursor::new(archive),
+        output.path(),
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+    assert_eq!(std::fs::read(output.path().join("01-notes.txt"))?, text);
+    assert_eq!(std::fs::read(output.path().join("02-photo.bin"))?, image);
     Ok(())
 }
 
@@ -557,8 +689,8 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode()
+-> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(
         &source,
@@ -828,8 +960,8 @@ fn extract_path_filtered_handles_skipped_prefix_blocks() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn extract_path_filtered_with_regex_restores_matching_paths(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn extract_path_filtered_with_regex_restores_matching_paths()
+-> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(&source, "assets/logo.png", b"png")?;
     write_directory_file(&source, "docs/readme.txt", b"txt")?;
@@ -895,9 +1027,11 @@ fn extract_path_filtered_rejects_file_archives() -> Result<(), Box<dyn std::erro
         )
         .expect_err("file archives should reject path filters");
 
-    assert!(error
-        .to_string()
-        .contains("path or regex filters require a directory archive"));
+    assert!(
+        error
+            .to_string()
+            .contains("path or regex filters require a directory archive")
+    );
     Ok(())
 }
 
@@ -929,9 +1063,11 @@ fn extract_path_filtered_errors_when_no_paths_match() -> Result<(), Box<dyn std:
         )
         .expect_err("missing filters should fail");
 
-    assert!(error
-        .to_string()
-        .contains("path filters did not match any archive entries"));
+    assert!(
+        error
+            .to_string()
+            .contains("path filters did not match any archive entries")
+    );
     Ok(())
 }
 
@@ -1289,10 +1425,11 @@ fn directory_progress_reports_stable_block_total() -> Result<(), Box<dyn std::er
 
     let expected_total = sink.snapshots[0].blocks_total;
     assert!(expected_total > 0);
-    assert!(sink
-        .snapshots
-        .iter()
-        .all(|snapshot| snapshot.blocks_total == expected_total));
+    assert!(
+        sink.snapshots
+            .iter()
+            .all(|snapshot| snapshot.blocks_total == expected_total)
+    );
 
     let final_snapshot = sink.snapshots.last().expect("missing final snapshot");
     assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
@@ -1347,8 +1484,8 @@ fn extract_progress_reports_runtime_worker_snapshots() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn extract_archive_handles_queue_pressure_without_deadlock(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn extract_archive_handles_queue_pressure_without_deadlock()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(192 * 1024);
     let file = write_fixture(&data)?;
 

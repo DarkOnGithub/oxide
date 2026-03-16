@@ -4,7 +4,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::buffer::BufferPool;
-use crate::format::{ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter};
+use crate::format::{
+    ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter, should_force_raw_storage,
+};
 use crate::io::{ChunkingPolicy, InputScanner};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetrySink};
@@ -213,7 +215,16 @@ impl<'a> Archiver<'a> {
             )
             .with_zstd_level(self.config.performance.zstd_level),
         );
-        let batches = scanner.scan_file(path)?;
+        let mut batches = scanner.scan_file(path)?;
+        let force_raw_storage = batches
+            .first()
+            .map(|batch| should_force_raw_storage(path, batch.data()))
+            .unwrap_or(false);
+        if force_raw_storage {
+            for batch in &mut batches {
+                batch.force_raw_storage = true;
+            }
+        }
         let input_bytes_total = batches.iter().map(|batch| batch.len() as u64).sum();
         let manifest = file_manifest(path, input_bytes_total)?;
         Ok(PreparedInput {

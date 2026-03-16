@@ -6,7 +6,7 @@ use std::thread;
 use bytes::Bytes;
 use jwalk::WalkDir;
 
-use crate::format::FormatDetector;
+use crate::format::{FormatDetector, should_force_raw_storage};
 use crate::types::{Batch, ChunkEncodingPlan, FileFormat, Result};
 
 use super::types::{ArchiveListingEntry, ArchiveSourceKind};
@@ -40,6 +40,12 @@ pub(super) struct DirectoryDiscovery {
     pub(super) input_bytes_total: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FileProbePlan {
+    pub(super) format: FileFormat,
+    pub(super) force_raw_storage: bool,
+}
+
 /// Utility for grouping file data into batches while respecting format boundaries.
 #[derive(Debug, Clone)]
 pub struct DirectoryBatchSubmitter {
@@ -50,6 +56,7 @@ pub struct DirectoryBatchSubmitter {
     next_block_id: usize,
     pending: Vec<u8>,
     pending_format: Option<FileFormat>,
+    pending_force_raw_storage: Option<bool>,
 }
 
 impl DirectoryBatchSubmitter {
@@ -76,6 +83,7 @@ impl DirectoryBatchSubmitter {
             next_block_id: 0,
             pending: Vec::with_capacity(block_size.max(1)),
             pending_format: None,
+            pending_force_raw_storage: None,
         }
     }
 
@@ -83,12 +91,26 @@ impl DirectoryBatchSubmitter {
         &mut self,
         mut bytes: &[u8],
         file_type_hint: FileFormat,
+        force_raw_storage: bool,
         mut submit: F,
     ) -> Result<()>
     where
         F: FnMut(Batch) -> Result<()>,
     {
         while !bytes.is_empty() {
+            match self.pending_force_raw_storage {
+                Some(current) if current != force_raw_storage => {
+                    if !self.pending.is_empty() {
+                        self.flush_pending(&mut submit)?;
+                    }
+                    self.pending_force_raw_storage = Some(force_raw_storage);
+                }
+                Some(_) => {}
+                None => {
+                    self.pending_force_raw_storage = Some(force_raw_storage);
+                }
+            }
+
             match self.pending_format {
                 Some(current) if current != file_type_hint => {
                     if self.preserve_format_boundaries {
@@ -143,10 +165,12 @@ impl DirectoryBatchSubmitter {
             preprocessing_metadata: None,
             stream_id: 0,
             compression_plan: self.compression_plan,
+            force_raw_storage: self.pending_force_raw_storage.unwrap_or(false),
         };
         submit(batch)?;
         self.next_block_id += 1;
         self.pending_format = None;
+        self.pending_force_raw_storage = None;
         Ok(())
     }
 }
@@ -274,34 +298,61 @@ pub(super) fn detect_file_formats(
     format_probe_limit: usize,
     threads: usize,
 ) -> Result<Vec<FileFormat>> {
+    Ok(
+        detect_file_probe_plans(discovery, format_probe_limit, threads)?
+            .into_iter()
+            .map(|plan| plan.format)
+            .collect(),
+    )
+}
+
+pub(super) fn detect_file_probe_plans(
+    discovery: &DirectoryDiscovery,
+    format_probe_limit: usize,
+    threads: usize,
+) -> Result<Vec<FileProbePlan>> {
     let probe_limit = format_probe_limit.max(1);
-    let mut formats = vec![FileFormat::Common; discovery.files.len()];
+    let mut plans = vec![
+        FileProbePlan {
+            format: FileFormat::Common,
+            force_raw_storage: false,
+        };
+        discovery.files.len()
+    ];
     let worker_count = threads.max(1).min(discovery.files.len().max(1));
 
     if worker_count == 1 {
         let mut probe = vec![0u8; probe_limit];
-        for (file, format) in discovery.files.iter().zip(formats.iter_mut()) {
+        for (file, plan) in discovery.files.iter().zip(plans.iter_mut()) {
             let mut reader = fs::File::open(&file.full_path)?;
             let read = reader.read(&mut probe)?;
-            *format = FormatDetector::detect(&probe[..read]);
+            let data = &probe[..read];
+            *plan = FileProbePlan {
+                format: FormatDetector::detect(data),
+                force_raw_storage: should_force_raw_storage(&file.full_path, data),
+            };
         }
-        return Ok(formats);
+        return Ok(plans);
     }
 
     let chunk_size = discovery.files.len().div_ceil(worker_count).max(1);
     thread::scope(|scope| -> Result<()> {
         let mut handles = Vec::new();
-        for (files_chunk, formats_chunk) in discovery
+        for (files_chunk, plans_chunk) in discovery
             .files
             .chunks(chunk_size)
-            .zip(formats.chunks_mut(chunk_size))
+            .zip(plans.chunks_mut(chunk_size))
         {
             handles.push(scope.spawn(move || -> Result<()> {
                 let mut probe = vec![0u8; probe_limit];
-                for (file, format) in files_chunk.iter().zip(formats_chunk.iter_mut()) {
+                for (file, plan) in files_chunk.iter().zip(plans_chunk.iter_mut()) {
                     let mut reader = fs::File::open(&file.full_path)?;
                     let read = reader.read(&mut probe)?;
-                    *format = FormatDetector::detect(&probe[..read]);
+                    let data = &probe[..read];
+                    *plan = FileProbePlan {
+                        format: FormatDetector::detect(data),
+                        force_raw_storage: should_force_raw_storage(&file.full_path, data),
+                    };
                 }
                 Ok(())
             }));
@@ -328,33 +379,49 @@ pub(super) fn detect_file_formats(
         Ok(())
     })?;
 
-    Ok(formats)
+    Ok(plans)
 }
 
 pub(super) fn estimate_directory_block_count(
     discovery: &DirectoryDiscovery,
     file_formats: &[FileFormat],
+    file_force_raw_storage: &[bool],
     block_size: usize,
     preserve_format_boundaries: bool,
 ) -> Result<u32> {
-    if !preserve_format_boundaries {
+    if discovery.files.len() != file_force_raw_storage.len() {
+        return Err(crate::OxideError::InvalidFormat(
+            "directory raw storage plan mismatch",
+        ));
+    }
+
+    let has_forced_raw_storage = file_force_raw_storage.iter().any(|force_raw| *force_raw);
+    if !preserve_format_boundaries && !has_forced_raw_storage {
         let block_size = block_size.max(1) as u64;
         let block_count = discovery.input_bytes_total.div_ceil(block_size);
         return u32::try_from(block_count)
             .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v2"));
     }
 
-    if discovery.files.len() != file_formats.len() {
+    if preserve_format_boundaries && discovery.files.len() != file_formats.len() {
         return Err(crate::OxideError::InvalidFormat(
             "directory file format plan mismatch",
         ));
     }
 
     let mut planner = BlockCountPlanner::new(block_size, preserve_format_boundaries);
-    for (file, file_format) in discovery.files.iter().zip(file_formats.iter().copied()) {
+    for (index, file) in discovery.files.iter().enumerate() {
         let file_size = usize::try_from(file.size)
             .map_err(|_| crate::OxideError::InvalidFormat("file size exceeds usize range"))?;
-        planner.push_len(file_size, file_format);
+        let force_raw_storage = file_force_raw_storage[index];
+        let file_format = if force_raw_storage {
+            FileFormat::Common
+        } else if preserve_format_boundaries {
+            file_formats[index]
+        } else {
+            FileFormat::Common
+        };
+        planner.push_len(file_size, file_format, force_raw_storage);
     }
 
     u32::try_from(planner.finish())
@@ -363,7 +430,10 @@ pub(super) fn estimate_directory_block_count(
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_file_formats, discover_directory_tree, estimate_directory_block_count};
+    use super::{
+        detect_file_formats, detect_file_probe_plans, discover_directory_tree,
+        estimate_directory_block_count,
+    };
     use crate::types::FileFormat;
     use std::fs;
     use tempfile::tempdir;
@@ -403,6 +473,21 @@ mod tests {
     }
 
     #[test]
+    fn probe_plan_detects_signature_based_raw_storage() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::write(root.join("photo.bin"), [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10])
+            .expect("write jpeg header");
+
+        let discovery = discover_directory_tree(root).expect("discover directory");
+        let plans = detect_file_probe_plans(&discovery, 64 * 1024, 1).expect("probe plans");
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].format, FileFormat::Image);
+        assert!(plans[0].force_raw_storage);
+    }
+
+    #[test]
     fn block_count_uses_formats_embedded_in_discovery() {
         let temp = tempdir().expect("tempdir");
         let root = temp.path();
@@ -411,8 +496,9 @@ mod tests {
 
         let discovery = discover_directory_tree(root).expect("discover directory");
         let formats = detect_file_formats(&discovery, 64 * 1024, 2).expect("probe formats");
+        let raw_plan = vec![false; discovery.files.len()];
         let block_count =
-            estimate_directory_block_count(&discovery, &formats, 4, true).expect("plan");
+            estimate_directory_block_count(&discovery, &formats, &raw_plan, 4, true).expect("plan");
 
         assert_eq!(block_count, 4);
     }
@@ -425,9 +511,26 @@ mod tests {
         fs::write(root.join("beta.bin"), [0, 159, 146, 150, 42]).expect("write beta");
 
         let discovery = discover_directory_tree(root).expect("discover directory");
-        let block_count = estimate_directory_block_count(&discovery, &[], 4, false).expect("plan");
+        let raw_plan = vec![false; discovery.files.len()];
+        let block_count =
+            estimate_directory_block_count(&discovery, &[], &raw_plan, 4, false).expect("plan");
 
         assert_eq!(block_count, 3);
+    }
+
+    #[test]
+    fn block_count_accounts_for_raw_storage_policy_changes() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::write(root.join("first.txt"), b"aaaaaa").expect("write first");
+        fs::write(root.join("second.jpg"), b"bbbbbb").expect("write second");
+
+        let discovery = discover_directory_tree(root).expect("discover directory");
+        let raw_plan = vec![false, true];
+        let block_count =
+            estimate_directory_block_count(&discovery, &[], &raw_plan, 8, false).expect("plan");
+
+        assert_eq!(block_count, 2);
     }
 }
 
@@ -484,6 +587,7 @@ pub struct BlockCountPlanner {
     blocks: usize,
     pending_len: usize,
     pending_format: Option<FileFormat>,
+    pending_force_raw_storage: Option<bool>,
 }
 
 impl BlockCountPlanner {
@@ -494,11 +598,28 @@ impl BlockCountPlanner {
             blocks: 0,
             pending_len: 0,
             pending_format: None,
+            pending_force_raw_storage: None,
         }
     }
 
-    pub fn push_len(&mut self, mut len: usize, file_type_hint: FileFormat) {
+    pub fn push_len(
+        &mut self,
+        mut len: usize,
+        file_type_hint: FileFormat,
+        force_raw_storage: bool,
+    ) {
         while len > 0 {
+            match self.pending_force_raw_storage {
+                Some(current) if current != force_raw_storage => {
+                    self.flush_pending();
+                    self.pending_force_raw_storage = Some(force_raw_storage);
+                }
+                Some(_) => {}
+                None => {
+                    self.pending_force_raw_storage = Some(force_raw_storage);
+                }
+            }
+
             match self.pending_format {
                 Some(current) if current != file_type_hint => {
                     if self.preserve_format_boundaries {
@@ -535,6 +656,7 @@ impl BlockCountPlanner {
             self.blocks += 1;
             self.pending_len = 0;
             self.pending_format = None;
+            self.pending_force_raw_storage = None;
         }
     }
 }

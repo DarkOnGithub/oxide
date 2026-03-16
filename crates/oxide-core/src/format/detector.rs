@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Instant;
 
 use crate::telemetry;
@@ -27,6 +28,11 @@ const CONTROL_RATIO_THRESHOLD: f32 = 0.02;
 /// ```
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FormatDetector;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawStorageDecision {
+    pub force_raw_storage: bool,
+}
 
 impl FormatDetector {
     /// Creates a new format detector instance.
@@ -155,5 +161,122 @@ impl FormatDetector {
         PROLOGUES
             .iter()
             .any(|pattern| probe.windows(pattern.len()).any(|w| w == *pattern))
+    }
+}
+
+#[inline]
+fn matches_force_raw_storage_label(label: &str) -> bool {
+    matches!(
+        label,
+        "7z" | "aac"
+            | "apk"
+            | "avif"
+            | "br"
+            | "bz2"
+            | "docx"
+            | "epub"
+            | "flac"
+            | "gif"
+            | "gz"
+            | "heic"
+            | "heif"
+            | "jar"
+            | "jpeg"
+            | "jpg"
+            | "jxl"
+            | "lz4"
+            | "m4a"
+            | "m4v"
+            | "mkv"
+            | "mov"
+            | "mp3"
+            | "mp4"
+            | "ogg"
+            | "opus"
+            | "oxz"
+            | "png"
+            | "pptx"
+            | "rar"
+            | "webm"
+            | "webp"
+            | "whl"
+            | "xlsx"
+            | "xz"
+            | "zip"
+            | "zst"
+            | "zstd"
+    )
+}
+
+pub fn should_force_raw_storage_by_extension(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+
+    matches_force_raw_storage_label(&ext.to_ascii_lowercase())
+}
+
+pub fn should_force_raw_storage_by_signature(data: &[u8]) -> bool {
+    let Some(kind) = infer::get(data) else {
+        return false;
+    };
+
+    matches_force_raw_storage_label(kind.extension())
+}
+
+pub fn should_force_raw_storage(path: &Path, data: &[u8]) -> bool {
+    should_force_raw_storage_by_signature(data) || should_force_raw_storage_by_extension(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{
+        should_force_raw_storage, should_force_raw_storage_by_extension,
+        should_force_raw_storage_by_signature,
+    };
+
+    #[test]
+    fn raw_storage_extension_policy_matches_known_compressed_types() {
+        assert!(should_force_raw_storage_by_extension(Path::new(
+            "photo.jpg"
+        )));
+        assert!(should_force_raw_storage_by_extension(Path::new(
+            "bundle.ZIP"
+        )));
+        assert!(should_force_raw_storage_by_extension(Path::new(
+            "archive.tar.zst"
+        )));
+        assert!(!should_force_raw_storage_by_extension(Path::new(
+            "notes.txt"
+        )));
+        assert!(!should_force_raw_storage_by_extension(Path::new(
+            "bitmap.bmp"
+        )));
+        assert!(!should_force_raw_storage_by_extension(Path::new("README")));
+    }
+
+    #[test]
+    fn raw_storage_signature_policy_matches_known_headers() {
+        assert!(should_force_raw_storage_by_signature(&[
+            0xFF, 0xD8, 0xFF, 0xE0
+        ]));
+        assert!(should_force_raw_storage_by_signature(b"PK\x03\x04payload"));
+        assert!(!should_force_raw_storage_by_signature(
+            b"plain text payload"
+        ));
+    }
+
+    #[test]
+    fn raw_storage_policy_prefers_signature_when_extension_is_not_listed() {
+        assert!(should_force_raw_storage(
+            Path::new("payload.bin"),
+            &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]
+        ));
+        assert!(!should_force_raw_storage(
+            Path::new("payload.bin"),
+            b"plain text payload"
+        ));
     }
 }
