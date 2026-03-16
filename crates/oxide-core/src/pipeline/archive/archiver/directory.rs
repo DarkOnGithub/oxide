@@ -1,4 +1,4 @@
-use crossbeam_channel::{bounded, select, Receiver, TryRecvError};
+use crossbeam_channel::{Receiver, TryRecvError, bounded, select};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -42,24 +42,27 @@ where
     let discovery_started = Instant::now();
     let discovery = directory::discover_directory_tree(root)?;
     stage_timings.discovery += discovery_started.elapsed();
-
     let block_size = config.target_block_size;
-    let file_formats = if preserve_boundaries {
-        let format_probe_started = Instant::now();
-        let formats = directory::detect_file_formats(
-            &discovery,
-            DIRECTORY_FORMAT_PROBE_LIMIT,
-            config.performance.producer_threads,
-        )?;
-        stage_timings.format_probe += format_probe_started.elapsed();
-        formats
-    } else {
-        Vec::new()
-    };
+    let format_probe_started = Instant::now();
+    let file_probe_plans = directory::detect_file_probe_plans(
+        &discovery,
+        DIRECTORY_FORMAT_PROBE_LIMIT,
+        config.performance.producer_threads,
+    )?;
+    stage_timings.format_probe += format_probe_started.elapsed();
+    let file_formats = file_probe_plans
+        .iter()
+        .map(|plan| plan.format)
+        .collect::<Vec<_>>();
+    let file_force_raw_storage = file_probe_plans
+        .iter()
+        .map(|plan| plan.force_raw_storage)
+        .collect::<Vec<_>>();
 
     let block_count = directory::estimate_directory_block_count(
         &discovery,
         &file_formats,
+        &file_force_raw_storage,
         block_size,
         preserve_boundaries,
     )?;
@@ -207,6 +210,7 @@ where
     let producer_root = discovery.root.clone();
     let producer_files = discovery.files.clone();
     let producer_file_formats = file_formats;
+    let producer_force_raw_storage = file_force_raw_storage;
     let producer_block_size = block_size;
     let producer_compression_plan = ChunkEncodingPlan::new(
         config.compression_algo,
@@ -278,7 +282,10 @@ where
         let mut read_buffer = vec![0u8; stream_read_buffer_size];
         let mut format_probe = vec![0u8; DIRECTORY_FORMAT_PROBE_LIMIT];
         for (file_index, file) in producer_files.iter().enumerate() {
-            let file_format = if preserve_boundaries {
+            let force_raw_storage = producer_force_raw_storage[file_index];
+            let file_format = if force_raw_storage {
+                FileFormat::Common
+            } else if preserve_boundaries {
                 producer_file_formats[file_index]
             } else {
                 FileFormat::Common
@@ -326,18 +333,25 @@ where
                     }
                 };
                 producer_read += prefetched_file.read_elapsed;
-                let file_format = if preserve_boundaries {
+                let file_format = if force_raw_storage {
+                    FileFormat::Common
+                } else if preserve_boundaries {
                     file_format
                 } else {
                     detect_file_format_hint(&prefetched_file.data)
                 };
-                submitter.push_bytes_with_hint(&prefetched_file.data, file_format, |batch| {
-                    submit_batch(batch)
-                })?;
+                submitter.push_bytes_with_hint(
+                    &prefetched_file.data,
+                    file_format,
+                    force_raw_storage,
+                    |batch| submit_batch(batch),
+                )?;
             } else if file_size >= mmap_threshold {
                 let read_started = Instant::now();
                 let mmap = MmapInput::open(&file.full_path)?;
-                let file_format = if preserve_boundaries {
+                let file_format = if force_raw_storage {
+                    FileFormat::Common
+                } else if preserve_boundaries {
                     file_format
                 } else {
                     let probe_end = mmap.len().min(DIRECTORY_FORMAT_PROBE_LIMIT);
@@ -349,15 +363,20 @@ where
                 while offset < len {
                     let end = offset.saturating_add(stream_read_buffer_size).min(len);
                     let bytes = mmap.mapped_slice(offset, end)?;
-                    submitter.push_bytes_with_hint(bytes.as_slice(), file_format, |batch| {
-                        submit_batch(batch)
-                    })?;
+                    submitter.push_bytes_with_hint(
+                        bytes.as_slice(),
+                        file_format,
+                        force_raw_storage,
+                        |batch| submit_batch(batch),
+                    )?;
                     offset = end;
                 }
                 producer_read += read_started.elapsed();
             } else {
                 let mut file_reader = fs::File::open(&file.full_path)?;
-                let file_format = if preserve_boundaries {
+                let file_format = if force_raw_storage {
+                    FileFormat::Common
+                } else if preserve_boundaries {
                     file_format
                 } else {
                     let probe_read = file_reader.read(&mut format_probe)?;
@@ -366,6 +385,7 @@ where
                         submitter.push_bytes_with_hint(
                             &format_probe[..probe_read],
                             detected,
+                            force_raw_storage,
                             |batch| submit_batch(batch),
                         )?;
                     }
@@ -379,9 +399,12 @@ where
                         break;
                     }
 
-                    submitter.push_bytes_with_hint(&read_buffer[..read], file_format, |batch| {
-                        submit_batch(batch)
-                    })?;
+                    submitter.push_bytes_with_hint(
+                        &read_buffer[..read],
+                        file_format,
+                        force_raw_storage,
+                        |batch| submit_batch(batch),
+                    )?;
                 }
             }
 

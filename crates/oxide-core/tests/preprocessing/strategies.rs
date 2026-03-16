@@ -1,10 +1,9 @@
 use oxide_core::preprocessing::get_preprocessing_strategy;
 use oxide_core::preprocessing::{audio_lpc, image_locoi, image_paeth, image_ycocgr};
 use oxide_core::{
-    apply_preprocessing_with_metadata, AudioEndian, AudioMetadata, AudioSampleEncoding,
-    AudioStrategy, BinaryStrategy, CompressionPreset, FileFormat, ImageMetadata,
-    ImagePixelFormat, ImageStrategy, OxideError, PreProcessingStrategy,
-    PreprocessingMetadata, TextStrategy,
+    AudioEndian, AudioMetadata, AudioSampleEncoding, AudioStrategy, BinaryStrategy,
+    CompressionPreset, FileFormat, ImageMetadata, ImagePixelFormat, ImageStrategy, OxideError,
+    PreProcessingStrategy, PreprocessingMetadata, TextStrategy, apply_preprocessing_with_metadata,
 };
 
 #[test]

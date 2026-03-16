@@ -4,7 +4,7 @@ use std::path::Path;
 
 use oxide_core::{ArchiveEntryKind, ArchiveListingEntry, ArchiveTimestamp};
 
-use crate::ui::{format_bytes, paint, StreamTarget, Tone};
+use crate::ui::{StreamTarget, Tone, format_bytes, paint};
 
 #[derive(Debug, Default)]
 struct TreeNode {

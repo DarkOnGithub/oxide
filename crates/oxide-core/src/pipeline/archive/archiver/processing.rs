@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::buffer::BufferPool;
-use crate::compression::{apply_compression_request_with_scratch, CompressionRequest};
+use crate::compression::{CompressionRequest, apply_compression_request_with_scratch};
 use crate::core::WorkerScratchArena;
 use crate::pipeline::archive::types::ProcessingThroughputTotals;
 use crate::preprocessing::{apply_preprocessing_with_metadata, get_preprocessing_strategy};
@@ -19,6 +19,25 @@ pub fn process_batch(
 ) -> Result<CompressedBlock> {
     let source = batch.data();
     let plan = batch.compression_plan;
+    if batch.force_raw_storage {
+        processing_totals.record(
+            source.len() as u64,
+            Duration::ZERO,
+            source.len() as u64,
+            Duration::ZERO,
+        );
+
+        return Ok(CompressedBlock::with_chunk_encoding(
+            batch.id,
+            batch.stream_id,
+            source.to_vec(),
+            crate::PreProcessingStrategy::None,
+            plan,
+            true,
+            batch.len() as u64,
+        ));
+    }
+
     let strategy = if skip_preprocessing {
         crate::PreProcessingStrategy::None
     } else {
@@ -183,5 +202,37 @@ mod tests {
             reverse_preprocessing(&block.data, &block.pre_proc).expect("reverse should succeed"),
             b"banana bandana banana"
         );
+    }
+
+    #[test]
+    fn force_raw_storage_bypasses_preprocessing_and_compression() {
+        let mut batch = Batch::with_hint(
+            0,
+            "photo.jpg",
+            Bytes::from_static(b"banana bandana banana"),
+            FileFormat::Text,
+        );
+        batch.compression_plan =
+            ChunkEncodingPlan::new(CompressionAlgo::Lz4, CompressionPreset::Default);
+        batch.force_raw_storage = true;
+
+        let pool = BufferPool::new(1024, 4);
+        let totals = ProcessingThroughputTotals::default();
+        let mut scratch = WorkerScratchArena::new();
+        let block = process_batch(
+            batch,
+            &pool,
+            CompressionAlgo::Lz4,
+            false,
+            false,
+            true,
+            &totals,
+            &mut scratch,
+        )
+        .expect("batch should process");
+
+        assert!(block.raw_passthrough);
+        assert_eq!(block.pre_proc, PreProcessingStrategy::None);
+        assert_eq!(block.data, b"banana bandana banana");
     }
 }
