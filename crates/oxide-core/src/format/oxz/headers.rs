@@ -324,9 +324,6 @@ impl ChunkDescriptor {
     }
 }
 
-/// Backward-compatible alias while internals migrate from block headers to chunk descriptors.
-pub type BlockHeader = ChunkDescriptor;
-
 pub fn encode_chunk_table(descriptors: &[ChunkDescriptor]) -> Result<Vec<u8>> {
     let count = u32::try_from(descriptors.len())
         .map_err(|_| OxideError::InvalidFormat("chunk count exceeds u32 range"))?;

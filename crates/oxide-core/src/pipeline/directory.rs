@@ -387,6 +387,7 @@ pub(super) fn manifest_from_discovery(
     Ok(crate::format::ArchiveManifest::new(entries))
 }
 
+#[cfg(test)]
 pub(super) fn detect_file_formats(
     discovery: &DirectoryDiscovery,
     format_probe_limit: usize,

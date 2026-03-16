@@ -1,12 +1,10 @@
-use std::io::Cursor;
-use std::sync::Arc;
-
 use oxide_core::{
-    ARCHIVE_METADATA_SIZE, ArchiveReader, ArchiveWriter, BlockHeader, BufferPool,
-    CHUNK_DESCRIPTOR_SIZE, CompressionAlgo, CompressionMeta, CompressionPreset, Footer,
-    GLOBAL_HEADER_SIZE, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
-    ReorderBuffer, SeekableArchiveWriter, TextStrategy,
+    ArchiveReader, ArchiveWriter, ChunkDescriptor, CompressionAlgo, CompressionMeta,
+    CompressionPreset, Footer, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
+    ReorderBuffer, SeekableArchiveWriter, TextStrategy, ARCHIVE_METADATA_SIZE,
+    CHUNK_DESCRIPTOR_SIZE, GLOBAL_HEADER_SIZE,
 };
+use std::io::Cursor;
 
 fn block(
     id: usize,
@@ -73,7 +71,7 @@ fn header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let header = BlockHeader::new(
+    let header = ChunkDescriptor::new(
         128,
         1024,
         384,
@@ -86,7 +84,7 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     header.write(&mut encoded)?;
     assert_eq!(encoded.len(), CHUNK_DESCRIPTOR_SIZE);
 
-    let decoded = BlockHeader::read(&mut Cursor::new(encoded))?;
+    let decoded = ChunkDescriptor::read(&mut Cursor::new(encoded))?;
     assert_eq!(decoded, header);
     assert_eq!(
         decoded.strategy()?,
@@ -98,7 +96,7 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn block_header_round_trip_preserves_raw_passthrough() -> Result<(), Box<dyn std::error::Error>> {
-    let header = BlockHeader::new_with_compression_meta(
+    let header = ChunkDescriptor::new_with_compression_meta(
         512,
         4096,
         4096,
@@ -111,7 +109,7 @@ fn block_header_round_trip_preserves_raw_passthrough() -> Result<(), Box<dyn std
     header.write(&mut encoded)?;
     assert_eq!(encoded.len(), CHUNK_DESCRIPTOR_SIZE);
 
-    let decoded = BlockHeader::read(&mut Cursor::new(encoded))?;
+    let decoded = ChunkDescriptor::read(&mut Cursor::new(encoded))?;
     let meta = decoded.compression_meta()?;
     assert_eq!(decoded, header);
     assert_eq!(meta.algo, CompressionAlgo::Lz4);
@@ -148,10 +146,9 @@ fn footer_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn archive_writer_and_reader_support_random_and_sequential_access()
--> Result<(), Box<dyn std::error::Error>> {
-    let pool = Arc::new(BufferPool::new(128, 8));
-    let mut writer = ArchiveWriter::new(Vec::new(), Arc::clone(&pool));
+fn archive_writer_and_reader_support_random_and_sequential_access(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(3)?;
     writer.write_block(&block(
         0,
@@ -194,8 +191,7 @@ fn archive_writer_and_reader_support_random_and_sequential_access()
 
 #[test]
 fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = Arc::new(BufferPool::new(128, 8));
-    let mut writer = ArchiveWriter::new(Vec::new(), Arc::clone(&pool));
+    let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(3)?;
 
     assert_eq!(
@@ -241,11 +237,10 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn seekable_archive_writer_streams_payload_and_round_trips()
--> Result<(), Box<dyn std::error::Error>> {
-    let pool = Arc::new(BufferPool::new(128, 8));
+fn seekable_archive_writer_streams_payload_and_round_trips(
+) -> Result<(), Box<dyn std::error::Error>> {
     let cursor = Cursor::new(Vec::new());
-    let mut writer = SeekableArchiveWriter::new(cursor, Arc::clone(&pool));
+    let mut writer = SeekableArchiveWriter::new(cursor);
     writer.write_global_header(3)?;
     writer.write_block(&block(
         0,
@@ -277,8 +272,7 @@ fn seekable_archive_writer_streams_payload_and_round_trips()
 
 #[test]
 fn reader_ignores_global_crc_mismatch() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = Arc::new(BufferPool::new(128, 8));
-    let mut writer = ArchiveWriter::new(Vec::new(), pool);
+    let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(1)?;
     writer.write_block(&block(
         0,
@@ -300,8 +294,7 @@ fn reader_ignores_global_crc_mismatch() -> Result<(), Box<dyn std::error::Error>
 
 #[test]
 fn reader_ignores_block_crc_mismatch_on_read() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = Arc::new(BufferPool::new(128, 8));
-    let mut writer = ArchiveWriter::new(Vec::new(), pool);
+    let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(1)?;
 
     let mut corrupted_crc = block(
@@ -323,8 +316,7 @@ fn reader_ignores_block_crc_mismatch_on_read() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn read_block_rejects_out_of_bounds_index() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = Arc::new(BufferPool::new(128, 8));
-    let mut writer = ArchiveWriter::new(Vec::new(), pool);
+    let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(1)?;
     writer.write_block(&block(
         0,

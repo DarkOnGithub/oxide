@@ -3,7 +3,6 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::buffer::BufferPool;
 use crate::core::{WorkerPool, WorkerPoolHandle};
 use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE};
 use crate::pipeline::directory;
@@ -28,7 +27,7 @@ pub fn archive_prepared_with_writer<W, AW, F>(
 where
     W: Write,
     AW: ArchiveBlockWriter<InnerWriter = W>,
-    F: FnOnce(W, Arc<BufferPool>, ArchiveManifest) -> AW,
+    F: FnOnce(W, ArchiveManifest) -> AW,
 {
     let PreparedInput {
         source_kind,
@@ -71,7 +70,7 @@ where
         )
     });
 
-    let mut archive_writer = writer_factory(writer, Arc::clone(&config.buffer_pool), manifest);
+    let mut archive_writer = writer_factory(writer, manifest);
     archive_writer
         .write_global_header_with_flags(block_count, directory::source_kind_flags(source_kind))?;
     let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);

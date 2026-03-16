@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SOURCE="./datasets"
+SOURCE="./silesia_corpus"
 OXIDE="./target/release/oxide-cli"
 OXIDE_OUTPUT="silesia_corpus.oxz"
 SQUASHFS_OUTPUT="archive.sqfs"
@@ -271,7 +271,7 @@ run_bench() {
 
 build_oxide
 
-for mode in "fast" "balanced"; do
+for mode in "fast" "balanced" "ultra"; do
   run_bench "$mode"
 done
 
