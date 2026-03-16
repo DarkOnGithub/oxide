@@ -1,17 +1,14 @@
-use std::fs;
-use std::io::{Seek, Write};
-use std::path::Path;
-use std::sync::Arc;
-
-use crate::buffer::BufferPool;
 use crate::format::{
-    ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter, should_force_raw_storage,
+    should_force_raw_storage, ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter,
 };
 use crate::io::{ChunkingPolicy, InputScanner};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetrySink};
 use crate::types::ChunkEncodingPlan;
 use crate::types::Result;
+use std::fs;
+use std::io::{Seek, Write};
+use std::path::Path;
 
 pub mod directory;
 pub mod prepared;
@@ -59,7 +56,7 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, manifest| ArchiveWriter::with_manifest(writer, pool, Some(manifest)),
+            |writer, manifest| ArchiveWriter::with_manifest(writer, Some(manifest)),
         )
     }
 
@@ -85,9 +82,7 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, manifest| {
-                SeekableArchiveWriter::with_manifest(writer, pool, Some(manifest))
-            },
+            |writer, manifest| SeekableArchiveWriter::with_manifest(writer, Some(manifest)),
         )
     }
 
@@ -105,10 +100,9 @@ impl<'a> Archiver<'a> {
             writer,
             options,
             sink,
-            |writer, pool, manifest, reorder_limit| {
+            |writer, manifest, reorder_limit| {
                 ArchiveWriter::with_reorder_limit_and_manifest(
                     writer,
-                    pool,
                     reorder_limit,
                     Some(manifest),
                 )
@@ -130,10 +124,9 @@ impl<'a> Archiver<'a> {
             writer,
             options,
             sink,
-            |writer, pool, manifest, reorder_limit| {
+            |writer, manifest, reorder_limit| {
                 SeekableArchiveWriter::with_reorder_limit_and_manifest(
                     writer,
-                    pool,
                     reorder_limit,
                     Some(manifest),
                 )
@@ -156,7 +149,7 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, manifest| ArchiveWriter::with_manifest(writer, pool, Some(manifest)),
+            |writer, manifest| ArchiveWriter::with_manifest(writer, Some(manifest)),
         )
     }
 
@@ -175,9 +168,7 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             block_size,
-            |writer, pool, manifest| {
-                SeekableArchiveWriter::with_manifest(writer, pool, Some(manifest))
-            },
+            |writer, manifest| SeekableArchiveWriter::with_manifest(writer, Some(manifest)),
         )
     }
 
@@ -193,7 +184,7 @@ impl<'a> Archiver<'a> {
     where
         W: Write,
         AW: ArchiveBlockWriter<InnerWriter = W>,
-        F: FnOnce(W, Arc<BufferPool>, crate::format::ArchiveManifest) -> AW,
+        F: FnOnce(W, crate::format::ArchiveManifest) -> AW,
     {
         archive_prepared_with_writer(
             self.config,

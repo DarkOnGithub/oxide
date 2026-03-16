@@ -8,9 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::buffer::BufferPool;
 use crate::core::WorkerPool;
-use crate::format::FormatDetector;
 use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE};
 use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
@@ -34,7 +32,7 @@ pub fn archive_directory_streaming_with_writer<W, AW, F>(
 where
     W: Write + Send + 'static,
     AW: ArchiveBlockWriter<InnerWriter = W> + Send + 'static,
-    F: FnOnce(W, Arc<BufferPool>, ArchiveManifest, usize) -> AW + Send + 'static,
+    F: FnOnce(W, ArchiveManifest, usize) -> AW + Send + 'static,
 {
     let mut stage_timings = StageTimings::default();
     let preserve_boundaries = config.performance.preserve_directory_format_boundaries;
@@ -116,16 +114,10 @@ where
     let writer_output_bytes_shared = Arc::clone(&writer_output_bytes);
     let writer_failure = Arc::new(Mutex::new(None::<String>));
     let writer_failure_shared = Arc::clone(&writer_failure);
-    let writer_buffer_pool = Arc::clone(&config.buffer_pool);
     let writer_manifest = manifest.clone();
     let writer_handle = thread::spawn(move || -> Result<DirectoryWriterOutcome<W>> {
         let outcome = (|| -> Result<DirectoryWriterOutcome<W>> {
-            let mut archive_writer = writer_factory(
-                writer,
-                writer_buffer_pool,
-                writer_manifest,
-                writer_reorder_limit,
-            );
+            let mut archive_writer = writer_factory(writer, writer_manifest, writer_reorder_limit);
             archive_writer.write_global_header_with_flags(
                 block_count,
                 directory::source_kind_flags(ArchiveSourceKind::Directory),
@@ -705,11 +697,6 @@ where
         writer: writer_outcome.writer,
         report,
     })
-}
-
-fn detect_file_format_hint(bytes: &[u8]) -> FileFormat {
-    let probe_len = bytes.len().min(DIRECTORY_FORMAT_PROBE_LIMIT);
-    FormatDetector::detect(&bytes[..probe_len])
 }
 
 fn drain_worker_results(

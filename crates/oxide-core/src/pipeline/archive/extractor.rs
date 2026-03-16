@@ -7,18 +7,18 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, TryRecvError, bounded};
+use crossbeam_channel::{bounded, Receiver, TryRecvError};
 
 use crate::core::WorkerRuntimeSnapshot;
-use crate::format::{ArchiveMetadata, ArchiveReader, BlockHeader, GlobalHeader};
+use crate::format::{ArchiveMetadata, ArchiveReader, ChunkDescriptor, GlobalHeader};
 use crate::telemetry::{ReportValue, RunTelemetryOptions, TelemetrySink};
 use crate::types::Result;
 
 use super::super::directory;
 use super::super::types::ArchiveSourceKind;
 use super::directory_restore::{
-    DirectoryExtractSelection, DirectoryRestoreWriter, FilteredDirectoryRestoreWriter,
-    apply_entry_metadata,
+    apply_entry_metadata, DirectoryExtractSelection, DirectoryRestoreWriter,
+    FilteredDirectoryRestoreWriter,
 };
 use super::reorder_writer::{BoundedReorderWriter, OrderedChunkWriter};
 use super::telemetry::*;
@@ -104,7 +104,7 @@ impl DecodePlan {
         }
     }
 
-    fn from_ranges(headers: &[BlockHeader], ranges: &[Range<u64>]) -> Self {
+    fn from_ranges(headers: &[ChunkDescriptor], ranges: &[Range<u64>]) -> Self {
         let mut selected_blocks = vec![false; headers.len()];
         let mut block_count = 0usize;
         let mut range_index = 0usize;
@@ -143,7 +143,11 @@ impl DecodePlan {
         self.selected_blocks[block_index]
     }
 
-    fn project_ranges(&self, headers: &[BlockHeader], ranges: &[Range<u64>]) -> Vec<Range<u64>> {
+    fn project_ranges(
+        &self,
+        headers: &[ChunkDescriptor],
+        ranges: &[Range<u64>],
+    ) -> Vec<Range<u64>> {
         let mut projected: Vec<Range<u64>> = Vec::new();
         let mut range_index = 0usize;
         let mut decoded_offset = 0u64;
@@ -850,7 +854,7 @@ pub fn join_decode_workers(
     Ok(workers)
 }
 
-pub fn decode_block_payload(header: BlockHeader, block_data: Vec<u8>) -> Result<Vec<u8>> {
+pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Result<Vec<u8>> {
     let compression_meta = header.compression_meta()?;
     let decoded = if compression_meta.raw_passthrough {
         block_data

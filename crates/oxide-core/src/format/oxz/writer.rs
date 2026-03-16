@@ -1,10 +1,9 @@
 use std::io::{Seek, SeekFrom, Write};
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::telemetry::{profile, tags};
 use crate::types::{duration_to_us, PLACEHOLDER_CHECKSUM};
-use crate::{ArchiveSourceKind, BufferPool, CompressedBlock, OxideError, Result};
+use crate::{ArchiveSourceKind, CompressedBlock, OxideError, Result};
 
 use super::{
     encode_chunk_table, ArchiveManifest, ArchiveMetadata, Footer, GlobalHeader, ReorderBuffer,
@@ -45,7 +44,6 @@ pub trait ArchiveBlockWriter {
 #[derive(Debug)]
 pub struct ArchiveWriter<W: Write> {
     writer: W,
-    buffer_pool: Arc<BufferPool>,
     manifest: ArchiveManifest,
     entry_table_bytes: Vec<u8>,
     source_kind: Option<ArchiveSourceKind>,
@@ -63,7 +61,6 @@ pub struct ArchiveWriter<W: Write> {
 #[derive(Debug)]
 pub struct SeekableArchiveWriter<W: Write + Seek> {
     writer: W,
-    buffer_pool: Arc<BufferPool>,
     manifest: ArchiveManifest,
     entry_table_bytes: Vec<u8>,
     source_kind: Option<ArchiveSourceKind>,
@@ -76,32 +73,21 @@ pub struct SeekableArchiveWriter<W: Write + Seek> {
 }
 
 impl<W: Write> ArchiveWriter<W> {
-    pub fn new(writer: W, buffer_pool: Arc<BufferPool>) -> Self {
-        Self::with_manifest(writer, buffer_pool, None)
+    pub fn new(writer: W) -> Self {
+        Self::with_manifest(writer, None)
     }
 
-    pub fn with_manifest(
-        writer: W,
-        buffer_pool: Arc<BufferPool>,
-        manifest: Option<ArchiveManifest>,
-    ) -> Self {
-        Self::with_reorder_limit_and_manifest(
-            writer,
-            buffer_pool,
-            DEFAULT_REORDER_PENDING_LIMIT,
-            manifest,
-        )
+    pub fn with_manifest(writer: W, manifest: Option<ArchiveManifest>) -> Self {
+        Self::with_reorder_limit_and_manifest(writer, DEFAULT_REORDER_PENDING_LIMIT, manifest)
     }
 
     pub fn with_reorder_limit_and_manifest(
         writer: W,
-        buffer_pool: Arc<BufferPool>,
         max_pending: usize,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
         Self {
             writer,
-            buffer_pool,
             manifest: manifest.unwrap_or_default(),
             entry_table_bytes: Vec::new(),
             source_kind: None,
@@ -114,8 +100,8 @@ impl<W: Write> ArchiveWriter<W> {
         }
     }
 
-    pub fn with_reorder_limit(writer: W, buffer_pool: Arc<BufferPool>, max_pending: usize) -> Self {
-        Self::with_reorder_limit_and_manifest(writer, buffer_pool, max_pending, None)
+    pub fn with_reorder_limit(writer: W, max_pending: usize) -> Self {
+        Self::with_reorder_limit_and_manifest(writer, max_pending, None)
     }
 
     pub fn write_global_header(&mut self, block_count: u32) -> Result<()> {
@@ -307,32 +293,21 @@ impl<W: Write> ArchiveBlockWriter for ArchiveWriter<W> {
 }
 
 impl<W: Write + Seek> SeekableArchiveWriter<W> {
-    pub fn new(writer: W, buffer_pool: Arc<BufferPool>) -> Self {
-        Self::with_manifest(writer, buffer_pool, None)
+    pub fn new(writer: W) -> Self {
+        Self::with_manifest(writer, None)
     }
 
-    pub fn with_manifest(
-        writer: W,
-        buffer_pool: Arc<BufferPool>,
-        manifest: Option<ArchiveManifest>,
-    ) -> Self {
-        Self::with_reorder_limit_and_manifest(
-            writer,
-            buffer_pool,
-            DEFAULT_REORDER_PENDING_LIMIT,
-            manifest,
-        )
+    pub fn with_manifest(writer: W, manifest: Option<ArchiveManifest>) -> Self {
+        Self::with_reorder_limit_and_manifest(writer, DEFAULT_REORDER_PENDING_LIMIT, manifest)
     }
 
     pub fn with_reorder_limit_and_manifest(
         writer: W,
-        buffer_pool: Arc<BufferPool>,
         max_pending: usize,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
         Self {
             writer,
-            buffer_pool,
             manifest: manifest.unwrap_or_default(),
             entry_table_bytes: Vec::new(),
             source_kind: None,
@@ -345,8 +320,8 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         }
     }
 
-    pub fn with_reorder_limit(writer: W, buffer_pool: Arc<BufferPool>, max_pending: usize) -> Self {
-        Self::with_reorder_limit_and_manifest(writer, buffer_pool, max_pending, None)
+    pub fn with_reorder_limit(writer: W, max_pending: usize) -> Self {
+        Self::with_reorder_limit_and_manifest(writer, max_pending, None)
     }
 
     pub fn write_global_header(&mut self, block_count: u32) -> Result<()> {

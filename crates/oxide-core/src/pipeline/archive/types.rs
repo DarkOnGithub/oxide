@@ -1,7 +1,7 @@
 use super::super::directory;
 use super::super::types::ArchiveSourceKind;
 use crate::core::{PoolRuntimeSnapshot, WorkerRuntimeSnapshot};
-use crate::format::{ArchiveManifest, BlockHeader};
+use crate::format::{ArchiveManifest, ChunkDescriptor};
 use crate::io::MmapInput;
 use crate::types::{duration_to_us, Batch};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
@@ -176,7 +176,7 @@ pub struct DecodedArchivePayload {
 #[derive(Debug)]
 pub struct DecodeTask {
     pub index: usize,
-    pub header: BlockHeader,
+    pub header: ChunkDescriptor,
     pub block_data: Vec<u8>,
 }
 
