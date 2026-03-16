@@ -1,13 +1,15 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 
 use bytes::Bytes;
 use jwalk::WalkDir;
+use memmap2::Mmap;
 
-use crate::format::{FormatDetector, should_force_raw_storage};
-use crate::types::{Batch, ChunkEncodingPlan, FileFormat, Result};
+use crate::format::{should_force_raw_storage, FormatDetector};
+use crate::types::{Batch, BatchData, ChunkEncodingPlan, FileFormat, Result};
 
 use super::types::{ArchiveListingEntry, ArchiveSourceKind};
 
@@ -98,35 +100,7 @@ impl DirectoryBatchSubmitter {
         F: FnMut(Batch) -> Result<()>,
     {
         while !bytes.is_empty() {
-            match self.pending_force_raw_storage {
-                Some(current) if current != force_raw_storage => {
-                    if !self.pending.is_empty() {
-                        self.flush_pending(&mut submit)?;
-                    }
-                    self.pending_force_raw_storage = Some(force_raw_storage);
-                }
-                Some(_) => {}
-                None => {
-                    self.pending_force_raw_storage = Some(force_raw_storage);
-                }
-            }
-
-            match self.pending_format {
-                Some(current) if current != file_type_hint => {
-                    if self.preserve_format_boundaries {
-                        if !self.pending.is_empty() {
-                            self.flush_pending(&mut submit)?;
-                        }
-                        self.pending_format = Some(file_type_hint);
-                    } else {
-                        self.pending_format = Some(FileFormat::Common);
-                    }
-                }
-                Some(_) => {}
-                None => {
-                    self.pending_format = Some(file_type_hint);
-                }
-            }
+            self.prepare_pending_state(file_type_hint, force_raw_storage, &mut submit)?;
 
             let room = self.block_size.saturating_sub(self.pending.len()).max(1);
             let take = room.min(bytes.len());
@@ -141,36 +115,156 @@ impl DirectoryBatchSubmitter {
         Ok(())
     }
 
+    pub fn push_mapped_with_hint<F>(
+        &mut self,
+        map: Arc<Mmap>,
+        start: usize,
+        end: usize,
+        file_type_hint: FileFormat,
+        force_raw_storage: bool,
+        mut submit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(Batch) -> Result<()>,
+    {
+        if end < start || end > map.len() {
+            return Err(crate::OxideError::InvalidFormat(
+                "invalid mapped batch range",
+            ));
+        }
+
+        let mut offset = start;
+        while offset < end {
+            self.prepare_pending_state(file_type_hint, force_raw_storage, &mut submit)?;
+
+            if !self.pending.is_empty() {
+                let room = self.block_size.saturating_sub(self.pending.len()).max(1);
+                let take = room.min(end - offset);
+                self.pending.extend_from_slice(&map[offset..offset + take]);
+                offset += take;
+
+                if self.pending.len() == self.block_size {
+                    self.flush_pending(&mut submit)?;
+                }
+                continue;
+            }
+
+            let remaining = end - offset;
+            if remaining >= self.block_size {
+                let batch_end = offset + self.block_size;
+                self.submit_batch(
+                    BatchData::Mapped {
+                        map: Arc::clone(&map),
+                        start: offset,
+                        end: batch_end,
+                    },
+                    file_type_hint,
+                    force_raw_storage,
+                    &mut submit,
+                )?;
+                offset = batch_end;
+                continue;
+            }
+
+            self.pending.extend_from_slice(&map[offset..end]);
+            offset = end;
+        }
+
+        Ok(())
+    }
+
     pub fn finish<F>(&mut self, submit: F) -> Result<()>
     where
         F: FnMut(Batch) -> Result<()>,
     {
+        let mut submit = submit;
         if !self.pending.is_empty() {
-            self.flush_pending(submit)?;
+            self.flush_pending(&mut submit)?;
         }
         Ok(())
     }
 
-    fn flush_pending<F>(&mut self, mut submit: F) -> Result<()>
+    fn prepare_pending_state<F>(
+        &mut self,
+        file_type_hint: FileFormat,
+        force_raw_storage: bool,
+        submit: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(Batch) -> Result<()>,
+    {
+        match self.pending_force_raw_storage {
+            Some(current) if current != force_raw_storage => {
+                if !self.pending.is_empty() {
+                    self.flush_pending(submit)?;
+                }
+                self.pending_force_raw_storage = Some(force_raw_storage);
+            }
+            Some(_) => {}
+            None => {
+                self.pending_force_raw_storage = Some(force_raw_storage);
+            }
+        }
+
+        match self.pending_format {
+            Some(current) if current != file_type_hint => {
+                if self.preserve_format_boundaries {
+                    if !self.pending.is_empty() {
+                        self.flush_pending(submit)?;
+                    }
+                    self.pending_format = Some(file_type_hint);
+                } else {
+                    self.pending_format = Some(FileFormat::Common);
+                }
+            }
+            Some(_) => {}
+            None => {
+                self.pending_format = Some(file_type_hint);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn flush_pending<F>(&mut self, submit: &mut F) -> Result<()>
     where
         F: FnMut(Batch) -> Result<()>,
     {
         let file_type_hint = self.pending_format.unwrap_or(FileFormat::Common);
         let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(self.block_size));
+        self.submit_batch(
+            BatchData::Owned(Bytes::from(chunk)),
+            file_type_hint,
+            self.pending_force_raw_storage.unwrap_or(false),
+            submit,
+        )?;
+        self.pending_format = None;
+        self.pending_force_raw_storage = None;
+        Ok(())
+    }
+
+    fn submit_batch<F>(
+        &mut self,
+        data: BatchData,
+        file_type_hint: FileFormat,
+        force_raw_storage: bool,
+        submit: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(Batch) -> Result<()>,
+    {
         let batch = Batch {
             id: self.next_block_id,
             source_path: self.source_path.clone(),
-            data: crate::BatchData::Owned(Bytes::from(chunk)),
+            data,
             file_type_hint,
             preprocessing_metadata: None,
             stream_id: 0,
             compression_plan: self.compression_plan,
-            force_raw_storage: self.pending_force_raw_storage.unwrap_or(false),
+            force_raw_storage,
         };
         submit(batch)?;
         self.next_block_id += 1;
-        self.pending_format = None;
-        self.pending_force_raw_storage = None;
         Ok(())
     }
 }

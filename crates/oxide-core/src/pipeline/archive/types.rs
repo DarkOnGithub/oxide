@@ -2,7 +2,8 @@ use super::super::directory;
 use super::super::types::ArchiveSourceKind;
 use crate::core::{PoolRuntimeSnapshot, WorkerRuntimeSnapshot};
 use crate::format::{ArchiveManifest, BlockHeader};
-use crate::types::{Batch, duration_to_us};
+use crate::io::MmapInput;
+use crate::types::{duration_to_us, Batch};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
@@ -19,8 +20,10 @@ pub struct StageTimings {
     pub discovery: Duration,
     pub format_probe: Duration,
     pub producer_read: Duration,
+    pub producer_submit_blocked: Duration,
     pub submit_wait: Duration,
     pub result_wait: Duration,
+    pub writer_enqueue_blocked: Duration,
     pub writer: Duration,
 }
 
@@ -128,6 +131,7 @@ pub struct ExtractPipelineStats {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DirectoryProducerOutcome {
     pub producer_read: Duration,
+    pub producer_submit_blocked: Duration,
 }
 
 #[derive(Debug)]
@@ -145,9 +149,15 @@ pub(super) struct PrefetchRequest {
 }
 
 #[derive(Debug)]
+pub enum PrefetchPayload {
+    Owned(Vec<u8>),
+    Mapped(MmapInput),
+}
+
+#[derive(Debug)]
 pub struct PrefetchResult {
     pub index: usize,
-    pub data: Vec<u8>,
+    pub payload: PrefetchPayload,
     pub read_elapsed: Duration,
 }
 

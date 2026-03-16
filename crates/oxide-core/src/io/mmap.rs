@@ -6,11 +6,11 @@ use std::time::Instant;
 use bytes::Bytes;
 use memmap2::{Mmap, MmapOptions};
 
-use crate::OxideError;
 use crate::telemetry;
 use crate::telemetry::profile;
 use crate::telemetry::tags;
 use crate::types::{BatchData, Result};
+use crate::OxideError;
 
 const PROFILE_TAG_STACK_MMAP: [&str; 1] = [tags::TAG_MMAP];
 
@@ -138,6 +138,11 @@ impl MmapInput {
     /// Returns the file length as a usize, clamped to usize::MAX.
     pub fn len(&self) -> usize {
         self.len.min(usize::MAX as u64) as usize
+    }
+
+    /// Returns a shared handle to the underlying memory map when the file is non-empty.
+    pub fn mapping(&self) -> Option<Arc<Mmap>> {
+        self.mmap.as_ref().map(Arc::clone)
     }
 
     /// Returns true if the file is empty (zero bytes).

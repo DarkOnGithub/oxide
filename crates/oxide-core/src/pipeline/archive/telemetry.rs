@@ -330,12 +330,30 @@ pub fn build_stats_extensions(
         ),
     );
     extensions.insert(
+        "stage.producer_submit_blocked_us".to_string(),
+        StatValue::U64(
+            stage_timings
+                .producer_submit_blocked
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+        ),
+    );
+    extensions.insert(
         "stage.submit_wait_us".to_string(),
         StatValue::U64(stage_timings.submit_wait.as_micros().min(u64::MAX as u128) as u64),
     );
     extensions.insert(
         "stage.result_wait_us".to_string(),
         StatValue::U64(stage_timings.result_wait.as_micros().min(u64::MAX as u128) as u64),
+    );
+    extensions.insert(
+        "stage.writer_enqueue_blocked_us".to_string(),
+        StatValue::U64(
+            stage_timings
+                .writer_enqueue_blocked
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+        ),
     );
     extensions.insert(
         "stage.writer_us".to_string(),

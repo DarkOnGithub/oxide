@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
 use oxide_core::pipeline::{
-    PipelinePerformanceOptions,
     archive::ArchivePipeline,
     directory::{BlockCountPlanner, DirectoryBatchSubmitter},
+    PipelinePerformanceOptions,
 };
-use oxide_core::types::FileFormat;
+use oxide_core::types::{BatchData, FileFormat};
+use oxide_core::MmapInput;
+use tempfile::tempdir;
 
 mod archive_tests {
     use super::*;
@@ -178,5 +180,75 @@ mod directory_tests {
         planner.push_len(6, FileFormat::Common, true);
 
         assert_eq!(planner.finish(), 2);
+    }
+
+    #[test]
+    fn submitter_uses_mapped_batches_for_full_mmap_sized_blocks() {
+        let temp = tempdir().expect("tempdir");
+        let file_path = temp.path().join("payload.bin");
+        std::fs::write(&file_path, b"abcdefghij").expect("write payload");
+
+        let mmap = MmapInput::open(&file_path).expect("open mmap");
+        let map = mmap.mapping().expect("mapped file");
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 4, false);
+        let mut batches = Vec::new();
+
+        submitter
+            .push_mapped_with_hint(map, 0, mmap.len(), FileFormat::Binary, false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("mapped push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert_eq!(batches.len(), 3);
+        assert!(matches!(batches[0].data, BatchData::Mapped { .. }));
+        assert!(matches!(batches[1].data, BatchData::Mapped { .. }));
+        assert!(matches!(batches[2].data, BatchData::Owned(_)));
+        assert_eq!(batches[0].data.as_slice(), b"abcd");
+        assert_eq!(batches[1].data.as_slice(), b"efgh");
+        assert_eq!(batches[2].data.as_slice(), b"ij");
+    }
+
+    #[test]
+    fn submitter_splices_pending_owned_bytes_before_switching_to_mapped_blocks() {
+        let temp = tempdir().expect("tempdir");
+        let file_path = temp.path().join("payload.bin");
+        std::fs::write(&file_path, b"cdefgh").expect("write payload");
+
+        let mmap = MmapInput::open(&file_path).expect("open mmap");
+        let map = mmap.mapping().expect("mapped file");
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 4, false);
+        let mut batches = Vec::new();
+
+        submitter
+            .push_bytes_with_hint(b"ab", FileFormat::Binary, false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("owned push should succeed");
+        submitter
+            .push_mapped_with_hint(map, 0, mmap.len(), FileFormat::Binary, false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("mapped push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert_eq!(batches.len(), 2);
+        assert!(matches!(batches[0].data, BatchData::Owned(_)));
+        assert!(matches!(batches[1].data, BatchData::Mapped { .. }));
+        assert_eq!(batches[0].data.as_slice(), b"abcd");
+        assert_eq!(batches[1].data.as_slice(), b"efgh");
     }
 }

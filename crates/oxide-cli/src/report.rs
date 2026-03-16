@@ -9,8 +9,8 @@ use oxide_core::{
 };
 
 use crate::ui::{
-    StreamTarget, Tone, format_bytes, format_bytes_f64, format_duration, format_duration_compact,
-    format_rate, paint, progress_bar,
+    format_bytes, format_bytes_f64, format_duration, format_duration_compact, format_rate, paint,
+    progress_bar, StreamTarget, Tone,
 };
 
 const CHART_WIDTH: usize = 28;
@@ -284,8 +284,10 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
                 ("discovery", "discovery"),
                 ("format_probe", "probe"),
                 ("producer_read", "read"),
+                ("producer_submit_blocked", "batch queue"),
                 ("submit_wait", "submit wait"),
                 ("result_wait", "result wait"),
+                ("writer_enqueue_blocked", "writer queue"),
                 ("writer", "writer"),
             ],
         ),
