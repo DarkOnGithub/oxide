@@ -10,6 +10,7 @@ OXIDE_EXTRACT_DIR="oxide_extract_out"
 SQUASHFS_EXTRACT_DIR="squashfs_extract_out"
 BENCHMARK_THREADS="${BENCHMARK_THREADS:-16}"
 BENCHMARK_PASSES="${BENCHMARK_PASSES:-1}"
+BENCHMARK_SKIP_EXTRACT="${BENCHMARK_SKIP_EXTRACT:-0}"
 SOURCE_BYTES="$(du -sb "$SOURCE" | cut -f1)"
 
 MODE_COMPRESSION=""
@@ -231,41 +232,6 @@ run_unsquashfs_extract() {
     unsquashfs -q -f -no-xattrs -d "$SQUASHFS_EXTRACT_DIR" "$source_archive"
 }
 
-run_rdsquashfs_extract() {
-  local mode=$1
-  local source_archive=$2
-
-  run_and_record "rdsquashfs" "extract" "$mode" "$CURRENT_PASS" "$SQUASHFS_EXTRACT_DIR" \
-    rdsquashfs -q -u / -p "$SQUASHFS_EXTRACT_DIR" "$source_archive"
-}
-
-run_gensquashfs() {
-  local mode=$1
-
-  set_mode_config "$mode"
-
-  if [[ -n "$MODE_LEVEL" ]]; then
-    run_and_record "gensquashfs" "archive" "$mode" "$CURRENT_PASS" "$SQUASHFS_OUTPUT" \
-      gensquashfs "$SQUASHFS_OUTPUT" \
-      -j "$BENCHMARK_THREADS" \
-      -q \
-      -c "$MODE_COMPRESSION" \
-      -X "level=$MODE_LEVEL" \
-      -b "$SQUASHFS_BLOCK_SIZE" \
-      -D "$SOURCE" \
-      -f
-  else
-    run_and_record "gensquashfs" "archive" "$mode" "$CURRENT_PASS" "$SQUASHFS_OUTPUT" \
-      gensquashfs "$SQUASHFS_OUTPUT" \
-      -j "$BENCHMARK_THREADS" \
-      -q \
-      -c "$MODE_COMPRESSION" \
-      -b "$SQUASHFS_BLOCK_SIZE" \
-      -D "$SOURCE" \
-      -f
-  fi
-}
-
 run_bench() {
   local mode=$1
   echo "======================================================"
@@ -279,9 +245,11 @@ run_bench() {
 
     echo "--- Oxide ($mode) ---"
     run_oxide "$mode"
-    drop_caches
-    echo "--- Oxide extract ($mode) ---"
-    run_oxide_extract "$mode"
+    if [[ "$BENCHMARK_SKIP_EXTRACT" != "1" ]]; then
+      drop_caches
+      echo "--- Oxide extract ($mode) ---"
+      run_oxide_extract "$mode"
+    fi
     cleanup_path "$OXIDE_OUTPUT"
     cleanup_path "$OXIDE_EXTRACT_DIR"
     echo ""
@@ -290,20 +258,11 @@ run_bench() {
 
     echo "--- mksquashfs ($mode equivalent) ---"
     run_mksquashfs "$mode"
-    drop_caches
-    echo "--- unsquashfs (from mksquashfs, $mode equivalent) ---"
-    run_unsquashfs_extract "$mode" "$SQUASHFS_OUTPUT"
-    cleanup_path "$SQUASHFS_OUTPUT"
-    cleanup_path "$SQUASHFS_EXTRACT_DIR"
-    echo ""
-
-    drop_caches
-
-    echo "--- gensquashfs ($mode equivalent) ---"
-    run_gensquashfs "$mode"
-    drop_caches
-    echo "--- rdsquashfs (from gensquashfs, $mode equivalent) ---"
-    run_rdsquashfs_extract "$mode" "$SQUASHFS_OUTPUT"
+    if [[ "$BENCHMARK_SKIP_EXTRACT" != "1" ]]; then
+      drop_caches
+      echo "--- unsquashfs (from mksquashfs, $mode equivalent) ---"
+      run_unsquashfs_extract "$mode" "$SQUASHFS_OUTPUT"
+    fi
     cleanup_path "$SQUASHFS_OUTPUT"
     cleanup_path "$SQUASHFS_EXTRACT_DIR"
     echo ""
@@ -312,7 +271,7 @@ run_bench() {
 
 build_oxide
 
-for mode in "fast" "balanced" "ultra"; do
+for mode in "fast" "balanced"; do
   run_bench "$mode"
 done
 

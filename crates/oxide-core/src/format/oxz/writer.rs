@@ -3,19 +3,19 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::telemetry::{profile, tags};
-use crate::types::{PLACEHOLDER_CHECKSUM, duration_to_us};
+use crate::types::{duration_to_us, PLACEHOLDER_CHECKSUM};
 use crate::{ArchiveSourceKind, BufferPool, CompressedBlock, OxideError, Result};
 
 use super::{
-    ARCHIVE_METADATA_SIZE, ArchiveManifest, ArchiveMetadata, CHUNK_DESCRIPTOR_SIZE,
-    CHUNK_TABLE_HEADER_SIZE, DEFAULT_REORDER_PENDING_LIMIT, Footer, GLOBAL_HEADER_SIZE,
-    GlobalHeader, ReorderBuffer, encode_chunk_table,
+    encode_chunk_table, ArchiveManifest, ArchiveMetadata, Footer, GlobalHeader, ReorderBuffer,
+    ARCHIVE_METADATA_SIZE, CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE,
+    DEFAULT_REORDER_PENDING_LIMIT, GLOBAL_HEADER_SIZE,
 };
 
 #[derive(Debug)]
 struct PendingChunk {
     descriptor: super::ChunkDescriptor,
-    data: Vec<u8>,
+    data: crate::CompressedPayload,
 }
 
 #[derive(Debug)]
@@ -220,8 +220,7 @@ impl<W: Write> ArchiveWriter<W> {
 
         let pending_chunks = std::mem::take(&mut self.pending_chunks);
         for chunk in pending_chunks {
-            self.writer.write_all(&chunk.data)?;
-            self.recycle_block_data(chunk.data);
+            self.writer.write_all(chunk.data.as_slice())?;
         }
 
         let footer = Footer::new(PLACEHOLDER_CHECKSUM);
@@ -280,11 +279,6 @@ impl<W: Write> ArchiveWriter<W> {
 
         record_stage_telemetry(start.elapsed());
         Ok(())
-    }
-
-    fn recycle_block_data(&self, mut data: Vec<u8>) {
-        let mut pooled = self.buffer_pool.acquire();
-        std::mem::swap(pooled.as_mut_vec(), &mut data);
     }
 }
 
@@ -505,18 +499,12 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
 
         let descriptor = super::ChunkDescriptor::from_block(&block, self.next_payload_offset)?;
         self.next_payload_offset = descriptor.payload_end()?;
-        self.writer.write_all(&block.data)?;
+        self.writer.write_all(block.data.as_slice())?;
         self.pending_descriptors.push(descriptor);
         self.blocks_written += 1;
-        self.recycle_block_data(block.data);
 
         record_stage_telemetry(start.elapsed());
         Ok(())
-    }
-
-    fn recycle_block_data(&self, mut data: Vec<u8>) {
-        let mut pooled = self.buffer_pool.acquire();
-        std::mem::swap(pooled.as_mut_vec(), &mut data);
     }
 }
 

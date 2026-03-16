@@ -6,6 +6,7 @@ use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::buffer::{BufferPool, PooledBuffer};
 use crate::error::OxideError;
 use crate::preprocessing::PreprocessingMetadata;
 
@@ -89,6 +90,24 @@ pub enum BatchData {
     /// Owned byte buffer.
     Owned(Bytes),
     /// Memory-mapped file region.
+    Mapped {
+        /// The underlying memory map.
+        map: Arc<Mmap>,
+        /// Start offset within the map.
+        start: usize,
+        /// End offset within the map.
+        end: usize,
+    },
+}
+
+/// Stored payload bytes for an encoded archive block.
+#[derive(Debug)]
+pub enum CompressedPayload {
+    /// Owned heap allocation.
+    Owned(Vec<u8>),
+    /// Buffer borrowed from the buffer pool.
+    Pooled(PooledBuffer),
+    /// Memory-mapped file region reused without copying.
     Mapped {
         /// The underlying memory map.
         map: Arc<Mmap>,
@@ -239,6 +258,79 @@ impl BatchData {
     }
 }
 
+impl Clone for CompressedPayload {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Owned(data) => Self::Owned(data.clone()),
+            Self::Pooled(data) => Self::Owned(data.as_slice().to_vec()),
+            Self::Mapped { map, start, end } => Self::Mapped {
+                map: Arc::clone(map),
+                start: *start,
+                end: *end,
+            },
+        }
+    }
+}
+
+impl CompressedPayload {
+    /// Returns the length of the payload.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Owned(data) => data.len(),
+            Self::Pooled(data) => data.len(),
+            Self::Mapped { start, end, .. } => end - start,
+        }
+    }
+
+    /// Returns true if the payload is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the payload as a byte slice.
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(data) => data.as_slice(),
+            Self::Pooled(data) => data.as_slice(),
+            Self::Mapped { map, start, end } => &map[*start..*end],
+        }
+    }
+
+    /// Copies bytes into a pooled buffer.
+    pub fn copy_from_slice_in_pool(data: &[u8], pool: &BufferPool) -> Self {
+        let mut pooled = pool.acquire();
+        pooled.extend_from_slice(data);
+        Self::Pooled(pooled)
+    }
+
+    /// Moves an owned vector into a pooled buffer slot for reuse.
+    pub fn from_vec_in_pool(mut data: Vec<u8>, pool: &BufferPool) -> Self {
+        let mut pooled = pool.acquire();
+        std::mem::swap(pooled.as_mut_vec(), &mut data);
+        Self::Pooled(pooled)
+    }
+
+    /// Converts batch input data into a stored payload, reusing mmap regions when possible.
+    pub fn from_batch_data_in_pool(data: BatchData, pool: &BufferPool) -> Self {
+        match data {
+            BatchData::Owned(data) => Self::copy_from_slice_in_pool(data.as_ref(), pool),
+            BatchData::Mapped { map, start, end } => Self::Mapped { map, start, end },
+        }
+    }
+}
+
+impl From<Vec<u8>> for CompressedPayload {
+    fn from(data: Vec<u8>) -> Self {
+        Self::Owned(data)
+    }
+}
+
+impl From<PooledBuffer> for CompressedPayload {
+    fn from(data: PooledBuffer) -> Self {
+        Self::Pooled(data)
+    }
+}
+
 impl From<BatchData> for Bytes {
     fn from(data: BatchData) -> Self {
         data.to_owned()
@@ -349,7 +441,7 @@ pub struct CompressedBlock {
     /// Logical stream identifier stored in the chunk descriptor.
     pub stream_id: u32,
     /// The compressed (or raw) data bytes.
-    pub data: Vec<u8>,
+    pub data: CompressedPayload,
     /// Preprocessing strategy applied before compression.
     pub pre_proc: PreProcessingStrategy,
     /// Compression algorithm used.
@@ -375,7 +467,7 @@ impl CompressedBlock {
     /// * `original_len` - Original uncompressed length
     pub fn new(
         id: usize,
-        data: Vec<u8>,
+        data: impl Into<CompressedPayload>,
         pre_proc: PreProcessingStrategy,
         compression: CompressionAlgo,
         original_len: u64,
@@ -392,7 +484,7 @@ impl CompressedBlock {
     /// Creates a new compressed block using explicit compression metadata.
     pub fn with_compression_meta(
         id: usize,
-        data: Vec<u8>,
+        data: impl Into<CompressedPayload>,
         pre_proc: PreProcessingStrategy,
         compression_meta: CompressionMeta,
         original_len: u64,
@@ -400,7 +492,7 @@ impl CompressedBlock {
         Self {
             id,
             stream_id: 0,
-            data,
+            data: data.into(),
             pre_proc,
             compression: compression_meta.algo,
             compression_preset: compression_meta.preset,
@@ -414,7 +506,7 @@ impl CompressedBlock {
     pub fn with_chunk_encoding(
         id: usize,
         stream_id: u32,
-        data: Vec<u8>,
+        data: impl Into<CompressedPayload>,
         pre_proc: PreProcessingStrategy,
         encoding_plan: ChunkEncodingPlan,
         raw_passthrough: bool,
@@ -423,7 +515,7 @@ impl CompressedBlock {
         Self {
             id,
             stream_id,
-            data,
+            data: data.into(),
             pre_proc,
             compression: encoding_plan.algo,
             compression_preset: encoding_plan.preset,
