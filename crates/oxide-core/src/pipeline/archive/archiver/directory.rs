@@ -107,7 +107,7 @@ where
         .writer_result_queue_blocks
         .max(1)
         .min(max_inflight_blocks.max(1));
-    let writer_reorder_limit = writer_queue_capacity.max(1);
+    let writer_reorder_limit = 0usize;
     let (writer_tx, writer_rx) = bounded::<CompressedBlock>(writer_queue_capacity);
     let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes(
         block_count,
@@ -132,41 +132,16 @@ where
             )?;
 
             let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
-            let mut pending_sizes = BTreeMap::<usize, usize>::new();
-            let mut next_written_id = 0usize;
-            let mut pending_write_peak = 0usize;
             let mut writer_time = Duration::ZERO;
 
             while let Ok(block) = writer_rx.recv() {
-                let block_id = block.id;
                 let block_len = block.data.len();
-                if pending_sizes.insert(block_id, block_len).is_some() {
-                    return Err(crate::OxideError::InvalidFormat(
-                        "duplicate block id received by directory writer",
-                    ));
-                }
-
                 let write_started = Instant::now();
-                let written = archive_writer.push_block(block)?;
+                archive_writer.write_owned_block(block)?;
                 writer_time += write_started.elapsed();
 
-                for _ in 0..written {
-                    let len = pending_sizes.remove(&next_written_id).ok_or(
-                        crate::OxideError::InvalidFormat(
-                            "directory writer pending state drift detected",
-                        ),
-                    )?;
-                    output_bytes_written = output_bytes_written.saturating_add(len as u64);
-                    next_written_id += 1;
-                }
-                pending_write_peak = pending_write_peak.max(archive_writer.pending_blocks());
+                output_bytes_written = output_bytes_written.saturating_add(block_len as u64);
                 writer_output_bytes_shared.store(output_bytes_written, AtomicOrdering::Release);
-            }
-
-            if !pending_sizes.is_empty() {
-                return Err(crate::OxideError::InvalidFormat(
-                    "directory writer closed with pending blocks",
-                ));
             }
 
             let footer_started = Instant::now();
@@ -178,7 +153,7 @@ where
             Ok(DirectoryWriterOutcome {
                 writer,
                 output_bytes_written,
-                pending_write_peak,
+                pending_write_peak: 0,
                 writer_time,
             })
         })();

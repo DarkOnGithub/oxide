@@ -42,7 +42,7 @@ fn worker_pool_processes_all_batches() -> Result<(), Box<dyn std::error::Error>>
 
     for (idx, block) in blocks.iter().enumerate() {
         assert_eq!(block.id, idx);
-        assert_eq!(block.data, expected_payloads[idx]);
+        assert_eq!(block.data.as_slice(), expected_payloads[idx].as_slice());
         assert_eq!(block.compression, CompressionAlgo::Lz4);
         assert_eq!(block.pre_proc, PreProcessingStrategy::None);
         assert!(block.verify_crc32());
@@ -103,11 +103,9 @@ fn worker_pool_balances_mixed_workloads() -> Result<(), Box<dyn std::error::Erro
         .map(|counter| counter.load(Ordering::Acquire))
         .sum();
     assert_eq!(distributed_total, 120);
-    assert!(
-        task_counts
-            .iter()
-            .all(|counter| counter.load(Ordering::Acquire) > 0)
-    );
+    assert!(task_counts
+        .iter()
+        .all(|counter| counter.load(Ordering::Acquire) > 0));
 
     Ok(())
 }

@@ -1,15 +1,15 @@
 use std::time::{Duration, Instant};
 
 use crate::buffer::BufferPool;
-use crate::compression::{CompressionRequest, apply_compression_request_with_scratch};
+use crate::compression::{apply_compression_request_with_scratch, CompressionRequest};
 use crate::core::WorkerScratchArena;
 use crate::pipeline::archive::types::ProcessingThroughputTotals;
 use crate::preprocessing::{apply_preprocessing_with_metadata, get_preprocessing_strategy};
-use crate::types::{Batch, CompressedBlock, CompressionAlgo, Result};
+use crate::types::{Batch, CompressedBlock, CompressedPayload, CompressionAlgo, Result};
 
 pub fn process_batch(
     batch: Batch,
-    _pool: &BufferPool,
+    pool: &BufferPool,
     _compression: CompressionAlgo,
     skip_preprocessing: bool,
     skip_compression: bool,
@@ -17,9 +17,19 @@ pub fn process_batch(
     processing_totals: &ProcessingThroughputTotals,
     scratch: &mut WorkerScratchArena,
 ) -> Result<CompressedBlock> {
-    let source = batch.data();
-    let plan = batch.compression_plan;
-    if batch.force_raw_storage {
+    let Batch {
+        id,
+        data,
+        file_type_hint,
+        preprocessing_metadata,
+        stream_id,
+        compression_plan: plan,
+        force_raw_storage,
+        ..
+    } = batch;
+    let source_len = data.len();
+    let source = data.as_slice();
+    if force_raw_storage {
         processing_totals.record(
             source.len() as u64,
             Duration::ZERO,
@@ -28,35 +38,28 @@ pub fn process_batch(
         );
 
         return Ok(CompressedBlock::with_chunk_encoding(
-            batch.id,
-            batch.stream_id,
-            source.to_vec(),
+            id,
+            stream_id,
+            CompressedPayload::from_batch_data_in_pool(data, pool),
             crate::PreProcessingStrategy::None,
             plan,
             true,
-            batch.len() as u64,
+            source_len as u64,
         ));
     }
 
     let strategy = if skip_preprocessing {
         crate::PreProcessingStrategy::None
     } else {
-        get_preprocessing_strategy(
-            batch.file_type_hint,
-            plan.preset,
-            batch.preprocessing_metadata.as_ref(),
-        )
+        get_preprocessing_strategy(file_type_hint, plan.preset, preprocessing_metadata.as_ref())
     };
 
     let (preprocessed, preprocessing_elapsed) = if strategy == crate::PreProcessingStrategy::None {
         (None, Duration::ZERO)
     } else {
         let preprocessing_started = Instant::now();
-        let p = apply_preprocessing_with_metadata(
-            source,
-            &strategy,
-            batch.preprocessing_metadata.as_ref(),
-        )?;
+        let p =
+            apply_preprocessing_with_metadata(source, &strategy, preprocessing_metadata.as_ref())?;
         (Some(p), preprocessing_started.elapsed())
     };
     let compression_input = preprocessed.as_deref().unwrap_or(source);
@@ -77,7 +80,7 @@ pub fn process_batch(
         (compressed, compression_started.elapsed())
     };
     processing_totals.record(
-        source.len() as u64,
+        source_len as u64,
         preprocessing_elapsed,
         compression_input.len() as u64,
         compression_elapsed,
@@ -90,21 +93,24 @@ pub fn process_batch(
         strategy
     };
     let data = if skip_compression {
-        compression_input.to_vec()
+        match preprocessed {
+            Some(preprocessed) => CompressedPayload::from_vec_in_pool(preprocessed, pool),
+            None => CompressedPayload::from_batch_data_in_pool(data, pool),
+        }
     } else if raw_passthrough {
-        source.to_vec()
+        CompressedPayload::from_batch_data_in_pool(data, pool)
     } else {
-        compressed
+        CompressedPayload::from_vec_in_pool(compressed, pool)
     };
 
     Ok(CompressedBlock::with_chunk_encoding(
-        batch.id,
-        batch.stream_id,
+        id,
+        stream_id,
         data,
         stored_strategy,
         plan,
         raw_passthrough,
-        batch.len() as u64,
+        source_len as u64,
     ))
 }
 
@@ -197,9 +203,10 @@ mod tests {
             block.pre_proc,
             PreProcessingStrategy::Text(TextStrategy::Bpe)
         );
-        assert_eq!(block.data, expected);
+        assert_eq!(block.data.as_slice(), expected.as_slice());
         assert_eq!(
-            reverse_preprocessing(&block.data, &block.pre_proc).expect("reverse should succeed"),
+            reverse_preprocessing(block.data.as_slice(), &block.pre_proc)
+                .expect("reverse should succeed"),
             b"banana bandana banana"
         );
     }
@@ -233,6 +240,6 @@ mod tests {
 
         assert!(block.raw_passthrough);
         assert_eq!(block.pre_proc, PreProcessingStrategy::None);
-        assert_eq!(block.data, b"banana bandana banana");
+        assert_eq!(block.data.as_slice(), b"banana bandana banana");
     }
 }
