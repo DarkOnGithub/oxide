@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, TryRecvError, bounded, select};
+use crossbeam_channel::{bounded, select, Receiver, TryRecvError};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -229,9 +229,13 @@ where
             producer_compression_plan,
         );
         let mut producer_read = Duration::ZERO;
+        let mut producer_submit_blocked = Duration::ZERO;
 
-        let submit_batch = |batch: Batch| -> Result<()> {
-            batch_tx.send(batch).map_err(|_| {
+        let mut submit_batch = |batch: Batch| -> Result<()> {
+            let send_started = Instant::now();
+            let send_result = batch_tx.send(batch);
+            producer_submit_blocked += send_started.elapsed();
+            send_result.map_err(|_| {
                 crate::OxideError::CompressionError(
                     "directory producer channel closed before completion".to_string(),
                 )
@@ -251,15 +255,21 @@ where
             for _ in 0..helper_threads {
                 let worker_prefetch_rx = prefetch_rx.clone();
                 let worker_result_tx = result_tx.clone();
+                let worker_mmap_threshold = mmap_threshold;
                 let handle = thread::spawn(move || -> Result<()> {
                     while let Ok(request) = worker_prefetch_rx.recv() {
                         let read_started = Instant::now();
-                        let data = fs::read(&request.file.full_path)?;
+                        let file_size = usize::try_from(request.file.size).unwrap_or(usize::MAX);
+                        let payload = if file_size >= worker_mmap_threshold {
+                            PrefetchPayload::Mapped(MmapInput::open(&request.file.full_path)?)
+                        } else {
+                            PrefetchPayload::Owned(fs::read(&request.file.full_path)?)
+                        };
                         let read_elapsed = read_started.elapsed();
                         worker_result_tx
                             .send(PrefetchResult {
                                 index: request.index,
-                                data,
+                                payload,
                                 read_elapsed,
                             })
                             .map_err(|_| {
@@ -280,23 +290,19 @@ where
         let mut prefetched = BTreeMap::<usize, PrefetchResult>::new();
         let mut next_prefetch = 0usize;
         let mut read_buffer = vec![0u8; stream_read_buffer_size];
-        let mut format_probe = vec![0u8; DIRECTORY_FORMAT_PROBE_LIMIT];
         for (file_index, file) in producer_files.iter().enumerate() {
             let force_raw_storage = producer_force_raw_storage[file_index];
             let file_format = if force_raw_storage {
                 FileFormat::Common
-            } else if preserve_boundaries {
-                producer_file_formats[file_index]
             } else {
-                FileFormat::Common
+                producer_file_formats[file_index]
             };
             if let Some(prefetch_tx) = prefetch_request_tx.as_ref() {
                 while next_prefetch < producer_files.len()
                     && next_prefetch <= file_index.saturating_add(prefetch_window)
                 {
                     let candidate = &producer_files[next_prefetch];
-                    let candidate_size = usize::try_from(candidate.size).unwrap_or(usize::MAX);
-                    if candidate_size > 0 && candidate_size <= mmap_threshold {
+                    if candidate.size > 0 {
                         prefetch_tx
                             .send(PrefetchRequest {
                                 index: next_prefetch,
@@ -313,7 +319,7 @@ where
             }
 
             let file_size = usize::try_from(file.size).unwrap_or(usize::MAX);
-            if prefetch_request_tx.is_some() && file_size > 0 && file_size <= mmap_threshold {
+            if prefetch_request_tx.is_some() && file_size > 0 {
                 let prefetched_file = if let Some(result) = prefetched.remove(&file_index) {
                     result
                 } else {
@@ -333,64 +339,44 @@ where
                     }
                 };
                 producer_read += prefetched_file.read_elapsed;
-                let file_format = if force_raw_storage {
-                    FileFormat::Common
-                } else if preserve_boundaries {
-                    file_format
-                } else {
-                    detect_file_format_hint(&prefetched_file.data)
-                };
-                submitter.push_bytes_with_hint(
-                    &prefetched_file.data,
-                    file_format,
-                    force_raw_storage,
-                    |batch| submit_batch(batch),
-                )?;
-            } else if file_size >= mmap_threshold {
-                let read_started = Instant::now();
-                let mmap = MmapInput::open(&file.full_path)?;
-                let file_format = if force_raw_storage {
-                    FileFormat::Common
-                } else if preserve_boundaries {
-                    file_format
-                } else {
-                    let probe_end = mmap.len().min(DIRECTORY_FORMAT_PROBE_LIMIT);
-                    let probe = mmap.mapped_slice(0, probe_end)?;
-                    detect_file_format_hint(probe.as_slice())
-                };
-                let mut offset = 0usize;
-                let len = mmap.len();
-                while offset < len {
-                    let end = offset.saturating_add(stream_read_buffer_size).min(len);
-                    let bytes = mmap.mapped_slice(offset, end)?;
-                    submitter.push_bytes_with_hint(
-                        bytes.as_slice(),
-                        file_format,
-                        force_raw_storage,
-                        |batch| submit_batch(batch),
-                    )?;
-                    offset = end;
-                }
-                producer_read += read_started.elapsed();
-            } else {
-                let mut file_reader = fs::File::open(&file.full_path)?;
-                let file_format = if force_raw_storage {
-                    FileFormat::Common
-                } else if preserve_boundaries {
-                    file_format
-                } else {
-                    let probe_read = file_reader.read(&mut format_probe)?;
-                    let detected = detect_file_format_hint(&format_probe[..probe_read]);
-                    if probe_read > 0 {
+                match prefetched_file.payload {
+                    PrefetchPayload::Owned(data) => {
                         submitter.push_bytes_with_hint(
-                            &format_probe[..probe_read],
-                            detected,
+                            &data,
+                            file_format,
                             force_raw_storage,
                             |batch| submit_batch(batch),
                         )?;
                     }
-                    detected
-                };
+                    PrefetchPayload::Mapped(mmap) => {
+                        if let Some(map) = mmap.mapping() {
+                            submitter.push_mapped_with_hint(
+                                map,
+                                0,
+                                mmap.len(),
+                                file_format,
+                                force_raw_storage,
+                                |batch| submit_batch(batch),
+                            )?;
+                        }
+                    }
+                }
+            } else if file_size >= mmap_threshold {
+                let read_started = Instant::now();
+                let mmap = MmapInput::open(&file.full_path)?;
+                if let Some(map) = mmap.mapping() {
+                    submitter.push_mapped_with_hint(
+                        map,
+                        0,
+                        mmap.len(),
+                        file_format,
+                        force_raw_storage,
+                        |batch| submit_batch(batch),
+                    )?;
+                }
+                producer_read += read_started.elapsed();
+            } else {
+                let mut file_reader = fs::File::open(&file.full_path)?;
                 loop {
                     let read_started = Instant::now();
                     let read = file_reader.read(&mut read_buffer)?;
@@ -435,7 +421,10 @@ where
         }
 
         submitter.finish(submit_batch)?;
-        Ok(DirectoryProducerOutcome { producer_read })
+        Ok(DirectoryProducerOutcome {
+            producer_read,
+            producer_submit_blocked,
+        })
     });
 
     let results_rx = handle.results_receiver().clone();
@@ -471,6 +460,7 @@ where
             &mut first_error,
             &mut raw_passthrough_blocks,
             &mut writer_queue_peak,
+            &mut stage_timings.writer_enqueue_blocked,
             &mut retired_count,
             &mut received_count,
         );
@@ -530,6 +520,7 @@ where
                             &mut first_error,
                             &mut raw_passthrough_blocks,
                             &mut writer_queue_peak,
+                            &mut stage_timings.writer_enqueue_blocked,
                             &mut retired_count,
                             &mut received_count,
                         )?;
@@ -553,6 +544,7 @@ where
                     &mut first_error,
                     &mut raw_passthrough_blocks,
                     &mut writer_queue_peak,
+                    &mut stage_timings.writer_enqueue_blocked,
                     &mut retired_count,
                     &mut received_count,
                 )?;
@@ -609,6 +601,7 @@ where
     match producer_outcome {
         Ok(outcome) => {
             stage_timings.producer_read += outcome.producer_read;
+            stage_timings.producer_submit_blocked += outcome.producer_submit_blocked;
         }
         Err(error) => {
             first_error.get_or_insert(error);
@@ -644,6 +637,7 @@ where
             &mut first_error,
             &mut raw_passthrough_blocks,
             &mut writer_queue_peak,
+            &mut stage_timings.writer_enqueue_blocked,
             &mut retired_count,
             &mut received_count,
         )?;
@@ -754,6 +748,7 @@ fn drain_worker_results(
     first_error: &mut Option<crate::OxideError>,
     raw_passthrough_blocks: &mut u64,
     writer_queue_peak: &mut usize,
+    writer_enqueue_blocked: &mut Duration,
     retired_count: &mut usize,
     received_count: &mut usize,
 ) -> usize {
@@ -771,6 +766,7 @@ fn drain_worker_results(
                     first_error,
                     raw_passthrough_blocks,
                     writer_queue_peak,
+                    writer_enqueue_blocked,
                     retired_count,
                 );
                 *received_count += 1;
@@ -792,6 +788,7 @@ fn recv_worker_result(
     first_error: &mut Option<crate::OxideError>,
     raw_passthrough_blocks: &mut u64,
     writer_queue_peak: &mut usize,
+    writer_enqueue_blocked: &mut Duration,
     retired_count: &mut usize,
     received_count: &mut usize,
 ) -> Result<()> {
@@ -807,6 +804,7 @@ fn recv_worker_result(
                 first_error,
                 raw_passthrough_blocks,
                 writer_queue_peak,
+                writer_enqueue_blocked,
                 retired_count,
             );
             *received_count += 1;
@@ -828,6 +826,7 @@ pub fn record_result_to_writer_queue(
     first_error: &mut Option<crate::OxideError>,
     raw_passthrough_blocks: &mut u64,
     writer_queue_peak: &mut usize,
+    writer_enqueue_blocked: &mut Duration,
     retired_count: &mut usize,
 ) {
     match result {
@@ -855,7 +854,10 @@ pub fn record_result_to_writer_queue(
             }
 
             while let Some(block) = pending_results.remove(next_writer_id) {
-                if writer_tx.send(block).is_err() {
+                let send_started = Instant::now();
+                let send_result = writer_tx.send(block);
+                *writer_enqueue_blocked += send_started.elapsed();
+                if send_result.is_err() {
                     let writer_error = writer_failure
                         .lock()
                         .ok()
@@ -921,6 +923,7 @@ mod tests {
         let mut first_error = None;
         let mut raw_passthrough_blocks = 0u64;
         let mut writer_queue_peak = 0usize;
+        let mut writer_enqueue_blocked = Duration::ZERO;
         let mut retired_count = 0usize;
 
         record_result_to_writer_queue(
@@ -933,6 +936,7 @@ mod tests {
             &mut first_error,
             &mut raw_passthrough_blocks,
             &mut writer_queue_peak,
+            &mut writer_enqueue_blocked,
             &mut retired_count,
         );
         record_result_to_writer_queue(
@@ -945,6 +949,7 @@ mod tests {
             &mut first_error,
             &mut raw_passthrough_blocks,
             &mut writer_queue_peak,
+            &mut writer_enqueue_blocked,
             &mut retired_count,
         );
         record_result_to_writer_queue(
@@ -957,6 +962,7 @@ mod tests {
             &mut first_error,
             &mut raw_passthrough_blocks,
             &mut writer_queue_peak,
+            &mut writer_enqueue_blocked,
             &mut retired_count,
         );
 
@@ -980,6 +986,7 @@ mod tests {
         let mut first_error = None;
         let mut raw_passthrough_blocks = 0u64;
         let mut writer_queue_peak = 0usize;
+        let mut writer_enqueue_blocked = Duration::ZERO;
         let mut retired_count = 0usize;
 
         record_result_to_writer_queue(
@@ -992,6 +999,7 @@ mod tests {
             &mut first_error,
             &mut raw_passthrough_blocks,
             &mut writer_queue_peak,
+            &mut writer_enqueue_blocked,
             &mut retired_count,
         );
 
@@ -1007,6 +1015,7 @@ mod tests {
             &mut first_error,
             &mut raw_passthrough_blocks,
             &mut writer_queue_peak,
+            &mut writer_enqueue_blocked,
             &mut retired_count,
         );
 
