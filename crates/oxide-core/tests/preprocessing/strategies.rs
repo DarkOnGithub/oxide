@@ -125,6 +125,19 @@ fn image_ycocgr_skips_non_rgb_layouts() {
 }
 
 #[test]
+fn image_ycocgr_skips_padded_rgb_layouts() {
+    let metadata = ImageMetadata::packed(ImagePixelFormat::Rgb8)
+        .with_dimensions(1, 2)
+        .with_row_stride(4);
+    let raw = [1u8, 2, 3, 99, 4, 5, 6, 77];
+
+    let transformed = image_ycocgr::apply(&raw, Some(&metadata)).expect("apply should succeed");
+
+    assert_eq!(transformed, raw);
+    assert_eq!(image_ycocgr::reverse(&transformed).unwrap(), raw);
+}
+
+#[test]
 fn image_ycocgr_reverse_rejects_out_of_range_channels() {
     let mut payload = Vec::from(*b"YCGR");
     payload.extend_from_slice(&0i16.to_le_bytes());

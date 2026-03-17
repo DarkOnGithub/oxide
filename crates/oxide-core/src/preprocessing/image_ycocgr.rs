@@ -21,7 +21,7 @@ pub fn apply(data: &[u8], metadata: Option<&utils::ImageMetadata>) -> Result<Vec
     let Some(meta) = metadata else {
         return Ok(data.to_vec());
     };
-    if !supports_transform(meta) {
+    if !supports_transform(data, meta) {
         return Ok(data.to_vec());
     }
 
@@ -77,8 +77,31 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-fn supports_transform(metadata: &utils::ImageMetadata) -> bool {
-    matches!(metadata.pixel_format, utils::ImagePixelFormat::Rgb8)
+fn supports_transform(data: &[u8], metadata: &utils::ImageMetadata) -> bool {
+    if !matches!(metadata.pixel_format, utils::ImagePixelFormat::Rgb8) {
+        return false;
+    }
+
+    match (metadata.width, metadata.height) {
+        (None, None) => data.len() % CHANNELS_PER_PIXEL == 0,
+        (Some(width), None) => {
+            let Some(row_bytes) = width.checked_mul(CHANNELS_PER_PIXEL) else {
+                return false;
+            };
+            metadata.row_stride.unwrap_or(row_bytes) == row_bytes && data.len() % row_bytes == 0
+        }
+        (Some(width), Some(height)) => {
+            let Some(row_bytes) = width.checked_mul(CHANNELS_PER_PIXEL) else {
+                return false;
+            };
+            let Some(required_bytes) = row_bytes.checked_mul(height) else {
+                return false;
+            };
+
+            metadata.row_stride.unwrap_or(row_bytes) == row_bytes && data.len() == required_bytes
+        }
+        _ => false,
+    }
 }
 
 fn decode_channel(value: i32) -> Result<u8> {
