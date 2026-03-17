@@ -13,6 +13,7 @@
 //! - **Telemetry**: Comprehensive instrumentation for monitoring and profiling.
 
 pub mod buffer;
+pub mod checksum;
 pub mod compression;
 pub mod core;
 pub mod error;
@@ -24,6 +25,7 @@ pub mod telemetry;
 pub mod types;
 
 pub use buffer::{BufferPool, PoolMetricsSnapshot, PooledBuffer};
+pub use checksum::compute_checksum;
 pub use compression::{apply_compression, reverse_compression};
 pub use core::{
     PoolRuntimeSnapshot, WorkStealingQueue, WorkStealingWorker, WorkerPool, WorkerPoolHandle,

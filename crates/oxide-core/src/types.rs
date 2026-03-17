@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::buffer::{BufferPool, PooledBuffer};
+use crate::checksum::compute_checksum;
 use crate::error::OxideError;
 use crate::preprocessing::PreprocessingMetadata;
 
@@ -15,14 +16,6 @@ pub type Result<T> = std::result::Result<T, OxideError>;
 /// Converts a [`Duration`] to microseconds as a u64, capping at [`u64::MAX`].
 pub fn duration_to_us(duration: Duration) -> u64 {
     duration.as_micros().min(u64::MAX as u128) as u64
-}
-
-/// Placeholder checksum used while archive integrity checks are disabled.
-pub const PLACEHOLDER_CHECKSUM: u32 = 0;
-
-/// Returns the placeholder checksum for the given bytes.
-pub fn placeholder_checksum(_bytes: &[u8]) -> u32 {
-    PLACEHOLDER_CHECKSUM
 }
 
 /// A batch of data extracted from a file for processing.
@@ -489,16 +482,17 @@ impl CompressedBlock {
         compression_meta: CompressionMeta,
         original_len: u64,
     ) -> Self {
+        let data = data.into();
         Self {
             id,
             stream_id: 0,
-            data: data.into(),
+            crc32: compute_checksum(data.as_slice()),
+            data,
             pre_proc,
             compression: compression_meta.algo,
             compression_preset: compression_meta.preset,
             raw_passthrough: compression_meta.raw_passthrough,
             original_len,
-            crc32: PLACEHOLDER_CHECKSUM,
         }
     }
 
@@ -512,16 +506,17 @@ impl CompressedBlock {
         raw_passthrough: bool,
         original_len: u64,
     ) -> Self {
+        let data = data.into();
         Self {
             id,
             stream_id,
-            data: data.into(),
+            crc32: compute_checksum(data.as_slice()),
+            data,
             pre_proc,
             compression: encoding_plan.algo,
             compression_preset: encoding_plan.preset,
             raw_passthrough,
             original_len,
-            crc32: PLACEHOLDER_CHECKSUM,
         }
     }
 
