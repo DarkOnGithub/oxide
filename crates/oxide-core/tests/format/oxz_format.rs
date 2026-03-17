@@ -1,8 +1,8 @@
 use oxide_core::{
-    ArchiveReader, ArchiveWriter, ChunkDescriptor, CompressionAlgo, CompressionMeta,
-    CompressionPreset, Footer, GlobalHeader, ImageStrategy, OxideError, PreProcessingStrategy,
-    ReorderBuffer, SeekableArchiveWriter, TextStrategy, ARCHIVE_METADATA_SIZE,
-    CHUNK_DESCRIPTOR_SIZE, GLOBAL_HEADER_SIZE,
+    ARCHIVE_METADATA_SIZE, ArchiveReader, ArchiveWriter, CHUNK_DESCRIPTOR_SIZE, ChunkDescriptor,
+    CompressionAlgo, CompressionMeta, CompressionPreset, Footer, GLOBAL_HEADER_SIZE, GlobalHeader,
+    ImageStrategy, OxideError, PreProcessingStrategy, ReorderBuffer, SeekableArchiveWriter,
+    TextStrategy,
 };
 use std::io::Cursor;
 
@@ -146,8 +146,8 @@ fn footer_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn archive_writer_and_reader_support_random_and_sequential_access(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn archive_writer_and_reader_support_random_and_sequential_access()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(3)?;
     writer.write_block(&block(
@@ -237,8 +237,8 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn seekable_archive_writer_streams_payload_and_round_trips(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn seekable_archive_writer_streams_payload_and_round_trips()
+-> Result<(), Box<dyn std::error::Error>> {
     let cursor = Cursor::new(Vec::new());
     let mut writer = SeekableArchiveWriter::new(cursor);
     writer.write_global_header(3)?;

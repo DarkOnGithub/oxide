@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::buffer::BufferPool;
-use crate::compression::{apply_compression_request_with_scratch, CompressionRequest};
+use crate::compression::{CompressionRequest, apply_compression_request_with_scratch};
 use crate::core::WorkerScratchArena;
 use crate::pipeline::archive::types::ProcessingThroughputTotals;
 use crate::preprocessing::{apply_preprocessing_with_metadata, get_preprocessing_strategy};

@@ -11,7 +11,7 @@ pub use consts::{
     OXZ_VERSION,
 };
 pub use headers::{
-    decode_chunk_table, encode_chunk_table, ArchiveMetadata, ChunkDescriptor, Footer, GlobalHeader,
+    ArchiveMetadata, ChunkDescriptor, Footer, GlobalHeader, decode_chunk_table, encode_chunk_table,
 };
 pub use manifest::ArchiveManifest;
 pub use reader::{ArchiveReader, BlockIterator};

@@ -8,7 +8,7 @@ use bytes::Bytes;
 use jwalk::WalkDir;
 use memmap2::Mmap;
 
-use crate::format::{should_force_raw_storage, FormatDetector};
+use crate::format::{FormatDetector, should_force_raw_storage};
 use crate::types::{Batch, BatchData, ChunkEncodingPlan, FileFormat, Result};
 
 use super::types::{ArchiveListingEntry, ArchiveSourceKind};
