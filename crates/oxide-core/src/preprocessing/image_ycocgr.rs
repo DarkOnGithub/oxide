@@ -3,6 +3,9 @@ use crate::error::OxideError;
 use crate::preprocessing::utils;
 
 const TRANSFORM_MARKER: &[u8; 4] = b"YCGR";
+const CHANNELS_PER_PIXEL: usize = 3;
+const ENCODED_COMPONENT_BYTES: usize = std::mem::size_of::<i16>();
+const ENCODED_PIXEL_BYTES: usize = CHANNELS_PER_PIXEL * ENCODED_COMPONENT_BYTES;
 
 /// Converts raw image bytes into RGB pixels for YCoCg-R color transforms.
 pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec<[u8; 3]>> {
@@ -10,14 +13,23 @@ pub fn bytes_to_data(data: &[u8], metadata: &utils::ImageMetadata) -> Result<Vec
 }
 
 /// Applies a reversible YCoCg-R color transform.
+///
+/// Only packed RGB input is transformed. Other image layouts are returned
+/// unchanged because reverse preprocessing cannot reconstruct dropped alpha
+/// channels or original component ordering without additional metadata.
 pub fn apply(data: &[u8], metadata: Option<&utils::ImageMetadata>) -> Result<Vec<u8>> {
-    let meta = match metadata {
-        Some(m) => m,
-        None => return Ok(data.to_vec()),
+    let Some(meta) = metadata else {
+        return Ok(data.to_vec());
     };
+    if !supports_transform(meta) {
+        return Ok(data.to_vec());
+    }
+
     let pixels = bytes_to_data(data, meta)?;
-    let mut output = Vec::with_capacity(TRANSFORM_MARKER.len() + pixels.len() * 6);
+    let mut output =
+        Vec::with_capacity(TRANSFORM_MARKER.len() + pixels.len() * ENCODED_PIXEL_BYTES);
     output.extend_from_slice(TRANSFORM_MARKER);
+
     for pixel in pixels {
         let r = pixel[0] as i16;
         let g = pixel[1] as i16;
@@ -42,12 +54,12 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
     let Some(payload) = data.strip_prefix(TRANSFORM_MARKER) else {
         return Ok(data.to_vec());
     };
-    if payload.len() % 6 != 0 {
+    if payload.len() % ENCODED_PIXEL_BYTES != 0 {
         return Err(OxideError::InvalidFormat("invalid YCoCg-R payload length"));
     }
-    let mut output = Vec::with_capacity(payload.len() / 2);
+    let mut output = Vec::with_capacity((payload.len() / ENCODED_PIXEL_BYTES) * CHANNELS_PER_PIXEL);
 
-    for chunk in payload.chunks_exact(6) {
+    for chunk in payload.chunks_exact(ENCODED_PIXEL_BYTES) {
         let y = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
         let co = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
         let cg = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
@@ -57,9 +69,18 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
         let b = t - (co >> 1);
         let r = b + co;
 
-        output.push(r.clamp(0, 255) as u8);
-        output.push(g.clamp(0, 255) as u8);
-        output.push(b.clamp(0, 255) as u8);
+        output.push(decode_channel(r)?);
+        output.push(decode_channel(g)?);
+        output.push(decode_channel(b)?);
     }
+
     Ok(output)
+}
+
+fn supports_transform(metadata: &utils::ImageMetadata) -> bool {
+    matches!(metadata.pixel_format, utils::ImagePixelFormat::Rgb8)
+}
+
+fn decode_channel(value: i32) -> Result<u8> {
+    u8::try_from(value).map_err(|_| OxideError::InvalidFormat("invalid YCoCg-R channel value"))
 }
