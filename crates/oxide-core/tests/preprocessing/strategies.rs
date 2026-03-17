@@ -106,6 +106,40 @@ fn image_ycocgr_apply_and_reverse_round_trip_with_metadata() {
 }
 
 #[test]
+fn image_ycocgr_skips_non_rgb_layouts() {
+    let bgr_metadata = ImageMetadata::packed(ImagePixelFormat::Bgr8).with_dimensions(1, 1);
+    let rgba_metadata = ImageMetadata::packed(ImagePixelFormat::Rgba8).with_dimensions(1, 1);
+
+    let bgr_raw = [10u8, 20, 30];
+    let rgba_raw = [10u8, 20, 30, 40];
+
+    let bgr_transformed =
+        image_ycocgr::apply(&bgr_raw, Some(&bgr_metadata)).expect("apply should succeed");
+    let rgba_transformed =
+        image_ycocgr::apply(&rgba_raw, Some(&rgba_metadata)).expect("apply should succeed");
+
+    assert_eq!(bgr_transformed, bgr_raw);
+    assert_eq!(rgba_transformed, rgba_raw);
+    assert_eq!(image_ycocgr::reverse(&bgr_transformed).unwrap(), bgr_raw);
+    assert_eq!(image_ycocgr::reverse(&rgba_transformed).unwrap(), rgba_raw);
+}
+
+#[test]
+fn image_ycocgr_reverse_rejects_out_of_range_channels() {
+    let mut payload = Vec::from(*b"YCGR");
+    payload.extend_from_slice(&0i16.to_le_bytes());
+    payload.extend_from_slice(&0i16.to_le_bytes());
+    payload.extend_from_slice(&512i16.to_le_bytes());
+
+    let err = image_ycocgr::reverse(&payload).expect_err("payload should be rejected");
+
+    assert!(matches!(
+        err,
+        OxideError::InvalidFormat("invalid YCoCg-R channel value")
+    ));
+}
+
+#[test]
 fn preprocessing_router_validates_metadata_type_for_strategy() {
     let raw = [1u8, 2, 3, 4, 5, 6];
     let image_metadata =

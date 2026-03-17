@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, TryRecvError};
+use crossbeam_channel::{Receiver, TryRecvError, bounded};
 
 use crate::core::WorkerRuntimeSnapshot;
 use crate::format::{ArchiveMetadata, ArchiveReader, ChunkDescriptor, GlobalHeader};
@@ -17,8 +17,8 @@ use crate::types::Result;
 use super::super::directory;
 use super::super::types::ArchiveSourceKind;
 use super::directory_restore::{
-    apply_entry_metadata, DirectoryExtractSelection, DirectoryRestoreWriter,
-    FilteredDirectoryRestoreWriter,
+    DirectoryExtractSelection, DirectoryRestoreWriter, FilteredDirectoryRestoreWriter,
+    apply_entry_metadata,
 };
 use super::reorder_writer::{BoundedReorderWriter, OrderedChunkWriter};
 use super::telemetry::*;

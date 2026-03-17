@@ -103,9 +103,11 @@ fn worker_pool_balances_mixed_workloads() -> Result<(), Box<dyn std::error::Erro
         .map(|counter| counter.load(Ordering::Acquire))
         .sum();
     assert_eq!(distributed_total, 120);
-    assert!(task_counts
-        .iter()
-        .all(|counter| counter.load(Ordering::Acquire) > 0));
+    assert!(
+        task_counts
+            .iter()
+            .all(|counter| counter.load(Ordering::Acquire) > 0)
+    );
 
     Ok(())
 }

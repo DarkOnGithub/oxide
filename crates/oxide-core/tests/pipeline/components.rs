@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
+use oxide_core::MmapInput;
 use oxide_core::pipeline::{
+    PipelinePerformanceOptions,
     archive::ArchivePipeline,
     directory::{BlockCountPlanner, DirectoryBatchSubmitter},
-    PipelinePerformanceOptions,
 };
 use oxide_core::types::{BatchData, FileFormat};
-use oxide_core::MmapInput;
 use tempfile::tempdir;
 
 mod archive_tests {
