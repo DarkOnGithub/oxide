@@ -1,8 +1,9 @@
 use std::io::{Seek, SeekFrom, Write};
 use std::time::Instant;
 
+use crate::checksum::compute_checksum;
 use crate::telemetry::{profile, tags};
-use crate::types::{duration_to_us, PLACEHOLDER_CHECKSUM};
+use crate::types::duration_to_us;
 use crate::{ArchiveSourceKind, CompressedBlock, OxideError, Result};
 
 use super::{
@@ -209,7 +210,7 @@ impl<W: Write> ArchiveWriter<W> {
             self.writer.write_all(chunk.data.as_slice())?;
         }
 
-        let footer = Footer::new(PLACEHOLDER_CHECKSUM);
+        let footer = Footer::new(compute_checksum(&[]));
         footer.write(&mut self.writer)?;
 
         record_finalize_telemetry(
@@ -441,7 +442,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         self.writer
             .seek(SeekFrom::Start(self.next_payload_offset))?;
 
-        let footer = Footer::new(PLACEHOLDER_CHECKSUM);
+        let footer = Footer::new(compute_checksum(&[]));
         footer.write(&mut self.writer)?;
 
         record_finalize_telemetry(
