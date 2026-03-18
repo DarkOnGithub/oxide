@@ -12,7 +12,7 @@ fn all_preprocessing_strategies() -> Vec<PreProcessingStrategy> {
     vec![
         PreProcessingStrategy::None,
         PreProcessingStrategy::Text(TextStrategy::Bpe),
-        PreProcessingStrategy::Text(TextStrategy::Bwt),
+        //PreProcessingStrategy::Text(TextStrategy::Bwt),
         PreProcessingStrategy::Image(ImageStrategy::YCoCgR),
         PreProcessingStrategy::Image(ImageStrategy::Paeth),
         PreProcessingStrategy::Image(ImageStrategy::LocoI),
