@@ -27,7 +27,7 @@ fn find_most_frequent_pair(data: &[u32]) -> Option<((u32, u32), usize)> {
         }
     }
 
-    if max_count >= 2 {
+    if max_count >= 3 {
         Some((best_pair, max_count))
     } else {
         None
@@ -62,20 +62,19 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     let mut symbols = bytes_to_data(data);
     let mut dictionary = Vec::new();
     let mut next_symbol = 256; // Standard bytes are 0-255
-
+    const MAX_DICT_SIZE: usize = 256;
     // 2. The BPE Loop
     loop {
+        // On s'arrête immédiatement si le dictionnaire est plein
+        if dictionary.len() >= MAX_DICT_SIZE {
+            break;
+        }
+
         if let Some((best_pair, count)) = find_most_frequent_pair(&symbols) {
-            // Replace the pair in the data
             symbols = replace_pair(&symbols, best_pair, next_symbol);
-            
-            // Record the rule in our dictionary
             dictionary.push(best_pair);
-            
-            // Prepare the next unique symbol
             next_symbol += 1;
         } else {
-            // No more repeating pairs found, we stop!
             break;
         }
     }
@@ -109,7 +108,7 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     for sym in symbols {
         output.extend_from_slice(&sym.to_le_bytes());
     }
-
+    
     Ok(output)
 }
 
