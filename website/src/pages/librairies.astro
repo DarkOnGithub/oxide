@@ -1,0 +1,29 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import PageHeader from '../components/PageHeader.astro';
+---
+
+<BaseLayout title="Oxide - Librairies">
+  <PageHeader
+    title="Technologies et algorithmes"
+    description="Les outils qui propulsent notre archiveur"
+  />
+
+  <main class="main-container">
+    <section>
+      <h2>Ressources utilisees pour la soutenance 1</h2>
+      <p>Voici l'environnement technique qui propulse Oxide :</p>
+
+      <ul>
+        <li><strong>Langage :</strong> Rust avec une gestion du projet via Cargo.</li>
+        <li><strong>Compression :</strong> LZ4 pour le mode rapide, LZ77 + Huffman pour le mode equilibre.</li>
+        <li><strong>Pre-traitement :</strong> YCoCg-R, LOCO-I/MED, BPE et BCJ.</li>
+        <li><strong>Versioning :</strong> Git.</li>
+      </ul>
+
+      <p class="text-muted" style="margin-top: 2rem; font-style: italic;">
+        Les algorithmes LZMA, PPM, LPC et BWT seront integres plus tard pour la seconde soutenance.
+      </p>
+    </section>
+  </main>
+</BaseLayout>

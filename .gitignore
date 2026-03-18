@@ -1,0 +1,8 @@
+.opencode/
+*.oxz
+dataset/
+datasets/
+temp/
+silesia_corpus/
+target/
+latex/

@@ -1,0 +1,40 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import PageHeader from '../components/PageHeader.astro';
+---
+
+<BaseLayout title="Oxide - Accueil">
+  <PageHeader
+    title="Oxide"
+    description="Logiciel d'archivage moderne et securise en Rust - EPITA 2026"
+  />
+
+  <main class="main-container">
+    <section>
+      <h2>Presentation du projet</h2>
+      <p>
+        Oxide est un logiciel d'archivage de fichiers concu pour offrir une alternative moderne aux
+        solutions existantes, en tirant parti des performances et de la surete memoire du langage Rust.
+      </p>
+    </section>
+
+    <section style="margin-top: 4rem;">
+      <h3 class="text-accent">Notre strategie : l'approche "Content-Aware"</h3>
+      <p>
+        Plutot que d'utiliser un seul algorithme, Oxide analyse les fichiers en entree pour appliquer
+        des filtres de pre-traitement dedies aux images, au texte et aux binaires. Ces transformations
+        reversibles reduisent l'entropie avant de confier les donnees a un compresseur universel.
+      </p>
+    </section>
+
+    <section style="margin-top: 4rem;">
+      <h3>Objectifs de la soutenance 1</h3>
+      <ul>
+        <li>Implementation des modes de compression rapide via LZ4 et equilibre via LZ77+Huffman.</li>
+        <li>Developpement des algorithmes de pre-traitement YCoCg-R, LOCO-I/MED, BPE et BCJ.</li>
+        <li>Creation du format de fichier et du Pipeline Manager.</li>
+        <li>Mise en place de la CLI et de la verification d'integrite par hashing.</li>
+      </ul>
+    </section>
+  </main>
+</BaseLayout>

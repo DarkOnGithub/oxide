@@ -1,0 +1,17 @@
+---
+interface Props {
+  name: string;
+  role: string;
+  tasks: string;
+  githubUrl: string;
+}
+
+const { name, role, tasks, githubUrl } = Astro.props;
+---
+
+<article class="card">
+  <h3>{name}</h3>
+  <p><strong class="text-accent">Role :</strong> {role}</p>
+  <p><em class="text-muted">Taches :</em> {tasks}</p>
+  <a href={githubUrl} class="text-accent" target="_blank" rel="noopener noreferrer">Profil GitHub &rarr;</a>
+</article>

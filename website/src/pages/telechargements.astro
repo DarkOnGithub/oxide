@@ -1,0 +1,28 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import PageHeader from '../components/PageHeader.astro';
+---
+
+<BaseLayout title="Oxide - Telechargements">
+  <PageHeader
+    title="Executables - Soutenance 1"
+    description="Fichiers et code source du projet"
+  />
+
+  <main class="main-container">
+    <section style="text-align: center;">
+      <h2>Fichiers du projet</h2>
+      <p>
+        Vous trouverez ci-dessous les executables exiges pour notre premiere soutenance. L'archive du
+        projet contient notre outil en ligne de commande fonctionnel avec les modes rapide et equilibre,
+        ainsi que le README contenant les instructions de build avec Cargo.
+      </p>
+
+      <div class="btn-group">
+        <a href="/rapport1.pdf" class="btn" download>Telecharger le rapport (S1)</a>
+        <a href="/projet_oxide_s1.zip" class="btn" download>Projet Complet (CLI)</a>
+        <a href="/projet_oxide_s1.zip" class="btn" download>Version Lite</a>
+      </div>
+    </section>
+  </main>
+</BaseLayout>

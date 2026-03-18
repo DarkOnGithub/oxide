@@ -1,0 +1,22 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import MemberCard from '../components/MemberCard.astro';
+import PageHeader from '../components/PageHeader.astro';
+import { teamMembers } from '../data/team';
+---
+
+<BaseLayout title="Oxide - L'Equipe">
+  <PageHeader
+    title="L'equipe Oxide"
+    description="Repartition pour la premiere soutenance"
+  />
+
+  <main class="wide-container">
+    <section>
+      <h2 style="text-align: center; margin-bottom: 3rem;">Repartition des taches - Soutenance 1</h2>
+      <div class="card-grid">
+        {teamMembers.map((member) => <MemberCard {...member} />)}
+      </div>
+    </section>
+  </main>
+</BaseLayout>
