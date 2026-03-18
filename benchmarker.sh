@@ -6,11 +6,17 @@ SOURCE="./silesia_corpus"
 OXIDE="./target/release/oxide-cli"
 OXIDE_OUTPUT="silesia_corpus.oxz"
 SQUASHFS_OUTPUT="archive.sqfs"
+TAR_ZSTD_OUTPUT="archive.tar.zst"
+TAR_LZ4_OUTPUT="archive.tar.lz4"
+
 OXIDE_EXTRACT_DIR="oxide_extract_out"
 SQUASHFS_EXTRACT_DIR="squashfs_extract_out"
+TAR_ZSTD_EXTRACT_DIR="tar_zstd_extract_out"
+TAR_LZ4_EXTRACT_DIR="tar_lz4_extract_out"
+
 BENCHMARK_THREADS="${BENCHMARK_THREADS:-16}"
-BENCHMARK_PASSES="${BENCHMARK_PASSES:-1}"
-BENCHMARK_SKIP_EXTRACT="${BENCHMARK_SKIP_EXTRACT:-0}"
+BENCHMARK_PASSES="${BENCHMARK_PASSES:-4}"
+BENCHMARK_SKIP_EXTRACT="${BENCHMARK_SKIP_EXTRACT:-1}"
 SOURCE_BYTES="$(du -sb "$SOURCE" | cut -f1)"
 
 MODE_COMPRESSION=""
@@ -34,44 +40,44 @@ set_mode_config() {
   local mode=$1
 
   case $mode in
-  "fast")
-    MODE_COMPRESSION="lz4"
-    MODE_LEVEL=""
-    OXIDE_BLOCK_SIZE="1M"
-    ;;
-  "balanced")
-    MODE_COMPRESSION="zstd"
-    MODE_LEVEL="6"
-    OXIDE_BLOCK_SIZE="1M"
-    ;;
-  "ultra")
-    MODE_COMPRESSION="zstd"
-    MODE_LEVEL="19"
-    OXIDE_BLOCK_SIZE="1M"
-    ;;
-  *)
-    echo "Unknown mode: $mode" >&2
-    exit 1
-    ;;
+    "fast")
+      MODE_COMPRESSION="lz4"
+      MODE_LEVEL=""
+      OXIDE_BLOCK_SIZE="1M"
+      ;;
+    "balanced")
+      MODE_COMPRESSION="zstd"
+      MODE_LEVEL="6"
+      OXIDE_BLOCK_SIZE="1M"
+      ;;
+    "ultra")
+      MODE_COMPRESSION="zstd"
+      MODE_LEVEL="19"
+      OXIDE_BLOCK_SIZE="1M"
+      ;;
+    *)
+      echo "Unknown mode: $mode" >&2
+      exit 1
+      ;;
   esac
 }
 
 format_bytes() {
   local bytes=$1
   awk -v bytes="$bytes" 'BEGIN {
-        split("B KiB MiB GiB TiB", units, " ")
-        value = bytes + 0
-        unit = 1
-        while (value >= 1024 && unit < 5) {
-            value /= 1024
-            unit++
-        }
-        if (unit == 1) {
-            printf "%d %s", bytes, units[unit]
-        } else {
-            printf "%.2f %s", value, units[unit]
-        }
-    }'
+    split("B KiB MiB GiB TiB", units, " ")
+    value = bytes + 0
+    unit = 1
+    while (value >= 1024 && unit < 5) {
+      value /= 1024
+      unit++
+    }
+    if (unit == 1) {
+      printf "%d %s", bytes, units[unit]
+    } else {
+      printf "%.2f %s", value, units[unit]
+    }
+  }'
 }
 
 run_and_record() {
@@ -94,20 +100,19 @@ run_and_record() {
   elapsed_s=$(awk -v ns="$elapsed_ns" 'BEGIN { printf "%.3f", ns / 1000000000 }')
   output_bytes=$(du -sb "$output_path" | cut -f1)
   throughput=$(awk -v bytes="$SOURCE_BYTES" -v ns="$elapsed_ns" 'BEGIN {
-        secs = ns / 1000000000
-        if (secs <= 0) {
-            printf "0.00"
-        } else {
-            printf "%.2f", (bytes / 1024 / 1024) / secs
-        }
-    }')
+    secs = ns / 1000000000
+    if (secs <= 0) {
+      printf "0.00"
+    } else {
+      printf "%.2f", (bytes / 1024 / 1024) / secs
+    }
+  }')
 
   RESULT_ROWS+=("$tool|$phase|$mode|$pass|$elapsed_s|$throughput|$output_bytes")
 }
 
 cleanup_path() {
   local target=$1
-
   if [[ -e "$target" ]]; then
     rm -rf "$target"
   fi
@@ -125,12 +130,12 @@ print_results_table() {
   for row in "${RESULT_ROWS[@]}"; do
     IFS='|' read -r tool phase mode pass elapsed throughput output_bytes <<<"$row"
     ratio=$(awk -v out="$output_bytes" -v inb="$SOURCE_BYTES" 'BEGIN {
-            if (inb <= 0) {
-                printf "0.000"
-            } else {
-                printf "%.3f", out / inb
-            }
-        }')
+      if (inb <= 0) {
+        printf "0.000"
+      } else {
+        printf "%.3f", out / inb
+      }
+    }')
 
     printf "%-12s %-13s %-10s %6s %10s %14s %14s %8s\n" \
       "$tool" \
@@ -150,23 +155,23 @@ print_results_table() {
   printf "%-12s %-13s %-10s %10s %14s %14s %8s\n" "tool" "phase" "mode" "avg sec" "avg MiB/s" "avg output" "ratio"
 
   summary=$(printf '%s\n' "${RESULT_ROWS[@]}" | awk -F'|' -v source_bytes="$SOURCE_BYTES" '
-        {
-            key = $1 FS $2 FS $3
-            count[key] += 1
-            elapsed[key] += $5
-            throughput[key] += $6
-            output[key] += $7
-        }
-        END {
-            for (key in count) {
-                avg_elapsed = elapsed[key] / count[key]
-                avg_throughput = throughput[key] / count[key]
-                avg_output = output[key] / count[key]
-                ratio = (source_bytes > 0) ? avg_output / source_bytes : 0
-                printf "%s|%.3f|%.2f|%.0f|%.3f\n", key, avg_elapsed, avg_throughput, avg_output, ratio
-            }
-        }
-    ' | sort -t'|' -k2,2 -k1,1)
+    {
+      key = $1 FS $2 FS $3
+      count[key] += 1
+      elapsed[key] += $5
+      throughput[key] += $6
+      output[key] += $7
+    }
+    END {
+      for (key in count) {
+        avg_elapsed = elapsed[key] / count[key]
+        avg_throughput = throughput[key] / count[key]
+        avg_output = output[key] / count[key]
+        ratio = (source_bytes > 0) ? avg_output / source_bytes : 0
+        printf "%s|%.3f|%.2f|%.0f|%.3f\n", key, avg_elapsed, avg_throughput, avg_output, ratio
+      }
+    }
+  ' | sort -t'|' -k2,2 -k1,1)
 
   while IFS='|' read -r tool phase mode avg_elapsed avg_throughput avg_output avg_ratio; do
     [[ -z "$tool" ]] && continue
@@ -190,6 +195,7 @@ run_oxide() {
     "$OXIDE" archive "$SOURCE" \
     --output "$OXIDE_OUTPUT" \
     --preset "$mode" \
+    --skip-preprocessing \
     --block-size "$OXIDE_BLOCK_SIZE" \
     --workers "$BENCHMARK_THREADS"
 }
@@ -232,6 +238,63 @@ run_unsquashfs_extract() {
     unsquashfs -q -f -no-xattrs -d "$SQUASHFS_EXTRACT_DIR" "$source_archive"
 }
 
+run_tar_zstd() {
+  local mode=$1
+  local zstd_level
+
+  case "$mode" in
+    fast)     zstd_level=1  ;;
+    balanced) zstd_level=6  ;;
+    ultra)    zstd_level=19 ;;
+    *) echo "Unknown mode: $mode" >&2; exit 1 ;;
+  esac
+
+  run_and_record "tar+zstd" "archive" "$mode" "$CURRENT_PASS" "$TAR_ZSTD_OUTPUT" \
+    tar -I "zstd -T${BENCHMARK_THREADS} -${zstd_level}" \
+      -cf "$TAR_ZSTD_OUTPUT" "$SOURCE"
+}
+
+run_tar_zstd_extract() {
+  local mode=$1
+
+  mkdir -p "$TAR_ZSTD_EXTRACT_DIR"
+  run_and_record "tar+zstd" "extract" "$mode" "$CURRENT_PASS" "$TAR_ZSTD_EXTRACT_DIR" \
+    bash -c 'mkdir -p "$1" && tar -I zstd -xf "$2" -C "$1"' bash "$TAR_ZSTD_EXTRACT_DIR" "$TAR_ZSTD_OUTPUT"
+}
+
+run_tar_lz4() {
+  local mode=$1
+  local lz4_args=()
+
+  case "$mode" in
+    fast)
+      lz4_args=(-1)
+      ;;
+    balanced)
+      lz4_args=(-9)
+      ;;
+    ultra)
+      lz4_args=(-9)
+      ;;
+    *)
+      echo "Unknown mode: $mode" >&2
+      exit 1
+      ;;
+  esac
+
+  run_and_record "tar+lz4" "archive" "$mode" "$CURRENT_PASS" "$TAR_LZ4_OUTPUT" \
+    tar -I "lz4 ${lz4_args[*]} -T${BENCHMARK_THREADS}" \
+      -cf "$TAR_LZ4_OUTPUT" "$SOURCE"
+}
+
+run_tar_lz4_extract() {
+  local mode=$1
+
+  mkdir -p "$TAR_LZ4_EXTRACT_DIR"
+  run_and_record "tar+lz4" "extract" "$mode" "$CURRENT_PASS" "$TAR_LZ4_EXTRACT_DIR" \
+    bash -c 'mkdir -p "$1" && tar -I "lz4 -d -T'"${BENCHMARK_THREADS}"'" -xf "$2" -C "$1"' bash "$TAR_LZ4_EXTRACT_DIR" "$TAR_LZ4_OUTPUT"
+}
+
 run_bench() {
   local mode=$1
   echo "======================================================"
@@ -242,7 +305,6 @@ run_bench() {
     echo "Pass $CURRENT_PASS/$BENCHMARK_PASSES"
 
     drop_caches
-
     echo "--- Oxide ($mode) ---"
     run_oxide "$mode"
     if [[ "$BENCHMARK_SKIP_EXTRACT" != "1" ]]; then
@@ -255,7 +317,6 @@ run_bench() {
     echo ""
 
     drop_caches
-
     echo "--- mksquashfs ($mode equivalent) ---"
     run_mksquashfs "$mode"
     if [[ "$BENCHMARK_SKIP_EXTRACT" != "1" ]]; then
@@ -266,12 +327,38 @@ run_bench() {
     cleanup_path "$SQUASHFS_OUTPUT"
     cleanup_path "$SQUASHFS_EXTRACT_DIR"
     echo ""
+
+    drop_caches
+    echo "--- tar + zstd ($mode equivalent) ---"
+    run_tar_zstd "$mode"
+    if [[ "$BENCHMARK_SKIP_EXTRACT" != "1" ]]; then
+      drop_caches
+      mkdir -p "$TAR_ZSTD_EXTRACT_DIR"
+      echo "--- tar + zstd extract ($mode equivalent) ---"
+      run_tar_zstd_extract "$mode"
+    fi
+    cleanup_path "$TAR_ZSTD_OUTPUT"
+    cleanup_path "$TAR_ZSTD_EXTRACT_DIR"
+    echo ""
+
+    drop_caches
+    echo "--- tar + lz4 ($mode equivalent) ---"
+    run_tar_lz4 "$mode"
+    if [[ "$BENCHMARK_SKIP_EXTRACT" != "1" ]]; then
+      drop_caches
+      mkdir -p "$TAR_LZ4_EXTRACT_DIR"
+      echo "--- tar + lz4 extract ($mode equivalent) ---"
+      run_tar_lz4_extract "$mode"
+    fi
+    cleanup_path "$TAR_LZ4_OUTPUT"
+    cleanup_path "$TAR_LZ4_EXTRACT_DIR"
+    echo ""
   done
 }
 
 build_oxide
 
-for mode in "fast" "balanced" "ultra"; do
+for mode in "fast" "balanced" ; do
   run_bench "$mode"
 done
 
