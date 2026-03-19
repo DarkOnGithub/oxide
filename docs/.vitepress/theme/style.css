@@ -1,0 +1,356 @@
+/* docs/.vitepress/theme/style.css */
+
+:root {
+  /* Brand colors matching Oxide vibrant lighter orange */
+  --vp-c-brand-1: #fb923c;
+  --vp-c-brand-2: #fdba74;
+  --vp-c-brand-3: #fed7aa;
+  --vp-c-brand-soft: rgba(253, 186, 116, 0.16);
+
+  /* Typography: clean modern sans-serif */
+  --vp-font-family-base: "Inter", "Roobert", "Helvetica Neue", Arial, sans-serif;
+
+  /* Disable pure black background */
+  --vp-c-black: #0c0d12;
+
+  /* Light mode warm theme / refined colors */
+  --vp-c-bg: #fefbfa;
+  /* Warm off-white background */
+  --vp-c-bg-alt: #f6f3f1;
+  --vp-c-bg-elv: #ffffff;
+  --vp-c-bg-soft: #fbf8f7;
+  --vp-c-bg-mute: #f4f0ee;
+
+  --vp-c-divider: rgba(0, 0, 0, 0.06);
+
+  --vp-c-text-1: #2d2623;
+  /* Deep warm grey-brown */
+  --vp-c-text-2: #6b5c57;
+  --vp-c-text-3: #96867f;
+}
+
+.dark {
+  /* Deep, elegant dark purple/grey background */
+  --vp-c-bg: #111015;
+  --vp-c-bg-alt: #16151b;
+  --vp-c-bg-elv: #1c1b22;
+  --vp-c-bg-soft: #16151b;
+
+  --vp-c-divider: rgba(255, 255, 255, 0.05);
+
+  --vp-c-text-1: #f3ece6;
+  --vp-c-text-2: #aca39d;
+  --vp-c-text-3: #877f7a;
+}
+
+/* Glowing text utility for titles */
+.text-gradient {
+  background: linear-gradient(120deg, #fef08a, #fdba74 60%, #fb923c);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glowing background styles for the homepage */
+.glow-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -2;
+  overflow: hidden;
+  pointer-events: none;
+  /* Soft purple/blue mesh behind the content */
+  background-image:
+    radial-gradient(circle at 15% 50%, rgba(135, 62, 235, 0.15) 0%, transparent 50%),
+    radial-gradient(circle at 85% 30%, rgba(129, 200, 248, 0.15) 0%, transparent 50%);
+  animation: bg-shift 15s ease-in-out infinite alternate;
+}
+
+.dark .glow-bg {
+  /* More intense aurora for dark mode */
+  background-image:
+    radial-gradient(circle at 15% 50%, rgba(168, 85, 247, 0.15) 0%, transparent 50%),
+    radial-gradient(circle at 85% 30%, rgba(56, 189, 248, 0.1) 0%, transparent 50%);
+}
+
+@keyframes bg-shift {
+  0% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+
+  100% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+}
+
+.orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  opacity: 0.5;
+  animation: float 20s infinite ease-in-out alternate;
+}
+
+.dark .orb {
+  opacity: 0.6;
+  /* Only show colorful mesh in dark mode natively, or increase opacity */
+}
+
+/* Rainbow aurora blobs */
+.orb-1 {
+  width: 50vw;
+  height: 50vh;
+  background: rgba(168, 85, 247, 0.4);
+  /* Purple */
+  top: -10%;
+  left: -10%;
+}
+
+.orb-2 {
+  width: 60vw;
+  height: 60vh;
+  background: rgba(56, 189, 248, 0.3);
+  /* Cyan / Light Blue */
+  bottom: -20%;
+  right: -10%;
+  animation-delay: -5s;
+}
+
+.orb-3 {
+  width: 45vw;
+  height: 45vh;
+  background: rgba(235, 62, 133, 0.25);
+  /* Pink/Magenta */
+  top: 30%;
+  left: 40%;
+  animation-delay: -10s;
+}
+
+.orb-4 {
+  width: 50vw;
+  height: 50vh;
+  background: rgba(16, 185, 129, 0.2);
+  /* Emerald / Green hint */
+  top: 10%;
+  right: 15%;
+  animation-delay: -15s;
+}
+
+@keyframes float {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+
+  50% {
+    transform: translate(50px, 30px) scale(1.05);
+  }
+
+  100% {
+    transform: translate(-30px, 50px) scale(0.95);
+  }
+}
+
+/* Sidebar Glassmorphism & Fixed Clipping */
+@media (min-width: 960px) {
+  :root {
+    --vp-sidebar-bg-color: transparent !important;
+  }
+
+  .VPSidebar,
+  .VPSidebar * {
+    background-color: transparent !important;
+  }
+
+  .VPSidebar {
+    top: var(--vp-nav-height, 64px) !important;
+    padding-top: 32px !important;
+    height: calc(100vh - var(--vp-nav-height, 64px)) !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border-right: none !important;
+  }
+
+  .VPSidebar .curtain {
+    display: none !important;
+  }
+}
+
+/* Fallback for mobile overlay menu where backgrounds are still required */
+html:not(.dark) .VPSidebar {
+  background-color: rgba(254, 251, 250, 0.95);
+  backdrop-filter: blur(16px);
+}
+
+.dark .VPSidebar {
+  background-color: rgba(17, 16, 21, 0.95);
+  backdrop-filter: blur(16px);
+}
+
+/* Floating, textureless Top Bar */
+.VPNavBar,
+.VPNavBar .wrapper,
+html:not(.dark) .VPNavBar,
+.dark .VPNavBar,
+.VPNavBarTitle,
+.VPNavBarTitle.has-sidebar,
+.VPNavBarTitle .title,
+.VPNavBar.has-sidebar .VPNavBarTitle,
+.VPNavBar.has-sidebar .title,
+.VPNavBarTitle>a {
+  background-color: transparent !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.VPNavBar .divider,
+.VPNavBarTitle.has-sidebar::before,
+.VPNavBarTitle::after,
+.VPNavBar.has-sidebar .wrapper::before {
+  display: none !important;
+  opacity: 0 !important;
+}
+
+/* Right side TOC adjustments to Match Design */
+.dark .VPDocAsideOutline .outline-link.active {
+  color: var(--vp-c-brand-1);
+}
+
+.dark .VPDocAsideOutline .outline-marker {
+  background-color: var(--vp-c-brand-1);
+}
+
+/* Syntax Highlighting overrides for Vitepress to look more like the screenshot */
+.dark .vp-code-group .tabs {
+  background-color: #1e212b !important;
+}
+
+.dark div[class*="language-"] {
+  background-color: #0b0c10 !important;
+  /* Very dark grayish-black for code block */
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  transition: all 0.3s ease;
+}
+
+.dark div[class*="language-"]:hover {
+  border-color: rgba(253, 186, 116, 0.3);
+  /* Subtle light orange glow on hover */
+  box-shadow: 0 15px 40px rgba(0, 0, 0, 0.6), 0 0 20px rgba(253, 186, 116, 0.1);
+}
+
+/* Center and Lengthen Search Bar */
+@media (min-width: 768px) {
+  .VPNavBar {
+    position: relative !important;
+  }
+
+  /* Empêche VitePress de piéger le positionnement absolu avec ses propres conteneurs */
+  .VPNavBar .wrapper,
+  .VPNavBar .wrapper .container,
+  .VPNavBar .content,
+  .VPNavBar .content-body {
+    position: static !important;
+  }
+
+  .VPNavBarSearch {
+    position: absolute !important;
+    left: 50% !important;
+    /* Perfect physical center */
+    transform: translateX(-50%) !important;
+    width: 256px !important;
+    /* EXACT match to ElysiaJS length */
+    display: flex !important;
+  }
+
+  /* Target the inner wrapper and the button properly */
+  .VPNavBarSearch #local-search,
+  .VPNavBarSearch button.DocSearch {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex: 1 !important;
+  }
+
+  .VPNavBarSearch button.DocSearch {
+    justify-content: flex-start !important;
+    position: relative !important;
+    background-color: transparent !important;
+    border: 1px solid rgba(0, 0, 0, 0.1) !important;
+    border-radius: 8px !important;
+    padding-left: 10px !important;
+    height: 36px !important;
+    transition: all 0.25s cubic-bezier(0.25, 0.8, 0.25, 1) !important;
+    transform: scale(1) !important;
+    transform-origin: center center !important;
+  }
+
+  .VPNavBarSearch button.DocSearch:hover {
+    transform: scale(1.03) !important;
+    background-color: rgba(0, 0, 0, 0.02) !important;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05) !important;
+  }
+
+  .dark .VPNavBarSearch button.DocSearch {
+    background-color: transparent !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  }
+
+  .dark .VPNavBarSearch button.DocSearch:hover {
+    background-color: rgba(255, 255, 255, 0.04) !important;
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4), 0 0 10px rgba(255, 255, 255, 0.05) !important;
+  }
+
+  /* The pill wrapper for "Ctrl K" in ElysiaJS style */
+  .VPNavBarSearch button.DocSearch .DocSearch-Button-Keys {
+    position: absolute !important;
+    right: 6px !important;
+    display: flex !important;
+    align-items: center !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    padding: 3px 6px !important;
+    border-radius: 6px !important;
+    background: transparent !important;
+    margin: 0 !important;
+  }
+
+  html:not(.dark) .VPNavBarSearch button.DocSearch .DocSearch-Button-Keys {
+    border-color: rgba(0, 0, 0, 0.1) !important;
+  }
+
+  .VPNavBarSearch button.DocSearch .DocSearch-Button-Key {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: var(--vp-c-text-2) !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    font-size: 11px !important;
+  }
+}
+
+/* Custom Block Info Depth & Color Styling */
+.custom-block.info {
+  background-color: var(--vp-c-brand-soft) !important;
+  border: 1px solid rgba(253, 186, 116, 0.2) !important;
+  box-shadow: 0 4px 15px rgba(253, 186, 116, 0.1), 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+  border-radius: 12px;
+  transform: translateY(0);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.custom-block.info:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(253, 186, 116, 0.2), 0 2px 5px rgba(0, 0, 0, 0.1) !important;
+}
+
+.custom-block.info .custom-block-title {
+  color: var(--vp-c-brand-1) !important;
+}
