@@ -4,7 +4,7 @@ export default defineConfig({
     title: "Oxide",
     description: "Ergonomic Framework for Humans",
     appearance: 'dark',
-    base: '/',
+    base: '/oxide/',
     themeConfig: {
         logo: '/logo.svg', // Will need a logo or can omit if not present
         nav: [
