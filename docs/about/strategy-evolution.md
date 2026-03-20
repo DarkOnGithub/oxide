@@ -1,9 +1,9 @@
 ---
-title: Strategy Evolution
+title: Évolution de la stratégie
 description: Problématiques du pré-traitement et solutions adoptées
 ---
 
-# Strategy Evolution: Preprocessing
+# Évolution de la stratégie : Prétraitement
 
 Au cours du développement, plusieurs problématiques ont émergé concernant l'utilisation systématique d'algorithmes de pré-traitement avant la compression finale :
 
@@ -13,9 +13,7 @@ Au cours du développement, plusieurs problématiques ont émergé concernant l'
 
 ## Solution apportée
 
-Face à ces constats, nous avons pris la décision de **retirer cette étape de pré-traitement** de la philosophie de l'application Oxide. Cette coupure franche de la stratégie initiale permet :
+Face à ces constats, nous avons pris la décision de **retirer cette étape de pré-traitement**. Cette coupure franche de la stratégie initiale permet :
 
 1. D'**améliorer drastiquement les performances globales**, tant sur la vitesse brute de compression et décompression, que sur l'utilisation mémoire.
-2. De libérer du temps et des ressources de développement afin de **nous concentrer sur l'implémentation d'autres fonctionnalités** bien plus impactantes et qualitatives pour nos utilisateurs. 
-
-En éliminant cette surcharge technique, l'équipe se recentre sur le cœur de l'application et sur des atouts concrets, comme l'ajout de l'algorithme très performant **Zstandard (Zstd)**.
+2. De libérer du temps et des ressources de développement afin de **nous concentrer sur l'implémentation d'autres fonctionnalités**. 

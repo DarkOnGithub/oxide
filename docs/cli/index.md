@@ -1,26 +1,14 @@
-# CLI Documentation
+# Documentation CLI
 
 Bienvenue dans la documentation d'**Oxide** ! Oxide est un outil d'archivage haute performance développé en Rust.
 
 ## Installation
 
-Vous pouvez installer `oxide-cli` soit en utilisant Cargo (le gestionnaire de paquets Rust), soit en téléchargeant directement un binaire pré-compilé depuis notre dépôt.
+Vous pouvez installer `oxide-cli` en téléchargeant directement un binaire pré-compilé depuis notre dépôt.
 
-### Option 1 : Utilisation de Cargo
+### Téléchargement depuis le dépôt
 
-Si Rust et Cargo sont déjà installés sur votre système, vous pouvez compiler et installer Oxide directement :
-
-```bash
-cargo install oxide-cli
-```
-
-::: info Remarque
-Assurez-vous que le dossier `~/.cargo/bin` figure bien dans votre variable d'environnement `PATH` pour pouvoir exécuter `oxide-cli` depuis n'importe où.
-:::
-
-### Option 2 : Téléchargement depuis le dépôt
-
-Si Rust n'est pas installé ou si vous préférez un exécutable prêt à l'emploi, vous pouvez télécharger les derniers binaires pré-compilés depuis la page GitHub Releases :
+Si vous préférez un exécutable prêt à l'emploi, vous pouvez télécharger les derniers binaires pré-compilés depuis la page GitHub Releases :
 
 1. Accédez aux [Versions (Releases) de GitHub Oxide](https://github.com/DarkOnGithub/oxide/releases/latest).
 2. Téléchargez l'archive correspondant à votre système d'exploitation.
