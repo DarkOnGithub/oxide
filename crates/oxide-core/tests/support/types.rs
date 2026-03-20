@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use oxide_core::{
-    Batch, BatchData, BinaryStrategy, CompressedBlock, CompressedPayload, CompressionAlgo,
-    FileFormat, MmapInput, PreProcessingStrategy,
+    compute_checksum, Batch, BatchData, BinaryStrategy, CompressedBlock, CompressedPayload,
+    CompressionAlgo, FileFormat, MmapInput, PreProcessingStrategy,
 };
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -29,20 +29,21 @@ fn batch_constructor_with_hint() {
 
 #[test]
 fn compressed_block_constructor_sets_crc() {
+    let payload = vec![1, 2, 3, 4];
     let block = CompressedBlock::new(
         2,
-        vec![1, 2, 3, 4],
+        payload.clone(),
         PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
         CompressionAlgo::Lz4,
         2048,
     );
 
-    assert_eq!(block.crc32, 0);
+    assert_eq!(block.crc32, compute_checksum(&payload));
     assert!(block.verify_crc32());
 }
 
 #[test]
-fn compressed_block_crc_is_placeholder() {
+fn compressed_block_crc_detects_payload_mutation() {
     let block = CompressedBlock::new(
         2,
         vec![1, 2, 3, 4],
@@ -56,8 +57,7 @@ fn compressed_block_crc_is_placeholder() {
         ..block
     };
 
-    assert_eq!(mutated.crc32, 0);
-    assert!(mutated.verify_crc32());
+    assert!(!mutated.verify_crc32());
 }
 
 #[test]
