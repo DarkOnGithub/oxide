@@ -1,9 +1,9 @@
 ---
-title: Évolution de la Stratégie
+title: Strategy Evolution
 description: Problématiques du pré-traitement et solutions adoptées
 ---
 
-# Évolution de la Stratégie : Le Pré-traitement
+# Strategy Evolution: Preprocessing
 
 Au cours du développement, plusieurs problématiques ont émergé concernant l'utilisation systématique d'algorithmes de pré-traitement avant la compression finale :
 

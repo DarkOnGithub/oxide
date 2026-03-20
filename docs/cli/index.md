@@ -1,4 +1,4 @@
-# Documentation
+# CLI Documentation
 
 Bienvenue dans la documentation d'**Oxide** ! Oxide est un outil d'archivage haute performance développé en Rust.
 
@@ -37,4 +37,4 @@ Une fois l'installation terminée, vérifiez qu'Oxide fonctionne correctement en
 oxide-cli --version
 ```
 
-Pour plonger dans le vif du sujet et apprendre à utiliser les paramètres avancés d'Oxide, consultez notre page [Utilisation : Archive](./archive.md).
+Pour plonger dans le vif du sujet et apprendre à utiliser les paramètres avancés d'Oxide, consultez notre page [Archive usage](./archive.md).

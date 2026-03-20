@@ -1,9 +1,9 @@
 ---
-title: Dépendances
+title: Dependencies
 description: Bibliothèques open-source ayant permis de construire Oxide
 ---
 
-# Dépendances
+# Dependencies
 
 Oxide repose sur de nombreuses briques open-source performantes de l'écosystème Rust et Web.
 
