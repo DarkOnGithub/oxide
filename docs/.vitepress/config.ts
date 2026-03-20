@@ -35,6 +35,7 @@ export default defineConfig({
                     text: 'À propos',
                     items: [
                         { text: 'L\'Équipe', link: '/a-propos/' },
+                        { text: 'Chronologie', link: '/a-propos/timeline' },
                         { text: 'Évolution de la Stratégie', link: '/a-propos/limitations' },
                         { text: 'Dépendances', link: '/a-propos/dependances' }
                     ]
