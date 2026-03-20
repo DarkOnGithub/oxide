@@ -332,3 +332,5 @@ dataset/
 datasets/
 temp/
 silesia_corpus/
+
+.venv
