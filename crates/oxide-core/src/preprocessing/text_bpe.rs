@@ -69,7 +69,7 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
             break;
         }
 
-        if let Some((best_pair, count)) = find_most_frequent_pair(&symbols) {
+        if let Some((best_pair, _)) = find_most_frequent_pair(&symbols) {
             symbols = replace_pair(&symbols, best_pair, next_symbol);
             dictionary.push(best_pair);
             next_symbol += 1;
