@@ -2,42 +2,42 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
     title: "Oxide",
-    description: "Ergonomic Framework for Humans",
+    description: "High-performance Rust archiver for files, directories, and .oxz archives",
     appearance: 'dark',
     base: '/oxide/',
     themeConfig: {
-        logo: '/logo.svg', // Will need a logo or can omit if not present
+        logo: '/logo.svg',
         nav: [
-            { text: 'Docs', link: '/documentation/' },
-            { text: 'A propos', link: '/a-propos/' }
+            { text: 'CLI Docs', link: '/cli/' },
+            { text: 'About', link: '/about/' }
         ],
 
         sidebar: {
-            '/documentation/': [
+            '/cli/': [
                 {
-                    text: 'Installation',
+                    text: 'Getting Started',
                     items: [
-                        { text: 'Téléchargement', link: '/documentation/' }
+                        { text: 'Installation', link: '/cli/' }
                     ]
                 },
                 {
-                    text: 'Utilisation',
+                    text: 'Commands',
                     items: [
-                        { text: 'Archive', link: '/documentation/archive' },
-                        { text: 'Extract', link: '/documentation/extract' },
-                        { text: 'Tree', link: '/documentation/tree' },
-                        { text: 'Presets', link: '/documentation/presets' }
+                        { text: 'Archive', link: '/cli/archive' },
+                        { text: 'Extract', link: '/cli/extract' },
+                        { text: 'Tree', link: '/cli/tree' },
+                        { text: 'Presets', link: '/cli/presets' }
                     ]
                 }
             ],
-            '/a-propos/': [
+            '/about/': [
                 {
-                    text: 'À propos',
+                    text: 'About',
                     items: [
-                        { text: 'L\'Équipe', link: '/a-propos/' },
-                        { text: 'Chronologie', link: '/a-propos/timeline' },
-                        { text: 'Évolution de la Stratégie', link: '/a-propos/limitations' },
-                        { text: 'Dépendances', link: '/a-propos/dependances' }
+                        { text: 'Team', link: '/about/' },
+                        { text: 'Timeline', link: '/about/timeline' },
+                        { text: 'Strategy Evolution', link: '/about/strategy-evolution' },
+                        { text: 'Dependencies', link: '/about/dependencies' }
                     ]
                 }
             ]

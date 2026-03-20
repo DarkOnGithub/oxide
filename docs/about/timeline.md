@@ -1,9 +1,9 @@
 ---
-title: Chronologie des Fonctionnalités
+title: Feature Timeline
 description: Chronologie reconstituée du développement d'Oxide à partir du code et des commits
 ---
 
-# Chronologie des Fonctionnalités
+# Feature Timeline
 
 > Frise reconstituée à partir du code présent dans le workspace et de l'historique Git. Les dates restent cohérentes sur la période du 01/02 au 22/03, avec quelques regroupements pour garder une lecture claire.
 
