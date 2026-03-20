@@ -81,7 +81,7 @@ pub fn get_preprocessing_strategy(
     match compression_preset {
         CompressionPreset::Fast => PreProcessingStrategy::None,
         CompressionPreset::Default => match file_type_hint {
-            FileFormat::Text => PreProcessingStrategy::Text(TextStrategy::Bwt),
+            FileFormat::Text => PreProcessingStrategy::Text(TextStrategy::Bpe),
             FileFormat::Image if matches!(metadata, Some(PreprocessingMetadata::Image(_))) => {
                 PreProcessingStrategy::Image(ImageStrategy::YCoCgR)
             }
