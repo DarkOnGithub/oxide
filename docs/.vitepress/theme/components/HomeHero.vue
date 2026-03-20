@@ -14,7 +14,7 @@
     <div class="hero-content">
       <div class="logo-container">
         <!-- Slightly animated image logo -->
-        <img src="/logo.png" alt="Oxide Logo" class="logo-image animated-logo" />
+        <img :src="withBase('/logo.png')" alt="Oxide Logo" class="logo-image animated-logo" />
       </div>
       
       <h2 class="oxide-title text-gradient">Oxide</h2>
@@ -23,7 +23,7 @@
       </p>
       
       <div class="actions">
-        <a href="/documentation/" class="btn primary">Get Started</a>
+        <a :href="withBase('/documentation/')" class="btn primary">Get Started</a>
         <div class="code-copy elysia-style" @click="copyCode">
           <code><span class="dim">cargo install</span> oxide-cli</code>
           <button class="copy-btn" title="Copy">
@@ -42,8 +42,10 @@
 </template>
 
 <script setup>
+import { withBase } from 'vitepress'
+
 const copyCode = () => {
-  navigator.clipboard.writeText('cargo add oxide-core');
+  navigator.clipboard.writeText('cargo install oxide-cli');
   // Optional: add a toast or visual feedback
 }
 </script>

@@ -7,6 +7,8 @@ description: L'équipe d'Oxide et la répartition des tâches
 
 Oxide a été conçu et développé dans le cadre du Projet S4 (2026). Chaque membre a apporté son expertise sur des aspects spécifiques de l'algorithmique et de l'architecture logicielle.
 
+Voir aussi : [Chronologie des fonctionnalités](/a-propos/timeline) et [Dépendances](/a-propos/dependances).
+
 ## Les Membres et leurs contributions
 
 ### Alexandre Joaquim Lima Salgueiro <a href="https://github.com/Niponx" target="_blank" title="GitHub"><img src="https://cdn.simpleicons.org/github/white" width="24" height="24" style="display:inline-block; vertical-align:text-bottom; margin-left:6px" alt="GitHub"/></a>
@@ -55,5 +57,4 @@ Oxide a été conçu et développé dans le cadre du Projet S4 (2026). Chaque me
 **Architecture & Format**
 - [🚧] Conception du Format de fichier binaire (En cours)
 - [🚧] Pipeline Manager (Routing dynamique) (En cours)
-
 
