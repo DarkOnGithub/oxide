@@ -61,11 +61,10 @@ fn replace_pair(data: &[u32], target_pair: (u32, u32), new_symbol: u32) -> Vec<u
 pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     let mut symbols = bytes_to_data(data);
     let mut dictionary = Vec::new();
-    let mut next_symbol = 256; // Standard bytes are 0-255
+    let mut next_symbol = 256; 
     const MAX_DICT_SIZE: usize = 256;
-    // 2. The BPE Loop
     loop {
-        // On s'arrête immédiatement si le dictionnaire est plein
+        
         if dictionary.len() >= MAX_DICT_SIZE {
             break;
         }
@@ -79,32 +78,25 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
         }
     }
 
-    // 3. Profitability Check (The Oxide Rule)
-    // How much space will our new file take?
-    // - Header: 4 bytes (to store the number of rules) + 8 bytes per rule (two u32)
-    // - Payload: 4 bytes per compressed symbol
+    
     let header_size = 4 + (dictionary.len() * 8);
     let payload_size = symbols.len() * 4;
     let total_size = header_size + payload_size;
 
-    // If the transformation didn't reduce the file size, abort and return original data
+    
     if total_size >= data.len() {
         return Ok(data.to_vec());
     }
 
-    // 4. Serialization
     let mut output = Vec::with_capacity(total_size);
     
-    // Write dictionary length
     output.extend_from_slice(&(dictionary.len() as u32).to_le_bytes());
     
-    // Write dictionary rules
     for (left, right) in dictionary {
         output.extend_from_slice(&left.to_le_bytes());
         output.extend_from_slice(&right.to_le_bytes());
     }
     
-    // Write compressed symbols
     for sym in symbols {
         output.extend_from_slice(&sym.to_le_bytes());
     }
@@ -116,27 +108,18 @@ pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
 ///
 /// Payloads without the transform marker are returned unchanged.
 pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
-    // 1. Sécurité : Un fichier valide BPE fait au moins 4 octets et est un multiple de 4
     if data.len() < 4 || data.len() % 4 != 0 {
         return Ok(data.to_vec());
     }
 
-    // On crée notre itérateur magique qui va découper les données en paquets de 4 octets.
-    // Il gère sa position tout seul en mémoire !
     let mut chunks = data.chunks_exact(4);
 
-    // 2. Lecture de la taille du dictionnaire
-    // chunks.next() nous donne le tout premier paquet de 4 octets.
-    // Le unwrap() est 100% sûr ici car on a vérifié data.len() >= 4 juste au-dessus.
     let dict_len_chunk = chunks.next().unwrap();
     let dict_len = u32::from_le_bytes(dict_len_chunk.try_into().unwrap()) as usize;
 
     let mut expansions: Vec<Vec<u8>> = Vec::with_capacity(dict_len);
 
-    // 3. Pré-calcul des expansions du dictionnaire
     for _ in 0..dict_len {
-        // On consomme les deux paquets suivants pour la règle (gauche et droite).
-        // Si l'itérateur est vide avant la fin, c'est que le fichier ment sur sa taille -> on annule tout !
         let left_chunk = match chunks.next() {
             Some(c) => c,
             None => return Ok(data.to_vec()), 
@@ -151,7 +134,6 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
 
         let mut expansion = Vec::new();
 
-        // Décodage de la partie gauche
         if left < 256 {
             expansion.push(left as u8);
         } else {
@@ -163,7 +145,6 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
             }
         }
 
-        // Décodage de la partie droite
         if right < 256 {
             expansion.push(right as u8);
         } else {
@@ -178,12 +159,8 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
         expansions.push(expansion);
     }
 
-    // 4. Décompression du texte final
     let mut output = Vec::new();
 
-    // L'itérateur a consommé l'en-tête et le dictionnaire. 
-    // Tout ce qui lui reste maintenant, c'est notre texte compressé ! 
-    // On boucle simplement sur la fin.
     for chunk in chunks {
         let sym = u32::from_le_bytes(chunk.try_into().unwrap());
 
