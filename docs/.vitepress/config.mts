@@ -15,13 +15,13 @@ export default defineConfig({
         sidebar: {
             '/cli/': [
                 {
-                    text: 'Getting Started',
+                    text: 'Mise en route',
                     items: [
                         { text: 'Installation', link: '/cli/' }
                     ]
                 },
                 {
-                    text: 'Commands',
+                    text: 'Commandes',
                     items: [
                         { text: 'Archive', link: '/cli/archive' },
                         { text: 'Extract', link: '/cli/extract' },
@@ -32,12 +32,12 @@ export default defineConfig({
             ],
             '/about/': [
                 {
-                    text: 'About',
+                    text: 'À propos',
                     items: [
-                        { text: 'Team', link: '/about/' },
-                        { text: 'Timeline', link: '/about/timeline' },
-                        { text: 'Strategy Evolution', link: '/about/strategy-evolution' },
-                        { text: 'Dependencies', link: '/about/dependencies' }
+                        { text: 'Équipe', link: '/about/' },
+                        { text: 'Chronologie', link: '/about/timeline' },
+                        { text: 'Évolution de la stratégie', link: '/about/strategy-evolution' },
+                        { text: 'Dépendances', link: '/about/dependencies' }
                     ]
                 }
             ]
@@ -54,7 +54,7 @@ export default defineConfig({
 
         outline: {
             level: [2, 3],
-            label: 'On this page'
+            label: 'Sur cette page'
         }
     }
 })

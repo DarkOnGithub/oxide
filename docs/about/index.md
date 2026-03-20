@@ -1,13 +1,11 @@
 ---
-title: About
+title: À propos
 description: L'équipe d'Oxide et la répartition des tâches
 ---
 
-# About the Team
+# L'Équipe Oxide
 
-Oxide a été conçu et développé dans le cadre du Projet S4 (2026). Chaque membre a apporté son expertise sur des aspects spécifiques de l'algorithmique et de l'architecture logicielle.
-
-Voir aussi : [Chronologie des fonctionnalités](/about/timeline) et [Dépendances](/about/dependencies).
+Oxide a été conçu et développé dans le cadre du Projet S4 (2026). 
 
 ## Les Membres et leurs contributions
 
