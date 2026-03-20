@@ -8,8 +8,8 @@ export default defineConfig({
     themeConfig: {
         logo: '/logo.svg',
         nav: [
-            { text: 'CLI Docs', link: '/cli/' },
-            { text: 'About', link: '/about/' }
+            { text: 'Documentation', link: '/cli/' },
+            { text: 'A propos', link: '/about/' }
         ],
 
         sidebar: {
