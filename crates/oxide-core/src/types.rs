@@ -445,12 +445,12 @@ pub struct CompressedBlock {
     pub raw_passthrough: bool,
     /// Original uncompressed length.
     pub original_len: u64,
-    /// Placeholder checksum of the compressed data.
+    /// CRC32C checksum of the compressed data.
     pub crc32: u32,
 }
 
 impl CompressedBlock {
-    /// Creates a new compressed block with a placeholder checksum.
+    /// Creates a new compressed block with a computed checksum.
     ///
     /// # Arguments
     /// * `id` - Unique identifier for this block
@@ -529,9 +529,9 @@ impl CompressedBlock {
         }
     }
 
-    /// Placeholder checksum verification while integrity checks are disabled.
+    /// Verifies the stored CRC32C checksum against the current payload.
     pub fn verify_crc32(&self) -> bool {
-        true
+        self.crc32 == compute_checksum(self.data.as_slice())
     }
 }
 
