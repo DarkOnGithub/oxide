@@ -22,57 +22,6 @@ SQUASHFS_BLOCK_SIZE="1048576"
 
 RESULT_ROWS=()
 
-# ==========================================
-# SAFE CPU TUNING (i7-11800H specific)
-# ==========================================
-
-echo "Requesting sudo privileges for CPU tuning and dropping caches..."
-sudo -v
-# Keep sudo alive in the background
-while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
-SUDO_KEEPALIVE_PID=$!
-
-setup_cpu_tuning() {
-  echo "--- Applying Safe CPU Tuning ---"
-  
-  # 1. Disable Intel Turbo Boost to prevent thermal throttling variance
-  if [[ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
-    OLD_TURBO=$(cat /sys/devices/system/cpu/intel_pstate/no_turbo)
-    echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo >/dev/null
-    echo " > Turbo Boost: Disabled"
-  fi
-
-  # 2. Set CPU governor to performance
-  if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
-    OLD_GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
-    echo "performance" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null
-    echo " > CPU Governor: Performance"
-  fi
-}
-
-restore_cpu_tuning() {
-  echo ""
-  echo "--- Restoring System State ---"
-  
-  if [[ -n "${OLD_TURBO:-}" && -f /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
-    echo "$OLD_TURBO" | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo >/dev/null
-    echo " > Turbo Boost: Restored"
-  fi
-  
-  if [[ -n "${OLD_GOV:-}" ]]; then
-    echo "$OLD_GOV" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null
-    echo " > CPU Governor: Restored"
-  fi
-  
-  # Kill the sudo keepalive process safely
-  kill $SUDO_KEEPALIVE_PID 2>/dev/null || true
-}
-
-# Ensure tuning is restored even if script crashes or user presses Ctrl+C
-trap restore_cpu_tuning EXIT
-
-# ==========================================
-
 build_oxide() {
   echo "--- Building Oxide ---"
   cargo build --release -p oxide-cli
@@ -136,17 +85,11 @@ run_and_record() {
   shift 5
 
   local start_ns end_ns elapsed_ns elapsed_s output_bytes throughput
-  
-  # Pin task to specific cores to prevent thread migration latency
-  local core_limit=$((BENCHMARK_THREADS - 1))
 
   cleanup_path "$output_path"
 
   start_ns=$(date +%s%N)
-  
-  # Run the command with taskset for CPU pinning
-  taskset -c 0-"${core_limit}" "$@"
-  
+  "$@"
   end_ns=$(date +%s%N)
 
   elapsed_ns=$((end_ns - start_ns))
@@ -327,7 +270,6 @@ run_bench() {
   done
 }
 
-setup_cpu_tuning
 build_oxide
 
 for mode in "fast" "balanced" "ultra"; do
