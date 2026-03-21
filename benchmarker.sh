@@ -6,13 +6,9 @@ SOURCE="./silesia_corpus"
 OXIDE="./target/release/oxide-cli"
 OXIDE_OUTPUT="silesia_corpus.oxz"
 SQUASHFS_OUTPUT="archive.sqfs"
-TAR_ZSTD_OUTPUT="archive.tar.zst"
-TAR_LZ4_OUTPUT="archive.tar.lz4"
 
 OXIDE_EXTRACT_DIR="oxide_extract_out"
 SQUASHFS_EXTRACT_DIR="squashfs_extract_out"
-TAR_ZSTD_EXTRACT_DIR="tar_zstd_extract_out"
-TAR_LZ4_EXTRACT_DIR="tar_lz4_extract_out"
 
 BENCHMARK_THREADS="${BENCHMARK_THREADS:-16}"
 BENCHMARK_PASSES="${BENCHMARK_PASSES:-2}"
@@ -25,6 +21,57 @@ OXIDE_BLOCK_SIZE=""
 SQUASHFS_BLOCK_SIZE="1048576"
 
 RESULT_ROWS=()
+
+# ==========================================
+# SAFE CPU TUNING (i7-11800H specific)
+# ==========================================
+
+echo "Requesting sudo privileges for CPU tuning and dropping caches..."
+sudo -v
+# Keep sudo alive in the background
+while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
+SUDO_KEEPALIVE_PID=$!
+
+setup_cpu_tuning() {
+  echo "--- Applying Safe CPU Tuning ---"
+  
+  # 1. Disable Intel Turbo Boost to prevent thermal throttling variance
+  if [[ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
+    OLD_TURBO=$(cat /sys/devices/system/cpu/intel_pstate/no_turbo)
+    echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo >/dev/null
+    echo " > Turbo Boost: Disabled"
+  fi
+
+  # 2. Set CPU governor to performance
+  if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+    OLD_GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+    echo "performance" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null
+    echo " > CPU Governor: Performance"
+  fi
+}
+
+restore_cpu_tuning() {
+  echo ""
+  echo "--- Restoring System State ---"
+  
+  if [[ -n "${OLD_TURBO:-}" && -f /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
+    echo "$OLD_TURBO" | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo >/dev/null
+    echo " > Turbo Boost: Restored"
+  fi
+  
+  if [[ -n "${OLD_GOV:-}" ]]; then
+    echo "$OLD_GOV" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null
+    echo " > CPU Governor: Restored"
+  fi
+  
+  # Kill the sudo keepalive process safely
+  kill $SUDO_KEEPALIVE_PID 2>/dev/null || true
+}
+
+# Ensure tuning is restored even if script crashes or user presses Ctrl+C
+trap restore_cpu_tuning EXIT
+
+# ==========================================
 
 build_oxide() {
   echo "--- Building Oxide ---"
@@ -89,11 +136,17 @@ run_and_record() {
   shift 5
 
   local start_ns end_ns elapsed_ns elapsed_s output_bytes throughput
+  
+  # Pin task to specific cores to prevent thread migration latency
+  local core_limit=$((BENCHMARK_THREADS - 1))
 
   cleanup_path "$output_path"
 
   start_ns=$(date +%s%N)
-  "$@"
+  
+  # Run the command with taskset for CPU pinning
+  taskset -c 0-"${core_limit}" "$@"
+  
   end_ns=$(date +%s%N)
 
   elapsed_ns=$((end_ns - start_ns))
@@ -238,63 +291,6 @@ run_unsquashfs_extract() {
     unsquashfs -q -f -no-xattrs -d "$SQUASHFS_EXTRACT_DIR" "$source_archive"
 }
 
-run_tar_zstd() {
-  local mode=$1
-  local zstd_level
-
-  case "$mode" in
-    fast)     zstd_level=1  ;;
-    balanced) zstd_level=6  ;;
-    ultra)    zstd_level=19 ;;
-    *) echo "Unknown mode: $mode" >&2; exit 1 ;;
-  esac
-
-  run_and_record "tar+zstd" "archive" "$mode" "$CURRENT_PASS" "$TAR_ZSTD_OUTPUT" \
-    tar -I "zstd -T${BENCHMARK_THREADS} -${zstd_level}" \
-      -cf "$TAR_ZSTD_OUTPUT" "$SOURCE"
-}
-
-run_tar_zstd_extract() {
-  local mode=$1
-
-  mkdir -p "$TAR_ZSTD_EXTRACT_DIR"
-  run_and_record "tar+zstd" "extract" "$mode" "$CURRENT_PASS" "$TAR_ZSTD_EXTRACT_DIR" \
-    bash -c 'mkdir -p "$1" && tar -I zstd -xf "$2" -C "$1"' bash "$TAR_ZSTD_EXTRACT_DIR" "$TAR_ZSTD_OUTPUT"
-}
-
-run_tar_lz4() {
-  local mode=$1
-  local lz4_args=()
-
-  case "$mode" in
-    fast)
-      lz4_args=(-1)
-      ;;
-    balanced)
-      lz4_args=(-9)
-      ;;
-    ultra)
-      lz4_args=(-9)
-      ;;
-    *)
-      echo "Unknown mode: $mode" >&2
-      exit 1
-      ;;
-  esac
-
-  run_and_record "tar+lz4" "archive" "$mode" "$CURRENT_PASS" "$TAR_LZ4_OUTPUT" \
-    tar -I "lz4 ${lz4_args[*]} -T${BENCHMARK_THREADS}" \
-      -cf "$TAR_LZ4_OUTPUT" "$SOURCE"
-}
-
-run_tar_lz4_extract() {
-  local mode=$1
-
-  mkdir -p "$TAR_LZ4_EXTRACT_DIR"
-  run_and_record "tar+lz4" "extract" "$mode" "$CURRENT_PASS" "$TAR_LZ4_EXTRACT_DIR" \
-    bash -c 'mkdir -p "$1" && tar -I "lz4 -d -T'"${BENCHMARK_THREADS}"'" -xf "$2" -C "$1"' bash "$TAR_LZ4_EXTRACT_DIR" "$TAR_LZ4_OUTPUT"
-}
-
 run_bench() {
   local mode=$1
   echo "======================================================"
@@ -328,34 +324,10 @@ run_bench() {
     cleanup_path "$SQUASHFS_EXTRACT_DIR"
     echo ""
 
-    drop_caches
-    echo "--- tar + zstd ($mode equivalent) ---"
-    run_tar_zstd "$mode"
-    if [[ "$BENCHMARK_SKIP_EXTRACT" != "1" ]]; then
-      drop_caches
-      mkdir -p "$TAR_ZSTD_EXTRACT_DIR"
-      echo "--- tar + zstd extract ($mode equivalent) ---"
-      run_tar_zstd_extract "$mode"
-    fi
-    cleanup_path "$TAR_ZSTD_OUTPUT"
-    cleanup_path "$TAR_ZSTD_EXTRACT_DIR"
-    echo ""
-
-    drop_caches
-    echo "--- tar + lz4 ($mode equivalent) ---"
-    run_tar_lz4 "$mode"
-    if [[ "$BENCHMARK_SKIP_EXTRACT" != "1" ]]; then
-      drop_caches
-      mkdir -p "$TAR_LZ4_EXTRACT_DIR"
-      echo "--- tar + lz4 extract ($mode equivalent) ---"
-      run_tar_lz4_extract "$mode"
-    fi
-    cleanup_path "$TAR_LZ4_OUTPUT"
-    cleanup_path "$TAR_LZ4_EXTRACT_DIR"
-    echo ""
   done
 }
 
+setup_cpu_tuning
 build_oxide
 
 for mode in "fast" "balanced" "ultra"; do

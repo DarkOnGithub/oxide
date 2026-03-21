@@ -99,23 +99,6 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
         Tone::Success,
     );
 
-    print_bar_chart(
-        "Payload graph",
-        &[
-            (
-                "input".to_string(),
-                report.input_bytes_total as f64,
-                format_bytes(report.input_bytes_total),
-            ),
-            (
-                "archive".to_string(),
-                report.output_bytes_total as f64,
-                format_bytes(report.output_bytes_total),
-            ),
-        ],
-        Tone::Success,
-    );
-
     let mut throughput_rows = vec![
         vec![
             "read avg".to_string(),
@@ -177,122 +160,124 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
         Tone::Accent,
     );
 
-    let mut throughput_chart = vec![
-        (
-            "read avg".to_string(),
-            report.read_avg_bps,
-            format_rate_per_second(report.read_avg_bps),
-        ),
-        (
-            "write avg".to_string(),
-            report.write_avg_bps,
-            format_rate_per_second(report.write_avg_bps),
-        ),
-    ];
-    if let Some(value) = extension_f64(&report.extensions, "throughput.compression_wall_avg_bps") {
-        throughput_chart.push((
-            "compress wall".to_string(),
-            value,
-            format_rate_per_second(value),
-        ));
-    }
-    print_bar_chart("Throughput graph", &throughput_chart, Tone::Accent);
+    if telemetry_details {
+        let mut throughput_chart = vec![
+            (
+                "read avg".to_string(),
+                report.read_avg_bps,
+                format_rate_per_second(report.read_avg_bps),
+            ),
+            (
+                "write avg".to_string(),
+                report.write_avg_bps,
+                format_rate_per_second(report.write_avg_bps),
+            ),
+        ];
+        if let Some(value) = extension_f64(&report.extensions, "throughput.compression_wall_avg_bps") {
+            throughput_chart.push((
+                "compress wall".to_string(),
+                value,
+                format_rate_per_second(value),
+            ));
+        }
+        print_bar_chart("Throughput graph", &throughput_chart, Tone::Accent);
 
-    let mut runtime_rows = vec![
-        ("Scheduler".to_string(), scheduler_summary(&report.workers)),
-        ("Buffer pool".to_string(), {
-            let pool = buffer_pool.metrics();
-            format!(
-                "created {} | recycled {} | dropped {}",
-                pool.created, pool.recycled, pool.dropped
+        let mut runtime_rows = vec![
+            ("Scheduler".to_string(), scheduler_summary(&report.workers)),
+            ("Buffer pool".to_string(), {
+                let pool = buffer_pool.metrics();
+                format!(
+                    "created {} | recycled {} | dropped {}",
+                    pool.created, pool.recycled, pool.dropped
+                )
+            }),
+        ];
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Effective cores",
+            extension_f64(&report.extensions, "runtime.effective_cores")
+                .map(|value| format!("{value:.2}")),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Compress busy",
+            extension_u64(&report.extensions, "runtime.compress_busy_us")
+                .map(|value| format_duration(Duration::from_micros(value))),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Preprocess busy",
+            extension_u64(&report.extensions, "runtime.preprocessing_busy_us")
+                .map(|value| format_duration(Duration::from_micros(value))),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Compression busy",
+            extension_u64(&report.extensions, "runtime.compression_busy_us")
+                .map(|value| format_duration(Duration::from_micros(value))),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Max inflight blocks",
+            extension_u64(&report.extensions, "pipeline.max_inflight_blocks")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Inflight / worker",
+            extension_u64(
+                &report.extensions,
+                "pipeline.max_inflight_blocks_per_worker",
             )
-        }),
-    ];
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Effective cores",
-        extension_f64(&report.extensions, "runtime.effective_cores")
-            .map(|value| format!("{value:.2}")),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Compress busy",
-        extension_u64(&report.extensions, "runtime.compress_busy_us")
-            .map(|value| format_duration(Duration::from_micros(value))),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Preprocess busy",
-        extension_u64(&report.extensions, "runtime.preprocessing_busy_us")
-            .map(|value| format_duration(Duration::from_micros(value))),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Compression busy",
-        extension_u64(&report.extensions, "runtime.compression_busy_us")
-            .map(|value| format_duration(Duration::from_micros(value))),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Max inflight blocks",
-        extension_u64(&report.extensions, "pipeline.max_inflight_blocks")
             .map(|value| value.to_string()),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Inflight / worker",
-        extension_u64(
-            &report.extensions,
-            "pipeline.max_inflight_blocks_per_worker",
-        )
-        .map(|value| value.to_string()),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Configured inflight",
-        extension_u64(&report.extensions, "pipeline.configured_inflight_bytes").map(format_bytes),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Max inflight bytes",
-        extension_u64(&report.extensions, "pipeline.max_inflight_bytes").map(format_bytes),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Writer queue",
-        extension_u64(&report.extensions, "pipeline.writer_queue_capacity")
-            .map(|value| value.to_string()),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Reorder limit",
-        extension_u64(&report.extensions, "pipeline.reorder_pending_limit")
-            .map(|value| value.to_string()),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Reorder peak",
-        extension_u64(&report.extensions, "pipeline.pending_write_peak")
-            .map(|value| value.to_string()),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Stages",
-        thread_stage_summary(
-            &report.main_thread,
-            &[
-                ("discovery", "discovery"),
-                ("format_probe", "probe"),
-                ("producer_read", "read"),
-                ("producer_submit_blocked", "batch queue"),
-                ("submit_wait", "submit wait"),
-                ("result_wait", "result wait"),
-                ("writer_enqueue_blocked", "writer queue"),
-                ("writer", "writer"),
-            ],
-        ),
-    );
-    print_key_value_table("Runtime", &runtime_rows, Tone::Info);
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Configured inflight",
+            extension_u64(&report.extensions, "pipeline.configured_inflight_bytes").map(format_bytes),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Max inflight bytes",
+            extension_u64(&report.extensions, "pipeline.max_inflight_bytes").map(format_bytes),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Writer queue",
+            extension_u64(&report.extensions, "pipeline.writer_queue_capacity")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Reorder limit",
+            extension_u64(&report.extensions, "pipeline.reorder_pending_limit")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Reorder peak",
+            extension_u64(&report.extensions, "pipeline.pending_write_peak")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Stages",
+            thread_stage_summary(
+                &report.main_thread,
+                &[
+                    ("discovery", "discovery"),
+                    ("format_probe", "probe"),
+                    ("producer_read", "read"),
+                    ("producer_submit_blocked", "batch queue"),
+                    ("submit_wait", "submit wait"),
+                    ("result_wait", "result wait"),
+                    ("writer_enqueue_blocked", "writer queue"),
+                    ("writer", "writer"),
+                ],
+            ),
+        );
+        print_key_value_table("Runtime", &runtime_rows, Tone::Info);
+    }
 
     print_worker_table(&report.workers);
     print_telemetry_summary(report.telemetry.as_ref(), telemetry_details);
@@ -339,23 +324,6 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
         Tone::Success,
     );
 
-    print_bar_chart(
-        "Payload graph",
-        &[
-            (
-                "archive".to_string(),
-                report.archive_bytes_total as f64,
-                format_bytes(report.archive_bytes_total),
-            ),
-            (
-                "output".to_string(),
-                report.output_bytes_total as f64,
-                format_bytes(report.output_bytes_total),
-            ),
-        ],
-        Tone::Success,
-    );
-
     let throughput_rows = vec![
         vec![
             "read avg".to_string(),
@@ -377,57 +345,59 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
         Tone::Accent,
     );
 
-    print_bar_chart(
-        "Throughput graph",
-        &[
-            (
-                "read avg".to_string(),
-                report.read_avg_bps,
-                format_rate_per_second(report.read_avg_bps),
-            ),
-            (
-                "decode avg".to_string(),
-                report.decode_avg_bps,
-                format_rate_per_second(report.decode_avg_bps),
-            ),
-            (
-                "output avg".to_string(),
-                report.output_avg_bps,
-                format_rate_per_second(report.output_avg_bps),
-            ),
-        ],
-        Tone::Accent,
-    );
-
-    let mut runtime_rows = vec![("Scheduler".to_string(), scheduler_summary(&report.workers))];
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Stages",
-        thread_stage_summary(
-            &report.main_thread,
+    if telemetry_details {
+        print_bar_chart(
+            "Throughput graph",
             &[
-                ("archive_read", "archive read"),
-                ("decode_submit", "decode submit"),
-                ("decode_wait", "decode wait"),
-                ("merge", "merge"),
-                ("directory_decode", "directory decode"),
-                ("output_write", "output write"),
+                (
+                    "read avg".to_string(),
+                    report.read_avg_bps,
+                    format_rate_per_second(report.read_avg_bps),
+                ),
+                (
+                    "decode avg".to_string(),
+                    report.decode_avg_bps,
+                    format_rate_per_second(report.decode_avg_bps),
+                ),
+                (
+                    "output avg".to_string(),
+                    report.output_avg_bps,
+                    format_rate_per_second(report.output_avg_bps),
+                ),
             ],
-        ),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Effective cores",
-        extension_f64(&report.extensions, "runtime.effective_cores")
-            .map(|value| format!("{value:.2}")),
-    );
-    push_optional_string_row(
-        &mut runtime_rows,
-        "Decode busy",
-        extension_u64(&report.extensions, "runtime.decode_busy_us")
-            .map(|value| format_duration(Duration::from_micros(value))),
-    );
-    print_key_value_table("Runtime", &runtime_rows, Tone::Info);
+            Tone::Accent,
+        );
+
+        let mut runtime_rows = vec![("Scheduler".to_string(), scheduler_summary(&report.workers))];
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Stages",
+            thread_stage_summary(
+                &report.main_thread,
+                &[
+                    ("archive_read", "archive read"),
+                    ("decode_submit", "decode submit"),
+                    ("decode_wait", "decode wait"),
+                    ("merge", "merge"),
+                    ("directory_decode", "directory decode"),
+                    ("output_write", "output write"),
+                ],
+            ),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Effective cores",
+            extension_f64(&report.extensions, "runtime.effective_cores")
+                .map(|value| format!("{value:.2}")),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Decode busy",
+            extension_u64(&report.extensions, "runtime.decode_busy_us")
+                .map(|value| format_duration(Duration::from_micros(value))),
+        );
+        print_key_value_table("Runtime", &runtime_rows, Tone::Info);
+    }
 
     print_worker_table(&report.workers);
     print_telemetry_summary(report.telemetry.as_ref(), telemetry_details);
