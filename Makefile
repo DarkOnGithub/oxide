@@ -1,4 +1,8 @@
-.PHONY: create_dataset download_silesia clean
+.PHONY: build release create_dataset download_silesia clean
+
+build release:
+	cargo build --release
+
 create_dataset:
 	python scripts/create_dataset.py
 	python scripts/convert_to_raw.py
