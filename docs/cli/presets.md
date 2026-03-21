@@ -5,12 +5,12 @@ Le système de *Presets* dans Oxide vous donne la possibilité d'ajuster finemen
 Par défaut, l'outil utilise **`balanced`** mais vous pouvez sélectionner d'autres configurations selon vos priorités en utilisant la commande d'archive via l'argument `--preset <nom>`.
 
 ```bash
-oxide-cli archive mondossier/ --preset ultra
+oxide archive mondossier/ --preset ultra
 ```
 
 ## Presets Inclus
 
-Le fichier par défaut de `oxide-cli` contiens 3 profils distincts aux paramètres préréglés :
+Le fichier par défaut de `oxide` contiens 3 profils distincts aux paramètres préréglés :
 
 ### `fast` (Compression ultra-rapide)
 Pensé pour exploiter le maximum du disque dur sans monopoliser de CPU. Idéal pour des sauvegardes massives de données déjà denses.

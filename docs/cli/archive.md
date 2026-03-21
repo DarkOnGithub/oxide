@@ -4,7 +4,7 @@ La commande `archive` permet de compresser un fichier ou un répertoire entier v
 
 **Exemple d'utilisation :**
 ```bash
-oxide-cli archive mondossier/
+oxide archive mondossier/
 ```
 
 ## Arguments et Options

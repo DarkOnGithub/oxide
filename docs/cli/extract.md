@@ -4,7 +4,7 @@ Cette commande permet de restaurer le contenu d'une archive `.oxz` vers un fichi
 
 **Exemple d'utilisation :**
 ```bash
-oxide-cli extract archive.oxz
+oxide extract archive.oxz
 ```
 
 ## Arguments et Options
