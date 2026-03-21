@@ -1,7 +1,10 @@
-.PHONY: build release create_dataset download_silesia clean
+.PHONY: build release install create_dataset download_silesia clean
 
 build release:
 	cargo build --release
+
+install: release
+	install -Dm755 target/release/oxide $(HOME)/.cargo/bin/oxide
 
 create_dataset:
 	python scripts/create_dataset.py
