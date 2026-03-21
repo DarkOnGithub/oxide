@@ -1,5 +1,4 @@
 use crate::Result;
-use crate::preprocessing::utils;
 
 /// Converts raw binary bytes into 32-bit instruction words for BCJ-style logic.
 pub fn bytes_to_data(data: &[u8]) -> Vec<u32> {
