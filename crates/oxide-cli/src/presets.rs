@@ -43,6 +43,10 @@ pub struct ResolvedArchiveSettings {
 pub struct ArchiveOverrides {
     pub compression: Option<CompressionAlgo>,
     pub skip_preprocessing: bool,
+    pub text_preprocessing: Option<Option<TextStrategy>>,
+    pub image_preprocessing: Option<Option<ImageStrategy>>,
+    pub audio_preprocessing: Option<Option<AudioStrategy>>,
+    pub binary_preprocessing: Option<Option<BinaryStrategy>>,
     pub skip_compression: bool,
     pub zstd_level: Option<i32>,
     pub block_size: Option<usize>,
@@ -208,11 +212,35 @@ impl ArchivePresetConfig {
             .map(parse_compression_preset)
             .transpose()?
             .ok_or_else(|| invalid_input("archive preset is missing compression_preset"))?;
+        let text_preprocessing =
+            overrides
+                .text_preprocessing
+                .unwrap_or(resolve_text_preprocessing(
+                    self.text_preprocessing.as_deref(),
+                )?);
+        let image_preprocessing =
+            overrides
+                .image_preprocessing
+                .unwrap_or(resolve_image_preprocessing(
+                    self.image_preprocessing.as_deref(),
+                )?);
+        let audio_preprocessing =
+            overrides
+                .audio_preprocessing
+                .unwrap_or(resolve_audio_preprocessing(
+                    self.audio_preprocessing.as_deref(),
+                )?);
+        let binary_preprocessing =
+            overrides
+                .binary_preprocessing
+                .unwrap_or(resolve_binary_preprocessing(
+                    self.binary_preprocessing.as_deref(),
+                )?);
         let preprocessing_profile = PreprocessingProfile::new(
-            resolve_text_preprocessing(self.text_preprocessing.as_deref())?,
-            resolve_image_preprocessing(self.image_preprocessing.as_deref())?,
-            resolve_audio_preprocessing(self.audio_preprocessing.as_deref())?,
-            resolve_binary_preprocessing(self.binary_preprocessing.as_deref())?,
+            text_preprocessing,
+            image_preprocessing,
+            audio_preprocessing,
+            binary_preprocessing,
         );
         let zstd_level = resolve_zstd_level(compression, overrides.zstd_level.or(self.zstd_level))?;
 
@@ -454,7 +482,8 @@ mod tests {
     use std::fs;
 
     use oxide_core::{
-        CompressionAlgo, CompressionPreset, ImageStrategy, PreprocessingProfile, TextStrategy,
+        AudioStrategy, BinaryStrategy, CompressionAlgo, CompressionPreset, ImageStrategy,
+        PreprocessingProfile, TextStrategy,
     };
 
     use super::{ArchiveOverrides, DEFAULT_PRESETS_PATH, PresetFile};
@@ -520,6 +549,7 @@ mod tests {
                 ArchiveOverrides {
                     zstd_level: None,
                     block_size: Some(16 * 1024 * 1024),
+                    audio_preprocessing: Some(Some(AudioStrategy::Lpc)),
                     ..ArchiveOverrides::default()
                 },
             )
@@ -535,7 +565,7 @@ mod tests {
             PreprocessingProfile::new(
                 Some(TextStrategy::Bwt),
                 Some(ImageStrategy::LocoI),
-                None,
+                Some(AudioStrategy::Lpc),
                 None,
             )
         );
@@ -670,5 +700,66 @@ mod tests {
             .resolve("bad", "fixture", ArchiveOverrides::default())
             .unwrap_err();
         assert_eq!(error.to_string(), "unsupported text_preprocessing 'zip'");
+    }
+
+    #[test]
+    fn cli_preprocessing_overrides_take_precedence_over_preset_file() {
+        let file = parse_fixture(
+            r#"{
+              "archive": {
+                "default_preset": "balanced",
+                "defaults": {
+                  "compression": "zstd",
+                  "compression_preset": "balanced",
+                  "text_preprocessing": "bpe",
+                  "image_preprocessing": "ycocgr",
+                  "audio_preprocessing": "lpc",
+                  "binary_preprocessing": "bcj",
+                  "block_size": "2M",
+                  "workers": 0,
+                  "pool_capacity": "1M",
+                  "pool_buffers": 512,
+                  "stats_interval_ms": 250,
+                  "inflight_bytes": "2G",
+                  "inflight_blocks_per_worker": 256,
+                  "stream_read_buffer": "64M",
+                  "producer_threads": 1,
+                  "directory_mmap_threshold": "8M",
+                  "writer_queue_blocks": 1024,
+                  "preserve_format_boundaries": false,
+                  "result_wait_ms": 1
+                },
+                "presets": {
+                  "balanced": {}
+                }
+              }
+            }"#,
+        );
+
+        let preset = file.archive.presets.get("balanced").unwrap();
+        let mut merged = file.archive.defaults.clone();
+        merged.merge_from(preset);
+
+        let resolved = merged
+            .resolve(
+                "balanced",
+                "fixture",
+                ArchiveOverrides {
+                    text_preprocessing: Some(Some(TextStrategy::Bwt)),
+                    image_preprocessing: Some(None),
+                    ..ArchiveOverrides::default()
+                },
+            )
+            .expect("settings should resolve");
+
+        assert_eq!(
+            resolved.preprocessing_profile,
+            PreprocessingProfile::new(
+                Some(TextStrategy::Bwt),
+                None,
+                Some(AudioStrategy::Lpc),
+                Some(BinaryStrategy::Bcj),
+            )
+        );
     }
 }
