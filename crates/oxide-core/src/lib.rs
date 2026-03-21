@@ -57,5 +57,5 @@ pub use telemetry::{
 pub use types::{
     AudioStrategy, Batch, BatchData, BinaryStrategy, ChunkEncodingPlan, CompressedBlock,
     CompressedPayload, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
-    ImageStrategy, PreProcessingStrategy, Result, TextStrategy,
+    ImageStrategy, PreProcessingStrategy, PreprocessingProfile, Result, TextStrategy,
 };

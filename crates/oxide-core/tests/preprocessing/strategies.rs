@@ -1,9 +1,9 @@
 use oxide_core::preprocessing::get_preprocessing_strategy;
 use oxide_core::preprocessing::{audio_lpc, image_locoi, image_paeth, image_ycocgr};
 use oxide_core::{
-    AudioEndian, AudioMetadata, AudioSampleEncoding, AudioStrategy, BinaryStrategy,
-    CompressionPreset, FileFormat, ImageMetadata, ImagePixelFormat, ImageStrategy, OxideError,
-    PreProcessingStrategy, PreprocessingMetadata, TextStrategy, apply_preprocessing_with_metadata,
+    AudioEndian, AudioMetadata, AudioSampleEncoding, AudioStrategy, BinaryStrategy, FileFormat,
+    ImageMetadata, ImagePixelFormat, ImageStrategy, OxideError, PreProcessingStrategy,
+    PreprocessingMetadata, PreprocessingProfile, TextStrategy, apply_preprocessing_with_metadata,
 };
 
 #[test]
@@ -190,29 +190,22 @@ fn fast_preset_disables_preprocessing_for_all_formats() {
     let image_metadata =
         PreprocessingMetadata::Image(ImageMetadata::packed(ImagePixelFormat::Rgb8));
     let audio_metadata = PreprocessingMetadata::Audio(AudioMetadata::pcm_i16_le(1));
+    let profile = PreprocessingProfile::disabled();
 
     assert_eq!(
-        get_preprocessing_strategy(FileFormat::Text, CompressionPreset::Fast, None),
+        get_preprocessing_strategy(FileFormat::Text, &profile, None),
         PreProcessingStrategy::None
     );
     assert_eq!(
-        get_preprocessing_strategy(FileFormat::Binary, CompressionPreset::Fast, None),
+        get_preprocessing_strategy(FileFormat::Binary, &profile, None),
         PreProcessingStrategy::None
     );
     assert_eq!(
-        get_preprocessing_strategy(
-            FileFormat::Image,
-            CompressionPreset::Fast,
-            Some(&image_metadata)
-        ),
+        get_preprocessing_strategy(FileFormat::Image, &profile, Some(&image_metadata)),
         PreProcessingStrategy::None
     );
     assert_eq!(
-        get_preprocessing_strategy(
-            FileFormat::Audio,
-            CompressionPreset::Fast,
-            Some(&audio_metadata)
-        ),
+        get_preprocessing_strategy(FileFormat::Audio, &profile, Some(&audio_metadata)),
         PreProcessingStrategy::None
     );
 }
@@ -222,37 +215,35 @@ fn balanced_preset_uses_format_aware_defaults() {
     let image_metadata =
         PreprocessingMetadata::Image(ImageMetadata::packed(ImagePixelFormat::Rgb8));
     let audio_metadata = PreprocessingMetadata::Audio(AudioMetadata::pcm_i16_le(1));
+    let profile = PreprocessingProfile::new(
+        Some(TextStrategy::Bpe),
+        Some(ImageStrategy::YCoCgR),
+        Some(AudioStrategy::Lpc),
+        Some(BinaryStrategy::Bcj),
+    );
 
     assert_eq!(
-        get_preprocessing_strategy(FileFormat::Text, CompressionPreset::Default, None),
+        get_preprocessing_strategy(FileFormat::Text, &profile, None),
         PreProcessingStrategy::Text(TextStrategy::Bpe)
     );
     assert_eq!(
-        get_preprocessing_strategy(FileFormat::Binary, CompressionPreset::Default, None),
+        get_preprocessing_strategy(FileFormat::Binary, &profile, None),
         PreProcessingStrategy::Binary(BinaryStrategy::Bcj)
     );
     assert_eq!(
-        get_preprocessing_strategy(
-            FileFormat::Image,
-            CompressionPreset::Default,
-            Some(&image_metadata)
-        ),
+        get_preprocessing_strategy(FileFormat::Image, &profile, Some(&image_metadata)),
         PreProcessingStrategy::Image(ImageStrategy::YCoCgR)
     );
     assert_eq!(
-        get_preprocessing_strategy(FileFormat::Image, CompressionPreset::Default, None),
+        get_preprocessing_strategy(FileFormat::Image, &profile, None),
         PreProcessingStrategy::None
     );
     assert_eq!(
-        get_preprocessing_strategy(
-            FileFormat::Audio,
-            CompressionPreset::Default,
-            Some(&audio_metadata)
-        ),
+        get_preprocessing_strategy(FileFormat::Audio, &profile, Some(&audio_metadata)),
         PreProcessingStrategy::Audio(AudioStrategy::Lpc)
     );
     assert_eq!(
-        get_preprocessing_strategy(FileFormat::Audio, CompressionPreset::Default, None),
+        get_preprocessing_strategy(FileFormat::Audio, &profile, None),
         PreProcessingStrategy::None
     );
 }
@@ -262,29 +253,27 @@ fn ultra_preset_uses_stronger_preprocessing() {
     let image_metadata =
         PreprocessingMetadata::Image(ImageMetadata::packed(ImagePixelFormat::Rgb8));
     let audio_metadata = PreprocessingMetadata::Audio(AudioMetadata::pcm_i16_le(1));
+    let profile = PreprocessingProfile::new(
+        Some(TextStrategy::Bwt),
+        Some(ImageStrategy::LocoI),
+        Some(AudioStrategy::Lpc),
+        Some(BinaryStrategy::Bcj),
+    );
 
     assert_eq!(
-        get_preprocessing_strategy(FileFormat::Text, CompressionPreset::High, None),
+        get_preprocessing_strategy(FileFormat::Text, &profile, None),
         PreProcessingStrategy::Text(TextStrategy::Bwt)
     );
     assert_eq!(
-        get_preprocessing_strategy(FileFormat::Binary, CompressionPreset::High, None),
+        get_preprocessing_strategy(FileFormat::Binary, &profile, None),
         PreProcessingStrategy::Binary(BinaryStrategy::Bcj)
     );
     assert_eq!(
-        get_preprocessing_strategy(
-            FileFormat::Image,
-            CompressionPreset::High,
-            Some(&image_metadata)
-        ),
+        get_preprocessing_strategy(FileFormat::Image, &profile, Some(&image_metadata)),
         PreProcessingStrategy::Image(ImageStrategy::LocoI)
     );
     assert_eq!(
-        get_preprocessing_strategy(
-            FileFormat::Audio,
-            CompressionPreset::High,
-            Some(&audio_metadata)
-        ),
+        get_preprocessing_strategy(FileFormat::Audio, &profile, Some(&audio_metadata)),
         PreProcessingStrategy::Audio(AudioStrategy::Lpc)
     );
 }

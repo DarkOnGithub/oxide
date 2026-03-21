@@ -5,9 +5,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::CompressionPreset;
 use crate::buffer::BufferPool;
 use crate::types::CompressionAlgo;
+use crate::{CompressionPreset, PreprocessingProfile};
 
 /// Indicates whether the archive source is a single file or a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +227,8 @@ pub struct PipelinePerformanceOptions {
     pub raw_fallback_enabled: bool,
     /// Compression preset metadata stored in each block.
     pub compression_preset: CompressionPreset,
+    /// Optional preprocessing profile override applied to every chunk.
+    pub preprocessing_profile: Option<PreprocessingProfile>,
     /// Optional explicit zstd compression level used only during encoding.
     pub zstd_level: Option<i32>,
     /// Maximum in-flight block payload bytes pending worker completion.
@@ -252,6 +254,7 @@ impl Default for PipelinePerformanceOptions {
         Self {
             raw_fallback_enabled: true,
             compression_preset: CompressionPreset::Fast,
+            preprocessing_profile: None,
             zstd_level: None,
             max_inflight_bytes: 512 * 1024 * 1024,
             max_inflight_blocks_per_worker: 256,

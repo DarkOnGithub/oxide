@@ -1,7 +1,7 @@
 use crate::OxideError;
 use crate::{
-    AudioStrategy, BinaryStrategy, CompressionPreset, FileFormat, ImageStrategy,
-    PreProcessingStrategy, Result, TextStrategy,
+    AudioStrategy, BinaryStrategy, FileFormat, ImageStrategy, PreProcessingStrategy,
+    PreprocessingProfile, Result, TextStrategy,
 };
 
 pub mod audio_lpc;
@@ -75,33 +75,27 @@ fn metadata_as_audio(metadata: Option<&PreprocessingMetadata>) -> Result<Option<
 
 pub fn get_preprocessing_strategy(
     file_type_hint: FileFormat,
-    compression_preset: CompressionPreset,
+    profile: &PreprocessingProfile,
     metadata: Option<&PreprocessingMetadata>,
 ) -> PreProcessingStrategy {
-    match compression_preset {
-        CompressionPreset::Fast => PreProcessingStrategy::None,
-        CompressionPreset::Default => match file_type_hint {
-            FileFormat::Text => PreProcessingStrategy::Text(TextStrategy::Bpe),
-            FileFormat::Image if matches!(metadata, Some(PreprocessingMetadata::Image(_))) => {
-                PreProcessingStrategy::Image(ImageStrategy::YCoCgR)
-            }
-            FileFormat::Audio if matches!(metadata, Some(PreprocessingMetadata::Audio(_))) => {
-                PreProcessingStrategy::Audio(AudioStrategy::Lpc)
-            }
-            FileFormat::Binary => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
-            _ => PreProcessingStrategy::None,
-        },
-        CompressionPreset::High => match file_type_hint {
-            FileFormat::Text => PreProcessingStrategy::Text(TextStrategy::Bwt),
-            FileFormat::Image if matches!(metadata, Some(PreprocessingMetadata::Image(_))) => {
-                PreProcessingStrategy::Image(ImageStrategy::LocoI)
-            }
-            FileFormat::Audio if matches!(metadata, Some(PreprocessingMetadata::Audio(_))) => {
-                PreProcessingStrategy::Audio(AudioStrategy::Lpc)
-            }
-            FileFormat::Binary => PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
-            _ => PreProcessingStrategy::None,
-        },
+    match file_type_hint {
+        FileFormat::Text => profile
+            .text
+            .map(PreProcessingStrategy::Text)
+            .unwrap_or(PreProcessingStrategy::None),
+        FileFormat::Image if matches!(metadata, Some(PreprocessingMetadata::Image(_))) => profile
+            .image
+            .map(PreProcessingStrategy::Image)
+            .unwrap_or(PreProcessingStrategy::None),
+        FileFormat::Audio if matches!(metadata, Some(PreprocessingMetadata::Audio(_))) => profile
+            .audio
+            .map(PreProcessingStrategy::Audio)
+            .unwrap_or(PreProcessingStrategy::None),
+        FileFormat::Binary => profile
+            .binary
+            .map(PreProcessingStrategy::Binary)
+            .unwrap_or(PreProcessingStrategy::None),
+        _ => PreProcessingStrategy::None,
     }
 }
 
