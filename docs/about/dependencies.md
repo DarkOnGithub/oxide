@@ -31,9 +31,9 @@ La librairie centrale gérant la compression et les algorithmes fait appel aux p
   - `anyhow` & `thiserror` : Structures modernes pour la gestion fine et traçable des erreurs et exceptions.
   - `tracing` : Instrumentations et logs asynchrones de l'application.
 
-## Interface Ligne de Commande (`oxide-cli`)
+## Interface Ligne de Commande (`oxide`)
 
-L'utilitaire `oxide-cli` fournit une expérience utilisateur puissante et agréable grâce à :
+L'utilitaire `oxide` fournit une expérience utilisateur puissante et agréable grâce à :
 
 - `clap` : Le standard absolu en Rust pour parser et valider avec fiabilité les commandes et arguments du terminal.
 - `nu-ansi-term` & `terminal_size` : Affichage de textes formatés, adaptés de manière dynamique à la largeur de l'écran du terminal.

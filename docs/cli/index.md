@@ -4,7 +4,7 @@ Bienvenue dans la documentation d'**Oxide** ! Oxide est un outil d'archivage hau
 
 ## Installation
 
-Vous pouvez installer `oxide-cli` en téléchargeant directement un binaire pré-compilé depuis notre dépôt.
+Vous pouvez installer `oxide` en téléchargeant directement un binaire pré-compilé depuis notre dépôt.
 
 ### Téléchargement depuis le dépôt
 
@@ -22,7 +22,7 @@ Si vous préférez un exécutable prêt à l'emploi, vous pouvez télécharger l
 Une fois l'installation terminée, vérifiez qu'Oxide fonctionne correctement en affichant sa version :
 
 ```bash
-oxide-cli --version
+oxide --version
 ```
 
 Pour plonger dans le vif du sujet et apprendre à utiliser les paramètres avancés d'Oxide, consultez notre page [Archive usage](./archive.md).

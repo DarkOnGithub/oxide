@@ -4,7 +4,7 @@ Affiche l'architecture et le contenu d'une archive `.oxz`. Très utile pour comp
 
 **Exemple d'utilisation :**
 ```bash
-oxide-cli tree archive.oxz
+oxide tree archive.oxz
 ```
 
 ## Arguments et Options
