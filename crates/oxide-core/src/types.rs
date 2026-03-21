@@ -44,6 +44,8 @@ pub struct ChunkEncodingPlan {
     pub preset: CompressionPreset,
     /// Optional explicit zstd compression level used only by the encoder.
     pub zstd_level: Option<i32>,
+    /// Preprocessing profile used to select per-format strategies.
+    pub preprocessing_profile: PreprocessingProfile,
 }
 
 impl ChunkEncodingPlan {
@@ -53,12 +55,22 @@ impl ChunkEncodingPlan {
             algo,
             preset,
             zstd_level: None,
+            preprocessing_profile: PreprocessingProfile::for_compression_preset(preset),
         }
     }
 
     /// Attaches an explicit zstd level override for encoding.
     pub const fn with_zstd_level(mut self, zstd_level: Option<i32>) -> Self {
         self.zstd_level = zstd_level;
+        self
+    }
+
+    /// Attaches an explicit preprocessing profile override.
+    pub const fn with_preprocessing_profile(
+        mut self,
+        preprocessing_profile: PreprocessingProfile,
+    ) -> Self {
+        self.preprocessing_profile = preprocessing_profile;
         self
     }
 
@@ -547,6 +559,62 @@ pub enum FileFormat {
     Audio,
     /// Common/generic format or unknown
     Common,
+}
+
+/// Per-format preprocessing profile applied during archive creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreprocessingProfile {
+    pub text: Option<TextStrategy>,
+    pub image: Option<ImageStrategy>,
+    pub audio: Option<AudioStrategy>,
+    pub binary: Option<BinaryStrategy>,
+}
+
+impl PreprocessingProfile {
+    /// Creates a new preprocessing profile.
+    pub const fn new(
+        text: Option<TextStrategy>,
+        image: Option<ImageStrategy>,
+        audio: Option<AudioStrategy>,
+        binary: Option<BinaryStrategy>,
+    ) -> Self {
+        Self {
+            text,
+            image,
+            audio,
+            binary,
+        }
+    }
+
+    /// Creates a profile with preprocessing disabled for every file type.
+    pub const fn disabled() -> Self {
+        Self::new(None, None, None, None)
+    }
+
+    /// Returns the built-in preprocessing profile for a compression preset.
+    pub const fn for_compression_preset(preset: CompressionPreset) -> Self {
+        match preset {
+            CompressionPreset::Fast => Self::disabled(),
+            CompressionPreset::Default => Self::new(
+                Some(TextStrategy::Bpe),
+                Some(ImageStrategy::YCoCgR),
+                Some(AudioStrategy::Lpc),
+                Some(BinaryStrategy::Bcj),
+            ),
+            CompressionPreset::High => Self::new(
+                Some(TextStrategy::Bwt),
+                Some(ImageStrategy::LocoI),
+                Some(AudioStrategy::Lpc),
+                Some(BinaryStrategy::Bcj),
+            ),
+        }
+    }
+}
+
+impl Default for PreprocessingProfile {
+    fn default() -> Self {
+        Self::disabled()
+    }
 }
 
 /// Preprocessing strategy applied before compression.

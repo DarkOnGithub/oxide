@@ -183,7 +183,10 @@ where
         config.compression_algo,
         config.performance.compression_preset,
     )
-    .with_zstd_level(config.performance.zstd_level);
+    .with_zstd_level(config.performance.zstd_level)
+    .with_preprocessing_profile(config.performance.preprocessing_profile.unwrap_or_else(|| {
+        crate::PreprocessingProfile::for_compression_preset(config.performance.compression_preset)
+    }));
     let stream_read_buffer_size = config.performance.directory_stream_read_buffer_size.max(1);
     let producer_threads = config.performance.producer_threads.max(1);
     let mmap_threshold = config.performance.directory_mmap_threshold_bytes.max(1);

@@ -204,7 +204,17 @@ impl<'a> Archiver<'a> {
                 self.config.compression_algo,
                 self.config.performance.compression_preset,
             )
-            .with_zstd_level(self.config.performance.zstd_level),
+            .with_zstd_level(self.config.performance.zstd_level)
+            .with_preprocessing_profile(
+                self.config
+                    .performance
+                    .preprocessing_profile
+                    .unwrap_or_else(|| {
+                        crate::PreprocessingProfile::for_compression_preset(
+                            self.config.performance.compression_preset,
+                        )
+                    }),
+            ),
         );
         let mut batches = scanner.scan_file(path)?;
         let force_raw_storage = batches

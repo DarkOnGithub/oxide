@@ -208,6 +208,7 @@ fn build_archive_pipeline(
 ) -> ArchivePipeline {
     let mut performance = PipelinePerformanceOptions::default();
     performance.compression_preset = settings.compression_preset;
+    performance.preprocessing_profile = Some(settings.preprocessing_profile);
     performance.zstd_level = settings.zstd_level;
     performance.max_inflight_bytes = settings.inflight_bytes.max(1);
     performance.max_inflight_blocks_per_worker = settings.inflight_blocks_per_worker.max(1);

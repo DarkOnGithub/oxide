@@ -51,7 +51,11 @@ pub fn process_batch(
     let strategy = if skip_preprocessing {
         crate::PreProcessingStrategy::None
     } else {
-        get_preprocessing_strategy(file_type_hint, plan.preset, preprocessing_metadata.as_ref())
+        get_preprocessing_strategy(
+            file_type_hint,
+            &plan.preprocessing_profile,
+            preprocessing_metadata.as_ref(),
+        )
     };
 
     let (preprocessed, preprocessing_elapsed) = if strategy == crate::PreProcessingStrategy::None {

@@ -3,7 +3,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use oxide_core::{CompressionAlgo, CompressionPreset};
+use oxide_core::{
+    AudioStrategy, BinaryStrategy, CompressionAlgo, CompressionPreset, ImageStrategy,
+    PreprocessingProfile, TextStrategy,
+};
 use serde::Deserialize;
 
 use crate::AppResult;
@@ -19,6 +22,7 @@ pub struct ResolvedArchiveSettings {
     pub skip_preprocessing: bool,
     pub skip_compression: bool,
     pub compression_preset: CompressionPreset,
+    pub preprocessing_profile: PreprocessingProfile,
     pub zstd_level: Option<i32>,
     pub block_size: usize,
     pub workers: usize,
@@ -112,6 +116,10 @@ struct ArchivePresetRegistry {
 struct ArchivePresetConfig {
     compression: Option<String>,
     compression_preset: Option<String>,
+    text_preprocessing: Option<String>,
+    image_preprocessing: Option<String>,
+    audio_preprocessing: Option<String>,
+    binary_preprocessing: Option<String>,
     zstd_level: Option<i32>,
     block_size: Option<SizeValue>,
     workers: Option<usize>,
@@ -134,6 +142,22 @@ impl ArchivePresetConfig {
         merge_option(
             &mut self.compression_preset,
             other.compression_preset.clone(),
+        );
+        merge_option(
+            &mut self.text_preprocessing,
+            other.text_preprocessing.clone(),
+        );
+        merge_option(
+            &mut self.image_preprocessing,
+            other.image_preprocessing.clone(),
+        );
+        merge_option(
+            &mut self.audio_preprocessing,
+            other.audio_preprocessing.clone(),
+        );
+        merge_option(
+            &mut self.binary_preprocessing,
+            other.binary_preprocessing.clone(),
         );
         merge_option(&mut self.zstd_level, other.zstd_level);
         merge_option(&mut self.block_size, other.block_size.clone());
@@ -184,6 +208,12 @@ impl ArchivePresetConfig {
             .map(parse_compression_preset)
             .transpose()?
             .ok_or_else(|| invalid_input("archive preset is missing compression_preset"))?;
+        let preprocessing_profile = PreprocessingProfile::new(
+            resolve_text_preprocessing(self.text_preprocessing.as_deref())?,
+            resolve_image_preprocessing(self.image_preprocessing.as_deref())?,
+            resolve_audio_preprocessing(self.audio_preprocessing.as_deref())?,
+            resolve_binary_preprocessing(self.binary_preprocessing.as_deref())?,
+        );
         let zstd_level = resolve_zstd_level(compression, overrides.zstd_level.or(self.zstd_level))?;
 
         Ok(ResolvedArchiveSettings {
@@ -193,6 +223,7 @@ impl ArchivePresetConfig {
             skip_preprocessing: overrides.skip_preprocessing,
             skip_compression: overrides.skip_compression,
             compression_preset,
+            preprocessing_profile,
             zstd_level,
             block_size: resolve_usize(overrides.block_size, self.block_size, "block_size")?,
             workers: resolve_number(overrides.workers, self.workers, "workers")?,
@@ -315,6 +346,76 @@ fn parse_compression_preset(value: &str) -> Result<CompressionPreset, io::Error>
     }
 }
 
+fn resolve_text_preprocessing(value: Option<&str>) -> Result<Option<TextStrategy>, io::Error> {
+    parse_required_preprocessing(value, "text_preprocessing", parse_text_preprocessing)
+}
+
+fn resolve_image_preprocessing(value: Option<&str>) -> Result<Option<ImageStrategy>, io::Error> {
+    parse_required_preprocessing(value, "image_preprocessing", parse_image_preprocessing)
+}
+
+fn resolve_audio_preprocessing(value: Option<&str>) -> Result<Option<AudioStrategy>, io::Error> {
+    parse_required_preprocessing(value, "audio_preprocessing", parse_audio_preprocessing)
+}
+
+fn resolve_binary_preprocessing(value: Option<&str>) -> Result<Option<BinaryStrategy>, io::Error> {
+    parse_required_preprocessing(value, "binary_preprocessing", parse_binary_preprocessing)
+}
+
+fn parse_required_preprocessing<T>(
+    value: Option<&str>,
+    field: &str,
+    parser: impl FnOnce(&str) -> Result<Option<T>, io::Error>,
+) -> Result<Option<T>, io::Error> {
+    match value {
+        Some(value) => parser(value),
+        None => Err(invalid_input(format!("archive preset is missing {field}"))),
+    }
+}
+
+fn parse_text_preprocessing(value: &str) -> Result<Option<TextStrategy>, io::Error> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(None),
+        "bpe" => Ok(Some(TextStrategy::Bpe)),
+        "bwt" => Ok(Some(TextStrategy::Bwt)),
+        other => Err(invalid_input(format!(
+            "unsupported text_preprocessing '{other}'"
+        ))),
+    }
+}
+
+fn parse_image_preprocessing(value: &str) -> Result<Option<ImageStrategy>, io::Error> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(None),
+        "ycocgr" => Ok(Some(ImageStrategy::YCoCgR)),
+        "paeth" => Ok(Some(ImageStrategy::Paeth)),
+        "locoi" => Ok(Some(ImageStrategy::LocoI)),
+        other => Err(invalid_input(format!(
+            "unsupported image_preprocessing '{other}'"
+        ))),
+    }
+}
+
+fn parse_audio_preprocessing(value: &str) -> Result<Option<AudioStrategy>, io::Error> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(None),
+        "lpc" => Ok(Some(AudioStrategy::Lpc)),
+        other => Err(invalid_input(format!(
+            "unsupported audio_preprocessing '{other}'"
+        ))),
+    }
+}
+
+fn parse_binary_preprocessing(value: &str) -> Result<Option<BinaryStrategy>, io::Error> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(None),
+        "bcj" => Ok(Some(BinaryStrategy::Bcj)),
+        other => Err(invalid_input(format!(
+            "unsupported binary_preprocessing '{other}'"
+        ))),
+    }
+}
+
 fn resolve_zstd_level(
     compression: CompressionAlgo,
     zstd_level: Option<i32>,
@@ -352,7 +453,9 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 mod tests {
     use std::fs;
 
-    use oxide_core::{CompressionAlgo, CompressionPreset};
+    use oxide_core::{
+        CompressionAlgo, CompressionPreset, ImageStrategy, PreprocessingProfile, TextStrategy,
+    };
 
     use super::{ArchiveOverrides, DEFAULT_PRESETS_PATH, PresetFile};
 
@@ -369,6 +472,10 @@ mod tests {
                 "defaults": {
                   "compression": "lz4",
                   "compression_preset": "fast",
+                  "text_preprocessing": "none",
+                  "image_preprocessing": "none",
+                  "audio_preprocessing": "none",
+                  "binary_preprocessing": "none",
                   "zstd_level": null,
                   "block_size": "2M",
                   "workers": 0,
@@ -390,6 +497,8 @@ mod tests {
                   },
                   "compact": {
                     "compression_preset": "high",
+                    "text_preprocessing": "bwt",
+                    "image_preprocessing": "locoi",
                     "block_size": "8M"
                   }
                 }
@@ -421,6 +530,15 @@ mod tests {
         assert!(!preset.skip_preprocessing);
         assert!(!preset.skip_compression);
         assert_eq!(preset.compression_preset, CompressionPreset::High);
+        assert_eq!(
+            preset.preprocessing_profile,
+            PreprocessingProfile::new(
+                Some(TextStrategy::Bwt),
+                Some(ImageStrategy::LocoI),
+                None,
+                None,
+            )
+        );
         assert_eq!(preset.zstd_level, None);
         assert_eq!(preset.block_size, 16 * 1024 * 1024);
     }
@@ -445,9 +563,17 @@ mod tests {
 
         assert_eq!(balanced.compression, CompressionAlgo::Zstd);
         assert_eq!(balanced.compression_preset, CompressionPreset::Default);
+        assert_eq!(
+            balanced.preprocessing_profile,
+            PreprocessingProfile::for_compression_preset(CompressionPreset::Default)
+        );
         assert_eq!(balanced.zstd_level, Some(6));
         assert_eq!(ultra.compression, CompressionAlgo::Zstd);
         assert_eq!(ultra.compression_preset, CompressionPreset::High);
+        assert_eq!(
+            ultra.preprocessing_profile,
+            PreprocessingProfile::for_compression_preset(CompressionPreset::High)
+        );
         assert_eq!(ultra.zstd_level, Some(19));
     }
 
@@ -460,6 +586,10 @@ mod tests {
                 "defaults": {
                   "compression": "lz4",
                   "compression_preset": "fast",
+                  "text_preprocessing": "none",
+                  "image_preprocessing": "none",
+                  "audio_preprocessing": "none",
+                  "binary_preprocessing": "none",
                   "block_size": "2M",
                   "workers": 0,
                   "pool_capacity": "1M",
@@ -494,5 +624,51 @@ mod tests {
             error.to_string(),
             "zstd_level can only be used when compression is 'zstd'"
         );
+    }
+
+    #[test]
+    fn rejects_unknown_preprocessing_strategy() {
+        let file = parse_fixture(
+            r#"{
+              "archive": {
+                "default_preset": "bad",
+                "defaults": {
+                  "compression": "lz4",
+                  "compression_preset": "fast",
+                  "text_preprocessing": "none",
+                  "image_preprocessing": "none",
+                  "audio_preprocessing": "none",
+                  "binary_preprocessing": "none",
+                  "block_size": "2M",
+                  "workers": 0,
+                  "pool_capacity": "1M",
+                  "pool_buffers": 512,
+                  "stats_interval_ms": 250,
+                  "inflight_bytes": "2G",
+                  "inflight_blocks_per_worker": 256,
+                  "stream_read_buffer": "64M",
+                  "producer_threads": 1,
+                  "directory_mmap_threshold": "8M",
+                  "writer_queue_blocks": 1024,
+                  "preserve_format_boundaries": false,
+                  "result_wait_ms": 1
+                },
+                "presets": {
+                  "bad": {
+                    "text_preprocessing": "zip"
+                  }
+                }
+              }
+            }"#,
+        );
+
+        let preset = file.archive.presets.get("bad").unwrap();
+        let mut merged = file.archive.defaults.clone();
+        merged.merge_from(preset);
+
+        let error = merged
+            .resolve("bad", "fixture", ArchiveOverrides::default())
+            .unwrap_err();
+        assert_eq!(error.to_string(), "unsupported text_preprocessing 'zip'");
     }
 }
