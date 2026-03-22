@@ -14,7 +14,7 @@ Oxide a été conçu et développé dans le cadre du Projet S4 (2026).
 **Pré-traitement (Image & Texte)**
 - [x] Implémentation de YCoCg-R (Espace colorimétrique)
 - [x] Implémentation de BPE (Byte Pair Encoding)
-- [ ] Implémentation de BWT (Burrows-Wheeler Transform)
+- [x] Implémentation de BWT (Burrows-Wheeler Transform)
 
 **Sécurité**
 - [ ] Chiffrement des archives
