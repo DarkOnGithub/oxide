@@ -42,6 +42,45 @@ To install it into your Cargo bin directory:
 cargo install --path crates/oxide-cli
 ```
 
+## Benchmarks And Test Coverage
+
+The workspace includes:
+
+- integration tests for archive, extraction, format, telemetry, preprocessing, and scheduling behavior in `crates/oxide-core/tests`
+- Criterion benchmarks in `crates/oxide-core/benches` for throughput, memory management, scanner performance, work scheduling, and format detection
+
+### Performance Snapshots
+
+The tables below summarize representative archive runs for the three preset modes.
+
+#### Silesia Corpus
+
+| Tool | Mode | Avg sec | Avg MiB/s | Avg output | Ratio |
+| --- | --- | ---: | ---: | ---: | ---: |
+| gensquashfs | fast | 0.280 | 772.10 | 110.37 MiB | 0.511 |
+| mksquashfs | fast | 0.183 | 1183.04 | 110.37 MiB | 0.511 |
+| **oxide** | **fast** | **0.182** | **1187.78** | **111.11 MiB** | **0.514** |
+| gensquashfs | balanced | 0.484 | 446.30 | 74.10 MiB | 0.343 |
+| **mksquashfs** | **balanced** | **0.461** | **469.72** | **74.11 MiB** | **0.343** |
+| oxide | balanced | 0.466 | 465.81 | 74.20 MiB | 0.343 |
+| gensquashfs | ultra | 7.181 | 30.10 | 68.36 MiB | 0.316 |
+| mksquashfs | ultra | 7.056 | 30.64 | 68.36 MiB | 0.316 |
+| **oxide** | **ultra** | **6.758** | **31.99** | **68.49 MiB** | **0.317** |
+
+#### Mixed Data Set, Approximately 5 GiB
+
+| Tool | Mode | Avg sec | Avg MiB/s | Avg output | Ratio |
+| --- | --- | ---: | ---: | ---: | ---: |
+| gensquashfs | fast | 6.645 | 783.93 | 4.72 GiB | 0.929 |
+| mksquashfs | fast | 4.649 | 1120.49 | 4.72 GiB | 0.928 |
+| **oxide** | **fast** | **3.817** | **1364.99** | **4.72 GiB** | **0.928** |
+| gensquashfs | balanced | 8.810 | 591.30 | 4.47 GiB | 0.878 |
+| mksquashfs | balanced | 7.224 | 721.09 | 4.47 GiB | 0.878 |
+| **oxide** | **balanced** | **7.128** | **731.03** | **4.47 GiB** | **0.878** |
+| gensquashfs | ultra | 94.174 | 55.34 | 4.38 GiB | 0.862 |
+| mksquashfs | ultra | 94.826 | 54.97 | 4.38 GiB | 0.862 |
+| **oxide** | **ultra** | **91.021** | **57.24** | **4.39 GiB** | **0.862** |
+
 ## Quick Start
 
 Create an archive. If `--output` is omitted, Oxide writes to `<input>.oxz`.
@@ -182,13 +221,6 @@ Good entry points:
 - [`docs/cli/extract.md`](/home/user/Rust/oxide/docs/cli/extract.md)
 - [`docs/cli/presets.md`](/home/user/Rust/oxide/docs/cli/presets.md)
 - [`docs/about/index.md`](/home/user/Rust/oxide/docs/about/index.md)
-
-## Benchmarks And Test Coverage
-
-The workspace includes:
-
-- integration tests for archive, extraction, format, telemetry, preprocessing, and scheduling behavior in `crates/oxide-core/tests`
-- Criterion benchmarks in `crates/oxide-core/benches` for throughput, memory management, scanner performance, work scheduling, and format detection
 
 ## Status
 
