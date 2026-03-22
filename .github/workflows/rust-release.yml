@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  RELEASE_VERSION: ${{ github.ref_name }}
+
 jobs:
   build-linux:
     runs-on: ubuntu-latest
@@ -22,13 +25,18 @@ jobs:
           override: true
 
       - name: Build Linux binary
-        run: cargo build --release --locked
+        run: cargo build --release --locked -p oxide-cli
+
+      - name: Stage Linux release asset
+        run: |
+          mkdir -p dist
+          cp target/release/oxide "dist/oxide-linux-${RELEASE_VERSION}"
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: oxide-linux
-          path: target/release/oxide
+          name: oxide-linux-${{ env.RELEASE_VERSION }}
+          path: dist/oxide-linux-${{ env.RELEASE_VERSION }}
 
   build-windows:
     runs-on: windows-latest
@@ -43,13 +51,19 @@ jobs:
           override: true
 
       - name: Build Windows binary
-        run: cargo build --release --locked
+        run: cargo build --release --locked -p oxide-cli
+
+      - name: Stage Windows release asset
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/oxide.exe "dist/oxide-windows-$env:RELEASE_VERSION.exe"
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: oxide-windows
-          path: target/release/oxide.exe
+          name: oxide-windows-${{ env.RELEASE_VERSION }}
+          path: dist/oxide-windows-${{ env.RELEASE_VERSION }}.exe
 
   release:
     needs: [build-linux, build-windows]
@@ -58,18 +72,18 @@ jobs:
       - name: Download Linux artifact
         uses: actions/download-artifact@v4
         with:
-          name: oxide-linux
+          name: oxide-linux-${{ env.RELEASE_VERSION }}
           path: dist/linux
 
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
-          name: oxide-windows
+          name: oxide-windows-${{ env.RELEASE_VERSION }}
           path: dist/windows
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/linux/oxide
-            dist/windows/oxide.exe
+            dist/linux/oxide-linux-${{ env.RELEASE_VERSION }}
+            dist/windows/oxide-windows-${{ env.RELEASE_VERSION }}.exe
