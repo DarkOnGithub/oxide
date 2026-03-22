@@ -37,7 +37,6 @@ export default defineConfig({
                         { text: 'Équipe', link: '/about/' },
                         { text: 'Chronologie', link: '/about/timeline' },
                         { text: 'Évolution de la stratégie', link: '/about/strategy-evolution' },
-                        { text: 'Archiver proche production', link: '/about/archiver-production-readiness' },
                         { text: 'Dépendances', link: '/about/dependencies' }
                     ]
                 }
