@@ -334,3 +334,4 @@ temp/
 silesia_corpus/
 
 .venv
+ARCHIVER_PRODUCTION_READINESS.md

@@ -15,7 +15,7 @@ export default defineConfig({
         sidebar: {
             '/cli/': [
                 {
-                    text: 'Mise en route',
+                    text: 'Prise en main',
                     items: [
                         { text: 'Installation', link: '/cli/' }
                     ]
