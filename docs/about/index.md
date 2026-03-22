@@ -19,7 +19,7 @@ Oxide a été conçu et développé dans le cadre du Projet S4 (2026).
 **Sécurité**
 - [ ] Chiffrement des archives
 
-### Willian Huang Hong <a href="#" target="_blank" title="GitHub"><img src="https://cdn.simpleicons.org/github/white" width="24" height="24" style="display:inline-block; vertical-align:text-bottom; margin-left:6px" alt="GitHub"/></a>
+### Willian Huang Hong <a href="https://github.com/CHALUTe" target="_blank" title="GitHub"><img src="https://cdn.simpleicons.org/github/white" width="24" height="24" style="display:inline-block; vertical-align:text-bottom; margin-left:6px" alt="GitHub"/></a>
 
 **Architecture & Interface**
 - [x] Développement de la CLI (Command Line Interface)
