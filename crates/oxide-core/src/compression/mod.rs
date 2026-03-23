@@ -63,7 +63,12 @@ pub(crate) fn apply_compression_request_with_scratch(
         CompressionAlgo::Lz4 => {
             lz4::apply_with_scratch(request.data, request.preset, scratch.lz4())
         }
-        CompressionAlgo::Zstd => zstd::apply(request.data, request.preset, request.zstd_level),
+        CompressionAlgo::Zstd => zstd::apply_with_scratch(
+            request.data,
+            request.preset,
+            request.zstd_level,
+            scratch.zstd(),
+        ),
     }
 }
 
@@ -73,8 +78,18 @@ pub fn reverse_compression(data: &[u8], algo: CompressionAlgo) -> Result<Vec<u8>
 }
 
 pub(crate) fn reverse_compression_request(request: DecompressionRequest<'_>) -> Result<Vec<u8>> {
+    let mut scratch = CompressionScratchArena::new();
+    reverse_compression_request_with_scratch(request, &mut scratch)
+}
+
+pub(crate) fn reverse_compression_request_with_scratch(
+    request: DecompressionRequest<'_>,
+    scratch: &mut CompressionScratchArena,
+) -> Result<Vec<u8>> {
     match request.algo {
         CompressionAlgo::Lz4 => lz4::reverse(request.data),
-        CompressionAlgo::Zstd => zstd::reverse(request.data, request.raw_len),
+        CompressionAlgo::Zstd => {
+            zstd::reverse_with_scratch(request.data, request.raw_len, scratch.zstd())
+        }
     }
 }
