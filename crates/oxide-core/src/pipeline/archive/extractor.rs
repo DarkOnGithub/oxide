@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, TryRecvError, bounded};
 
+use crate::buffer::{BufferPool, PooledBuffer};
 use crate::compression::CompressionScratchArena;
 use crate::core::WorkerRuntimeSnapshot;
 use crate::format::{ArchiveMetadata, ArchiveReader, ChunkDescriptor, GlobalHeader};
@@ -89,6 +90,27 @@ struct DecodeStreamOutcome {
     workers: Vec<WorkerRuntimeSnapshot>,
     stage_timings: ExtractStageTimings,
     pipeline_stats: ExtractPipelineStats,
+}
+
+#[derive(Debug)]
+enum DecodedBlock {
+    Owned(Vec<u8>),
+    Pooled(PooledBuffer),
+}
+
+impl DecodedBlock {
+    fn len(&self) -> usize {
+        self.as_ref().len()
+    }
+}
+
+impl AsRef<[u8]> for DecodedBlock {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes.as_slice(),
+            Self::Pooled(bytes) => bytes.as_slice(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -214,11 +236,15 @@ pub(crate) struct DirectoryRestoreOutcome {
 
 pub struct Extractor {
     pub num_workers: usize,
+    buffer_pool: Arc<BufferPool>,
 }
 
 impl Extractor {
-    pub fn new(num_workers: usize) -> Self {
-        Self { num_workers }
+    pub fn new(num_workers: usize, buffer_pool: Arc<BufferPool>) -> Self {
+        Self {
+            num_workers,
+            buffer_pool,
+        }
     }
 
     pub fn probe_archive_source_kind<R: Read + Seek>(reader: &mut R) -> Result<ArchiveSourceKind> {
@@ -480,7 +506,7 @@ impl Extractor {
             .max(1);
 
         let (task_tx, task_rx) = bounded::<DecodeTask>(queue_capacity);
-        let (result_tx, result_rx) = bounded::<(usize, Result<Vec<u8>>)>(queue_capacity);
+        let (result_tx, result_rx) = bounded::<(usize, Result<DecodedBlock>)>(queue_capacity);
         let runtime_state = Arc::new(DecodeRuntimeState::new(worker_count, started_at));
         let mut worker_handles = Vec::with_capacity(worker_count);
 
@@ -588,7 +614,8 @@ impl Extractor {
             }
 
             let read_started = Instant::now();
-            let (_header, block_data) = archive.read_block(block_index as u32)?;
+            let mut block_data = self.buffer_pool.acquire();
+            archive.read_block_into(block_index as u32, block_data.as_mut_vec())?;
             stage_timings.archive_read += read_started.elapsed();
 
             let submit_started = Instant::now();
@@ -751,10 +778,10 @@ impl Extractor {
     }
 }
 
-pub fn receive_decode_result_to_writer<W: OrderedChunkWriter>(
-    result_rx: &Receiver<(usize, Result<Vec<u8>>)>,
+fn receive_decode_result_to_writer<W: OrderedChunkWriter>(
+    result_rx: &Receiver<(usize, Result<DecodedBlock>)>,
     stage_timings: &mut ExtractStageTimings,
-    reorder: &mut BoundedReorderWriter<W>,
+    reorder: &mut BoundedReorderWriter<W, DecodedBlock>,
     total_blocks: usize,
     received_indices: &mut [bool],
     runtime_state: &DecodeRuntimeState,
@@ -782,10 +809,10 @@ pub fn receive_decode_result_to_writer<W: OrderedChunkWriter>(
     )
 }
 
-pub fn process_decode_result_to_writer<W: OrderedChunkWriter>(
-    (index, block): (usize, Result<Vec<u8>>),
+fn process_decode_result_to_writer<W: OrderedChunkWriter>(
+    (index, block): (usize, Result<DecodedBlock>),
     stage_timings: &mut ExtractStageTimings,
-    reorder: &mut BoundedReorderWriter<W>,
+    reorder: &mut BoundedReorderWriter<W, DecodedBlock>,
     total_blocks: usize,
     received_indices: &mut [bool],
     runtime_state: &DecodeRuntimeState,
@@ -825,7 +852,7 @@ pub fn process_decode_result_to_writer<W: OrderedChunkWriter>(
     Ok(())
 }
 
-pub fn join_decode_workers(
+fn join_decode_workers(
     handles: Vec<thread::JoinHandle<DecodeWorkerOutcome>>,
 ) -> Result<Vec<WorkerRuntimeSnapshot>> {
     let mut workers = Vec::with_capacity(handles.len());
@@ -862,14 +889,6 @@ pub fn join_decode_workers(
 
 pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Result<Vec<u8>> {
     let mut scratch = CompressionScratchArena::new();
-    decode_block_payload_with_scratch(header, block_data, &mut scratch)
-}
-
-fn decode_block_payload_with_scratch(
-    header: ChunkDescriptor,
-    block_data: Vec<u8>,
-    scratch: &mut CompressionScratchArena,
-) -> Result<Vec<u8>> {
     let compression_meta = header.compression_meta()?;
     let decoded = if compression_meta.raw_passthrough {
         block_data
@@ -880,8 +899,36 @@ fn decode_block_payload_with_scratch(
                 algo: compression_meta.algo,
                 raw_len: Some(header.raw_len as usize),
             },
-            scratch,
+            &mut scratch,
         )?
+    };
+    if decoded.len() != header.raw_len as usize {
+        return Err(crate::OxideError::InvalidFormat(
+            "decoded block size mismatch",
+        ));
+    }
+    Ok(decoded)
+}
+
+fn decode_block_payload_with_scratch(
+    header: ChunkDescriptor,
+    block_data: PooledBuffer,
+    scratch: &mut CompressionScratchArena,
+) -> Result<DecodedBlock> {
+    let compression_meta = header.compression_meta()?;
+    let decoded = if compression_meta.raw_passthrough {
+        DecodedBlock::Pooled(block_data)
+    } else {
+        DecodedBlock::Owned(
+            crate::compression::reverse_compression_request_with_scratch(
+                crate::compression::DecompressionRequest {
+                    data: block_data.as_slice(),
+                    algo: compression_meta.algo,
+                    raw_len: Some(header.raw_len as usize),
+                },
+                scratch,
+            )?,
+        )
     };
     if decoded.len() != header.raw_len as usize {
         return Err(crate::OxideError::InvalidFormat(

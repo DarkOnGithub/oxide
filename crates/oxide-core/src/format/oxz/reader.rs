@@ -19,6 +19,13 @@ pub struct ArchiveReader<R: Read + Seek> {
     manifest: ArchiveManifest,
     chunk_descriptors: Vec<ChunkDescriptor>,
     footer: Footer,
+    sequential_extract_state: Option<SequentialExtractState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SequentialExtractState {
+    next_block_index: u32,
+    next_payload_offset: u64,
 }
 
 impl<R: Read + Seek> ArchiveReader<R> {
@@ -84,11 +91,20 @@ impl<R: Read + Seek> ArchiveReader<R> {
             manifest,
             chunk_descriptors,
             footer,
+            sequential_extract_state: None,
         })
     }
 
     pub(crate) fn new_for_sequential_extract(reader: R) -> Result<Self> {
-        Self::new(reader)
+        let mut archive = Self::new(reader)?;
+        archive
+            .reader
+            .seek(SeekFrom::Start(archive.global_header.payload_offset))?;
+        archive.sequential_extract_state = Some(SequentialExtractState {
+            next_block_index: 0,
+            next_payload_offset: archive.global_header.payload_offset,
+        });
+        Ok(archive)
     }
 
     pub fn block_count(&self) -> u32 {
@@ -126,13 +142,36 @@ impl<R: Read + Seek> ArchiveReader<R> {
     }
 
     pub fn read_block(&mut self, index: u32) -> Result<(ChunkDescriptor, Vec<u8>)> {
+        let mut data = Vec::new();
+        let descriptor = self.read_block_into(index, &mut data)?;
+        Ok((descriptor, data))
+    }
+
+    pub(crate) fn read_block_into(
+        &mut self,
+        index: u32,
+        buffer: &mut Vec<u8>,
+    ) -> Result<ChunkDescriptor> {
         let start = Instant::now();
         let descriptor = self.block_descriptor(index)?;
 
-        self.reader
-            .seek(SeekFrom::Start(descriptor.payload_offset))?;
-        let mut data = vec![0u8; descriptor.encoded_len as usize];
-        self.reader.read_exact(&mut data)?;
+        if self.sequential_extract_state.map(|state| {
+            state.next_block_index == index
+                && state.next_payload_offset == descriptor.payload_offset
+        }) != Some(true)
+        {
+            self.reader
+                .seek(SeekFrom::Start(descriptor.payload_offset))?;
+        }
+
+        buffer.clear();
+        buffer.resize(descriptor.encoded_len as usize, 0);
+        self.reader.read_exact(buffer.as_mut_slice())?;
+
+        if let Some(state) = self.sequential_extract_state.as_mut() {
+            state.next_block_index = index.saturating_add(1);
+            state.next_payload_offset = descriptor.payload_end()?;
+        }
 
         let elapsed_us = duration_to_us(start.elapsed());
         profile::event(
@@ -144,7 +183,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             "oxz chunk read successfully",
         );
 
-        Ok((descriptor, data))
+        Ok(descriptor)
     }
 
     pub fn iter_blocks(&mut self) -> BlockIterator<'_, R> {
@@ -244,5 +283,123 @@ impl<R: Read + Seek> Iterator for BlockIterator<'_, R> {
         let current = self.next_index;
         self.next_index += 1;
         Some(self.reader.read_block(current))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+    use std::rc::Rc;
+
+    use crate::{
+        ArchiveManifest, ArchiveReader, ArchiveWriter, ChunkDescriptor, CompressedBlock,
+        CompressionAlgo, CompressionMeta, CompressionPreset,
+    };
+
+    #[derive(Debug, Clone)]
+    struct SeekCountingCursor {
+        inner: Cursor<Vec<u8>>,
+        seek_count: Rc<Cell<usize>>,
+    }
+
+    impl SeekCountingCursor {
+        fn new(bytes: Vec<u8>) -> (Self, Rc<Cell<usize>>) {
+            let seek_count = Rc::new(Cell::new(0));
+            (
+                Self {
+                    inner: Cursor::new(bytes),
+                    seek_count: Rc::clone(&seek_count),
+                },
+                seek_count,
+            )
+        }
+    }
+
+    impl Read for SeekCountingCursor {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for SeekCountingCursor {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.seek_count.set(self.seek_count.get().saturating_add(1));
+            self.inner.seek(pos)
+        }
+    }
+
+    fn build_test_archive() -> Vec<u8> {
+        let mut writer = ArchiveWriter::with_manifest(Vec::new(), Some(ArchiveManifest::default()));
+        writer
+            .write_global_header_with_flags(2, 0)
+            .expect("test archive header should write");
+
+        let meta = CompressionMeta::new(CompressionAlgo::Lz4, CompressionPreset::Default, true);
+        writer
+            .write_owned_block(CompressedBlock::with_compression_meta(
+                0,
+                b"alpha".to_vec(),
+                meta,
+                5,
+            ))
+            .expect("first test block should write");
+        writer
+            .write_owned_block(CompressedBlock::with_compression_meta(
+                1,
+                b"beta".to_vec(),
+                meta,
+                4,
+            ))
+            .expect("second test block should write");
+
+        writer
+            .write_footer()
+            .expect("test archive footer should write")
+    }
+
+    #[test]
+    fn sequential_block_reads_reuse_buffer_without_extra_seeks() {
+        let archive_bytes = build_test_archive();
+
+        let (reader, seek_count) = SeekCountingCursor::new(archive_bytes);
+        let mut archive =
+            ArchiveReader::new_for_sequential_extract(reader).expect("archive should open");
+        let seek_count_after_open = seek_count.get();
+
+        let mut first_buffer = Vec::new();
+        let first: ChunkDescriptor = archive
+            .read_block_into(0, &mut first_buffer)
+            .expect("first block should read");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+        assert_eq!(first.encoded_len, 5);
+        assert_eq!(&first_buffer, b"alpha");
+
+        let mut buffer = Vec::with_capacity(16);
+        let second = archive
+            .read_block_into(1, &mut buffer)
+            .expect("second block should read");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+        assert_eq!(&buffer, b"beta");
+        assert_eq!(second.encoded_len, 4);
+        assert!(buffer.capacity() >= 16);
+    }
+
+    #[test]
+    fn sequential_reader_seeks_when_blocks_are_requested_out_of_order() {
+        let archive_bytes = build_test_archive();
+
+        let (reader, seek_count) = SeekCountingCursor::new(archive_bytes);
+        let mut archive =
+            ArchiveReader::new_for_sequential_extract(reader).expect("archive should open");
+        let seek_count_after_open = seek_count.get();
+
+        let mut buffer = Vec::new();
+        archive
+            .read_block_into(1, &mut buffer)
+            .expect("out-of-order block should read");
+
+        assert!(seek_count.get() > seek_count_after_open);
+        assert_eq!(&buffer, b"beta");
     }
 }

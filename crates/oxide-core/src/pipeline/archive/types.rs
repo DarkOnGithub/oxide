@@ -1,5 +1,6 @@
 use super::super::directory;
 use super::super::types::ArchiveSourceKind;
+use crate::buffer::PooledBuffer;
 use crate::core::{PoolRuntimeSnapshot, WorkerRuntimeSnapshot};
 use crate::format::{ArchiveManifest, ChunkDescriptor};
 use crate::io::MmapInput;
@@ -137,7 +138,7 @@ pub struct DecodedArchivePayload {
 pub struct DecodeTask {
     pub index: usize,
     pub header: ChunkDescriptor,
-    pub block_data: Vec<u8>,
+    pub block_data: PooledBuffer,
 }
 
 #[derive(Debug)]
