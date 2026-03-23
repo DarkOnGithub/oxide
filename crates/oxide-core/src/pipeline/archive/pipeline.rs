@@ -238,7 +238,7 @@ impl ArchivePipeline {
         let sink = sink.unwrap_or(&mut noop);
         begin_extract_run_telemetry();
         let started_at = Instant::now();
-        let extractor = Extractor::new(self.num_workers);
+        let extractor = Extractor::new(self.num_workers, Arc::clone(&self.buffer_pool));
         let mut decoded =
             extractor.read_archive_payload_with_metrics(reader, started_at, &options, sink)?;
         let source_kind = directory::source_kind_from_flags(decoded.flags);
@@ -280,7 +280,7 @@ impl ArchivePipeline {
         let sink = sink.unwrap_or(&mut noop);
         begin_extract_run_telemetry();
         let started_at = Instant::now();
-        let extractor = Extractor::new(self.num_workers);
+        let extractor = Extractor::new(self.num_workers, Arc::clone(&self.buffer_pool));
         let restored = extractor.extract_directory_to_path_with_metrics(
             reader,
             output_dir.as_ref(),
@@ -333,7 +333,7 @@ impl ArchivePipeline {
         let sink = sink.unwrap_or(&mut noop);
         begin_extract_run_telemetry();
         let started_at = Instant::now();
-        let extractor = Extractor::new(self.num_workers);
+        let extractor = Extractor::new(self.num_workers, Arc::clone(&self.buffer_pool));
         let mut reader = reader;
         let source_kind = Extractor::probe_archive_source_kind(&mut reader)?;
         reader.seek(SeekFrom::Start(0))?;
@@ -441,7 +441,7 @@ impl ArchivePipeline {
         let sink = sink.unwrap_or(&mut noop);
         begin_extract_run_telemetry();
         let started_at = Instant::now();
-        let extractor = Extractor::new(self.num_workers);
+        let extractor = Extractor::new(self.num_workers, Arc::clone(&self.buffer_pool));
         let mut reader = reader;
         let source_kind = Extractor::probe_archive_source_kind(&mut reader)?;
         reader.seek(SeekFrom::Start(0))?;

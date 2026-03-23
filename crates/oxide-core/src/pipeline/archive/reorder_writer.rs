@@ -33,16 +33,16 @@ pub struct ReorderWriterStats {
 }
 
 #[derive(Debug)]
-pub struct BoundedReorderWriter<W> {
+pub struct BoundedReorderWriter<W, T = Vec<u8>> {
     writer: W,
-    reorder: ReorderBuffer<Vec<u8>>,
+    reorder: ReorderBuffer<T>,
     pending_sizes: BTreeMap<usize, usize>,
     next_write_id: usize,
     pending_bytes: u64,
     stats: ReorderWriterStats,
 }
 
-impl<W: OrderedChunkWriter> BoundedReorderWriter<W> {
+impl<W: OrderedChunkWriter, T: AsRef<[u8]>> BoundedReorderWriter<W, T> {
     pub fn with_limit(writer: W, max_pending: usize) -> Self {
         Self {
             writer,
@@ -54,14 +54,14 @@ impl<W: OrderedChunkWriter> BoundedReorderWriter<W> {
         }
     }
 
-    pub fn push(&mut self, id: usize, item: Vec<u8>) -> Result<ReorderPushStats> {
+    pub fn push(&mut self, id: usize, item: T) -> Result<ReorderPushStats> {
         if self.pending_sizes.contains_key(&id) {
             return Err(crate::OxideError::InvalidFormat(
                 "duplicate decoded block id in reorder writer",
             ));
         }
 
-        let item_len = item.len();
+        let item_len = item.as_ref().len();
         self.pending_sizes.insert(id, item_len);
         self.pending_bytes = self.pending_bytes.saturating_add(item_len as u64);
 
@@ -97,7 +97,7 @@ impl<W: OrderedChunkWriter> BoundedReorderWriter<W> {
             self.pending_bytes = self.pending_bytes.saturating_sub(len as u64);
 
             let write_started = Instant::now();
-            self.writer.write_chunk(&chunk)?;
+            self.writer.write_chunk(chunk.as_ref())?;
             let write_elapsed = write_started.elapsed();
 
             self.next_write_id = self.next_write_id.saturating_add(1);
