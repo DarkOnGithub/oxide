@@ -30,6 +30,7 @@ anyhow = "1.0"
 tracing = "0.1"
 jwalk = "0.8"
 zstd = "0.13"
+liblzma = { version = "0.4", features = ["static"] }
 regex = "1.11"
 libc = "0.2"
 

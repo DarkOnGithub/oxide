@@ -357,7 +357,7 @@ impl CompressionMeta {
     /// Encodes compression metadata into OXZ compression flags.
     ///
     /// Layout:
-    /// - Bits 0..=1: algorithm (01 LZ4, 10 Zstd)
+    /// - Bits 0..=1: algorithm (01 LZ4, 10 Zstd, 11 LZMA)
     /// - Bit 2: raw passthrough marker
     /// - Bits 3..=4: preset (00 Fast, 01 Default, 10 High)
     /// - Bits 5..=7: reserved (must be zero)
@@ -488,6 +488,8 @@ impl CompressedBlock {
 pub enum CompressionAlgo {
     /// LZ4 fast compression - Fast
     Lz4,
+    /// LZMA/XZ compression with high-ratio presets.
+    Lzma,
     /// Zstandard compression with tunable ratio/speed levels.
     Zstd,
 }
@@ -498,6 +500,7 @@ impl CompressionAlgo {
         match self {
             Self::Lz4 => 0x01,
             Self::Zstd => 0x02,
+            Self::Lzma => 0x03,
         }
     }
 
@@ -506,6 +509,7 @@ impl CompressionAlgo {
         match flags {
             0x01 => Ok(Self::Lz4),
             0x02 => Ok(Self::Zstd),
+            0x03 => Ok(Self::Lzma),
             _ => Err(OxideError::InvalidFormat("invalid compression flags")),
         }
     }
