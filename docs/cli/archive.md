@@ -21,7 +21,6 @@ Voici la liste des arguments supportés, avec leurs valeurs par défaut.
 | `--preset-file` | Fichier JSON de préréglages (presets) personnalisé. | Fichier intégré de l'outil |
 | `--block-size` | La taille cible des blocs (ex: `64K`, `1M`). | *Géré par les presets* |
 | `--workers` | Nombre de threads de compression. `0` = auto (nb de cœurs). | `0` (Automatique) |
-| `--skip-preprocessing` | Stocker les blocs sans prétraitement (preprocessing). | `false` |
 | `--skip-compression` | Ne faire aucune compression (mode stockage). | `false` |
 | `--telemetry-details` | Affiche un tableau détaillé des statistiques en fin d'exécution. | `false` |
 

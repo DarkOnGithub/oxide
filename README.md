@@ -11,14 +11,13 @@ Oxide is a Rust archiver built around a custom `.oxz` container, a parallel arch
 - Archives a single file or an entire directory tree into `.oxz`
 - Extracts full archives or selected paths from directory archives
 - Prints archive contents as a tree without unpacking them
-- Uses parallel block processing with `lz4` or `zstd`
-- Applies format-aware preprocessing for text, image, audio, and binary data
+- Uses fixed-size parallel block processing with `lz4` or `zstd`
 - Falls back to raw storage for many already-compressed formats
 - Emits live progress, summaries, and optional detailed telemetry tables
 
 ## Workspace
 
-- `crates/oxide-core` - archive format, pipeline, compression, preprocessing, telemetry, tests, and benches
+- `crates/oxide-core` - archive format, pipeline, compression, telemetry, tests, and benches
 - `crates/oxide-cli` - the `oxide` binary, CLI parsing, preset resolution, progress UI, reports, and tree rendering
 - `crates/oxide-gui` - placeholder GUI crate
 - `docs/` - VitePress documentation site
@@ -46,8 +45,8 @@ cargo install --path crates/oxide-cli
 
 The workspace includes:
 
-- integration tests for archive, extraction, format, telemetry, preprocessing, and scheduling behavior in `crates/oxide-core/tests`
-- Criterion benchmarks in `crates/oxide-core/benches` for throughput, memory management, scanner performance, work scheduling, and format detection
+- integration tests for archive, extraction, telemetry, scheduling, and archive format behavior in `crates/oxide-core/tests`
+- Criterion benchmarks in `crates/oxide-core/benches` for memory management, scanner performance, and work scheduling
 
 ### Performance Snapshots
 
@@ -123,7 +122,6 @@ Useful options:
 - `--preset <NAME>` - archive profile from the preset file
 - `--compression <lz4|zstd>` - override the compression algorithm
 - `--zstd-level <1-22>` - explicit zstd level
-- `--skip-preprocessing` - disable preprocessing entirely
 - `--skip-compression` - store payloads without compression
 - `--workers <N>` - compression worker count
 - `--block-size <SIZE>` - target block size such as `64K`, `1M`, or `4M`
@@ -160,11 +158,11 @@ oxide tree <INPUT>
 
 Archive settings are loaded from [`crates/oxide-cli/presets.json`](/home/user/Rust/oxide/crates/oxide-cli/presets.json). The default preset is `balanced`.
 
-| Preset | Compression | Preprocessing profile | Intended tradeoff |
-| --- | --- | --- | --- |
-| `fast` | `lz4` | none by default | highest throughput, lighter CPU usage |
-| `balanced` | `zstd` level 6 | `bpe`, `ycocgr`, `lpc`, `bcj` | default profile for mixed data |
-| `ultra` | `zstd` level 19 | `bwt`, `locoi`, `lpc`, `bcj` | stronger compression, higher CPU cost |
+| Preset | Compression | Intended tradeoff |
+| --- | --- | --- |
+| `fast` | `lz4` | highest throughput, lighter CPU usage |
+| `balanced` | `zstd` level 6 | default profile for mixed data |
+| `ultra` | `zstd` level 19 | stronger compression, higher CPU cost |
 
 You can override any preset choice with CLI flags or provide a custom preset file with `--preset-file`.
 
@@ -172,20 +170,10 @@ You can override any preset choice with CLI flags or provide a custom preset fil
 
 The core engine is organized around block-based parallel processing:
 
-- `FormatDetector` classifies input as text, image, audio, binary, or common data using signatures plus heuristics
-- preprocessing is selected per file type, not applied blindly to every block
+- files are chunked with fixed-size boundaries to keep scanning cheap and predictable
 - directory archival builds a manifest that records paths, kinds, sizes, modes, timestamps, and uid/gid metadata
 - many already-compressed formats such as `jpg`, `png`, `mp3`, `zip`, and `zst` are marked for raw storage instead of wasteful recompression
 - extraction supports full restore, filtered restore, and archive inspection through the manifest reader
-
-Supported preprocessing strategies currently exposed by the CLI:
-
-| Data type | Strategies |
-| --- | --- |
-| Text | `bpe`, `bwt` |
-| Image | `ycocgr`, `paeth`, `locoi` |
-| Audio | `lpc` |
-| Binary | `bcj` |
 
 ## Development
 

@@ -18,7 +18,6 @@ pub struct PreparedInput {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StageTimings {
     pub discovery: Duration,
-    pub format_probe: Duration,
     pub producer_read: Duration,
     pub producer_submit_blocked: Duration,
     pub submit_wait: Duration,
@@ -29,76 +28,37 @@ pub struct StageTimings {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessingThroughputSnapshot {
-    pub preprocessing_input_bytes: u64,
     pub compression_input_bytes: u64,
-    pub preprocessing_elapsed: Duration,
     pub compression_elapsed: Duration,
 }
 
 impl ProcessingThroughputSnapshot {
-    pub fn preprocessing_avg_bps(self) -> f64 {
-        throughput_bps(self.preprocessing_input_bytes, self.preprocessing_elapsed)
-    }
-
     pub fn compression_avg_bps(self) -> f64 {
         throughput_bps(self.compression_input_bytes, self.compression_elapsed)
-    }
-
-    pub fn preprocessing_compression_avg_bps(self) -> f64 {
-        throughput_bps(
-            self.preprocessing_input_bytes,
-            self.preprocessing_elapsed + self.compression_elapsed,
-        )
-    }
-
-    pub fn preprocessing_wall_avg_bps(self, elapsed: Duration) -> f64 {
-        throughput_bps(self.preprocessing_input_bytes, elapsed)
     }
 
     pub fn compression_wall_avg_bps(self, elapsed: Duration) -> f64 {
         throughput_bps(self.compression_input_bytes, elapsed)
     }
-
-    pub fn preprocessing_compression_wall_avg_bps(self, elapsed: Duration) -> f64 {
-        throughput_bps(self.preprocessing_input_bytes, elapsed)
-    }
 }
 
 #[derive(Debug, Default)]
 pub struct ProcessingThroughputTotals {
-    pub preprocessing_input_bytes: AtomicU64,
     pub compression_input_bytes: AtomicU64,
-    pub preprocessing_elapsed_us: AtomicU64,
     pub compression_elapsed_us: AtomicU64,
 }
 
 impl ProcessingThroughputTotals {
-    pub fn record(
-        &self,
-        preprocessing_input_bytes: u64,
-        preprocessing_elapsed: Duration,
-        compression_input_bytes: u64,
-        compression_elapsed: Duration,
-    ) {
-        self.preprocessing_input_bytes
-            .fetch_add(preprocessing_input_bytes, AtomicOrdering::AcqRel);
+    pub fn record(&self, compression_input_bytes: u64, compression_elapsed: Duration) {
         self.compression_input_bytes
             .fetch_add(compression_input_bytes, AtomicOrdering::AcqRel);
-        self.preprocessing_elapsed_us.fetch_add(
-            duration_to_us(preprocessing_elapsed),
-            AtomicOrdering::AcqRel,
-        );
         self.compression_elapsed_us
             .fetch_add(duration_to_us(compression_elapsed), AtomicOrdering::AcqRel);
     }
 
     pub fn snapshot(&self) -> ProcessingThroughputSnapshot {
         ProcessingThroughputSnapshot {
-            preprocessing_input_bytes: self.preprocessing_input_bytes.load(AtomicOrdering::Acquire),
             compression_input_bytes: self.compression_input_bytes.load(AtomicOrdering::Acquire),
-            preprocessing_elapsed: Duration::from_micros(
-                self.preprocessing_elapsed_us.load(AtomicOrdering::Acquire),
-            ),
             compression_elapsed: Duration::from_micros(
                 self.compression_elapsed_us.load(AtomicOrdering::Acquire),
             ),

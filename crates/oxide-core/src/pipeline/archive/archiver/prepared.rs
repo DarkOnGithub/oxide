@@ -54,7 +54,6 @@ where
     );
     let processing_totals = Arc::new(ProcessingThroughputTotals::default());
     let raw_fallback_enabled = config.performance.raw_fallback_enabled;
-    let skip_preprocessing = config.skip_preprocessing;
     let skip_compression = config.skip_compression;
     let worker_processing_totals = Arc::clone(&processing_totals);
     let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
@@ -62,7 +61,6 @@ where
             batch,
             pool,
             compression,
-            skip_preprocessing,
             skip_compression,
             raw_fallback_enabled,
             worker_processing_totals.as_ref(),

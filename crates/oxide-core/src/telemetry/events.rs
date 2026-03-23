@@ -23,18 +23,10 @@ pub struct ArchiveProgressEvent {
     pub read_avg_bps: f64,
     /// Average write throughput in bytes per second over wall-clock elapsed time.
     pub write_avg_bps: f64,
-    /// Aggregate preprocessing throughput over summed stage busy time.
-    pub preprocessing_avg_bps: f64,
     /// Aggregate compression throughput over summed stage busy time.
     pub compression_avg_bps: f64,
-    /// Aggregate preprocessing+compression throughput over summed stage busy time.
-    pub preprocessing_compression_avg_bps: f64,
-    /// Preprocessing throughput relative to wall clock time.
-    pub preprocessing_wall_avg_bps: f64,
     /// Compression throughput relative to wall clock time.
     pub compression_wall_avg_bps: f64,
-    /// Combined throughput relative to wall clock time.
-    pub preprocessing_compression_wall_avg_bps: f64,
     /// Ratio of output bytes to processed input bytes.
     pub output_input_ratio: f64,
     /// Compression ratio (input / output).

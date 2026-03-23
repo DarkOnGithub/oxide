@@ -10,28 +10,23 @@ pub fn compute_checksum(bytes: &[u8]) -> u32 {
     crc32c_sw(bytes)
 }
 
-
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
 unsafe fn crc32c_hw_x86_64(bytes: &[u8]) -> u32 {
-    use std::arch::x86_64::{_mm_crc32_u32, _mm_crc32_u64, _mm_crc32_u8};
+    use std::arch::x86_64::{_mm_crc32_u8, _mm_crc32_u32, _mm_crc32_u64};
 
     let mut crc: u64 = 0xffff_ffff;
     let mut i = 0;
     let len = bytes.len();
 
     while i + 8 <= len {
-        let chunk = unsafe {
-            (bytes.as_ptr().add(i) as *const u64).read_unaligned()
-        };
+        let chunk = unsafe { (bytes.as_ptr().add(i) as *const u64).read_unaligned() };
         crc = _mm_crc32_u64(crc, chunk);
         i += 8;
     }
 
     while i + 4 <= len {
-        let chunk = unsafe {
-            (bytes.as_ptr().add(i) as *const u32).read_unaligned()
-        };
+        let chunk = unsafe { (bytes.as_ptr().add(i) as *const u32).read_unaligned() };
         crc = _mm_crc32_u32(crc as u32, chunk) as u64;
         i += 4;
     }

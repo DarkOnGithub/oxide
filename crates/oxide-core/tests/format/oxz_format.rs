@@ -1,46 +1,12 @@
 use oxide_core::{
     ARCHIVE_METADATA_SIZE, ArchiveReader, ArchiveWriter, CHUNK_DESCRIPTOR_SIZE, ChunkDescriptor,
     CompressionAlgo, CompressionMeta, CompressionPreset, Footer, GLOBAL_HEADER_SIZE, GlobalHeader,
-    ImageStrategy, OxideError, PreProcessingStrategy, ReorderBuffer, SeekableArchiveWriter,
-    TextStrategy,
+    OxideError, ReorderBuffer, SeekableArchiveWriter,
 };
 use std::io::Cursor;
 
-fn block(
-    id: usize,
-    payload: &[u8],
-    pre_proc: PreProcessingStrategy,
-    compression: CompressionAlgo,
-) -> oxide_core::CompressedBlock {
-    oxide_core::CompressedBlock::new(
-        id,
-        payload.to_vec(),
-        pre_proc,
-        compression,
-        payload.len() as u64,
-    )
-}
-
-#[test]
-fn strategy_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let strategies = [
-        PreProcessingStrategy::None,
-        PreProcessingStrategy::Text(TextStrategy::Bpe),
-        PreProcessingStrategy::Text(TextStrategy::Bwt),
-        PreProcessingStrategy::Image(ImageStrategy::YCoCgR),
-        PreProcessingStrategy::Image(ImageStrategy::Paeth),
-        PreProcessingStrategy::Image(ImageStrategy::LocoI),
-    ];
-
-    for strategy in strategies {
-        let flags = strategy.to_flags();
-        let decoded = PreProcessingStrategy::from_flags(flags)?;
-        assert_eq!(decoded, strategy);
-    }
-
-    assert!(PreProcessingStrategy::from_flags(0b1100_0001).is_err());
-    assert!(PreProcessingStrategy::from_flags(0x07).is_err());
-    Ok(())
+fn block(id: usize, payload: &[u8], compression: CompressionAlgo) -> oxide_core::CompressedBlock {
+    oxide_core::CompressedBlock::new(id, payload.to_vec(), compression, payload.len() as u64)
 }
 
 #[test]
@@ -71,14 +37,7 @@ fn header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let header = ChunkDescriptor::new(
-        128,
-        1024,
-        384,
-        PreProcessingStrategy::Text(TextStrategy::Bwt),
-        CompressionAlgo::Lz4,
-        0xAABB_CCDD,
-    );
+    let header = ChunkDescriptor::new(128, 1024, 384, CompressionAlgo::Lz4, 0xAABB_CCDD);
 
     let mut encoded = Vec::new();
     header.write(&mut encoded)?;
@@ -86,10 +45,6 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = ChunkDescriptor::read(&mut Cursor::new(encoded))?;
     assert_eq!(decoded, header);
-    assert_eq!(
-        decoded.strategy()?,
-        PreProcessingStrategy::Text(TextStrategy::Bwt)
-    );
     assert_eq!(decoded.compression()?, CompressionAlgo::Lz4);
     Ok(())
 }
@@ -100,7 +55,6 @@ fn block_header_round_trip_preserves_raw_passthrough() -> Result<(), Box<dyn std
         512,
         4096,
         4096,
-        PreProcessingStrategy::None,
         CompressionMeta::new(CompressionAlgo::Lz4, CompressionPreset::Fast, true),
         0x0102_0304,
     );
@@ -150,24 +104,9 @@ fn archive_writer_and_reader_support_random_and_sequential_access()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(3)?;
-    writer.write_block(&block(
-        0,
-        b"alpha",
-        PreProcessingStrategy::None,
-        CompressionAlgo::Lz4,
-    ))?;
-    writer.write_block(&block(
-        1,
-        b"beta",
-        PreProcessingStrategy::Text(TextStrategy::Bwt),
-        CompressionAlgo::Lz4,
-    ))?;
-    writer.write_block(&block(
-        2,
-        b"gamma",
-        PreProcessingStrategy::Image(ImageStrategy::Paeth),
-        CompressionAlgo::Lz4,
-    ))?;
+    writer.write_block(&block(0, b"alpha", CompressionAlgo::Lz4))?;
+    writer.write_block(&block(1, b"beta", CompressionAlgo::Lz4))?;
+    writer.write_block(&block(2, b"gamma", CompressionAlgo::Lz4))?;
     let archive = writer.write_footer()?;
 
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
@@ -195,30 +134,15 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
     writer.write_global_header(3)?;
 
     assert_eq!(
-        writer.push_block(block(
-            2,
-            b"third",
-            PreProcessingStrategy::None,
-            CompressionAlgo::Lz4
-        ))?,
+        writer.push_block(block(2, b"third", CompressionAlgo::Lz4))?,
         0
     );
     assert_eq!(
-        writer.push_block(block(
-            0,
-            b"first",
-            PreProcessingStrategy::None,
-            CompressionAlgo::Lz4
-        ))?,
+        writer.push_block(block(0, b"first", CompressionAlgo::Lz4))?,
         1
     );
     assert_eq!(
-        writer.push_block(block(
-            1,
-            b"second",
-            PreProcessingStrategy::None,
-            CompressionAlgo::Lz4
-        ))?,
+        writer.push_block(block(1, b"second", CompressionAlgo::Lz4))?,
         2
     );
 
@@ -242,24 +166,9 @@ fn seekable_archive_writer_streams_payload_and_round_trips()
     let cursor = Cursor::new(Vec::new());
     let mut writer = SeekableArchiveWriter::new(cursor);
     writer.write_global_header(3)?;
-    writer.write_block(&block(
-        0,
-        b"alpha",
-        PreProcessingStrategy::None,
-        CompressionAlgo::Lz4,
-    ))?;
-    writer.write_block(&block(
-        1,
-        b"beta",
-        PreProcessingStrategy::Text(TextStrategy::Bwt),
-        CompressionAlgo::Lz4,
-    ))?;
-    writer.write_block(&block(
-        2,
-        b"gamma",
-        PreProcessingStrategy::Image(ImageStrategy::Paeth),
-        CompressionAlgo::Lz4,
-    ))?;
+    writer.write_block(&block(0, b"alpha", CompressionAlgo::Lz4))?;
+    writer.write_block(&block(1, b"beta", CompressionAlgo::Lz4))?;
+    writer.write_block(&block(2, b"gamma", CompressionAlgo::Lz4))?;
 
     let archive = writer.write_footer()?.into_inner();
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
@@ -274,12 +183,7 @@ fn seekable_archive_writer_streams_payload_and_round_trips()
 fn reader_ignores_global_crc_mismatch() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(1)?;
-    writer.write_block(&block(
-        0,
-        b"payload",
-        PreProcessingStrategy::None,
-        CompressionAlgo::Lz4,
-    ))?;
+    writer.write_block(&block(0, b"payload", CompressionAlgo::Lz4))?;
     let mut archive = writer.write_footer()?;
 
     let payload_offset = ArchiveReader::new(Cursor::new(archive.clone()))?
@@ -297,12 +201,7 @@ fn reader_ignores_block_crc_mismatch_on_read() -> Result<(), Box<dyn std::error:
     let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(1)?;
 
-    let mut corrupted_crc = block(
-        0,
-        b"payload",
-        PreProcessingStrategy::None,
-        CompressionAlgo::Lz4,
-    );
+    let mut corrupted_crc = block(0, b"payload", CompressionAlgo::Lz4);
     corrupted_crc.crc32 ^= 0x0101_0101;
     writer.write_block(&corrupted_crc)?;
     let archive = writer.write_footer()?;
@@ -318,12 +217,7 @@ fn reader_ignores_block_crc_mismatch_on_read() -> Result<(), Box<dyn std::error:
 fn read_block_rejects_out_of_bounds_index() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(1)?;
-    writer.write_block(&block(
-        0,
-        b"payload",
-        PreProcessingStrategy::None,
-        CompressionAlgo::Lz4,
-    ))?;
+    writer.write_block(&block(0, b"payload", CompressionAlgo::Lz4))?;
     let archive = writer.write_footer()?;
 
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;

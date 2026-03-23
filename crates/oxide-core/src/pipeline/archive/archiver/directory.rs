@@ -14,7 +14,7 @@ use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
-use crate::types::{Batch, ChunkEncodingPlan, CompressedBlock, FileFormat, Result};
+use crate::types::{Batch, ChunkEncodingPlan, CompressedBlock, Result};
 
 use super::super::telemetry::*;
 use super::super::types::*;
@@ -35,35 +35,20 @@ where
     F: FnOnce(W, ArchiveManifest, usize) -> AW + Send + 'static,
 {
     let mut stage_timings = StageTimings::default();
-    let preserve_boundaries = config.performance.preserve_directory_format_boundaries;
 
     let discovery_started = Instant::now();
     let discovery = directory::discover_directory_tree(root)?;
     stage_timings.discovery += discovery_started.elapsed();
     let block_size = config.target_block_size;
-    let format_probe_started = Instant::now();
-    let file_probe_plans = directory::detect_file_probe_plans(
-        &discovery,
-        DIRECTORY_FORMAT_PROBE_LIMIT,
-        config.performance.producer_threads,
-    )?;
-    stage_timings.format_probe += format_probe_started.elapsed();
-    let file_formats = file_probe_plans
-        .iter()
-        .map(|plan| plan.format)
-        .collect::<Vec<_>>();
+    let file_probe_plans =
+        directory::detect_file_probe_plans(&discovery, config.performance.producer_threads)?;
     let file_force_raw_storage = file_probe_plans
         .iter()
         .map(|plan| plan.force_raw_storage)
         .collect::<Vec<_>>();
 
-    let block_count = directory::estimate_directory_block_count(
-        &discovery,
-        &file_formats,
-        &file_force_raw_storage,
-        block_size,
-        preserve_boundaries,
-    )?;
+    let block_count =
+        directory::estimate_directory_block_count(&discovery, &file_force_raw_storage, block_size)?;
     let manifest = directory::manifest_from_discovery(&discovery)?;
     let input_bytes_total = discovery.input_bytes_total;
     let manifest_bytes = manifest.encode()?.len();
@@ -84,7 +69,6 @@ where
     );
     let processing_totals = Arc::new(ProcessingThroughputTotals::default());
     let raw_fallback_enabled = config.performance.raw_fallback_enabled;
-    let skip_preprocessing = config.skip_preprocessing;
     let skip_compression = config.skip_compression;
     let worker_processing_totals = Arc::clone(&processing_totals);
     let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
@@ -92,7 +76,6 @@ where
             batch,
             pool,
             compression,
-            skip_preprocessing,
             skip_compression,
             raw_fallback_enabled,
             worker_processing_totals.as_ref(),
@@ -176,17 +159,13 @@ where
     let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
     let producer_root = discovery.root.clone();
     let producer_files = discovery.files.clone();
-    let producer_file_formats = file_formats;
     let producer_force_raw_storage = file_force_raw_storage;
     let producer_block_size = block_size;
     let producer_compression_plan = ChunkEncodingPlan::new(
         config.compression_algo,
         config.performance.compression_preset,
     )
-    .with_zstd_level(config.performance.zstd_level)
-    .with_preprocessing_profile(config.performance.preprocessing_profile.unwrap_or_else(|| {
-        crate::PreprocessingProfile::for_compression_preset(config.performance.compression_preset)
-    }));
+    .with_zstd_level(config.performance.zstd_level);
     let stream_read_buffer_size = config.performance.directory_stream_read_buffer_size.max(1);
     let producer_threads = config.performance.producer_threads.max(1);
     let mmap_threshold = config.performance.directory_mmap_threshold_bytes.max(1);
@@ -195,7 +174,6 @@ where
         let mut submitter = DirectoryBatchSubmitter::new_with_plan(
             producer_root,
             producer_block_size,
-            preserve_boundaries,
             producer_compression_plan,
         );
         let mut producer_read = Duration::ZERO;
@@ -262,11 +240,6 @@ where
         let mut read_buffer = vec![0u8; stream_read_buffer_size];
         for (file_index, file) in producer_files.iter().enumerate() {
             let force_raw_storage = producer_force_raw_storage[file_index];
-            let file_format = if force_raw_storage {
-                FileFormat::Common
-            } else {
-                producer_file_formats[file_index]
-            };
             if let Some(prefetch_tx) = prefetch_request_tx.as_ref() {
                 while next_prefetch < producer_files.len()
                     && next_prefetch <= file_index.saturating_add(prefetch_window)
@@ -311,20 +284,15 @@ where
                 producer_read += prefetched_file.read_elapsed;
                 match prefetched_file.payload {
                     PrefetchPayload::Owned(data) => {
-                        submitter.push_bytes_with_hint(
-                            &data,
-                            file_format,
-                            force_raw_storage,
-                            |batch| submit_batch(batch),
-                        )?;
+                        submitter
+                            .push_bytes(&data, force_raw_storage, |batch| submit_batch(batch))?;
                     }
                     PrefetchPayload::Mapped(mmap) => {
                         if let Some(map) = mmap.mapping() {
-                            submitter.push_mapped_with_hint(
+                            submitter.push_mapped(
                                 map,
                                 0,
                                 mmap.len(),
-                                file_format,
                                 force_raw_storage,
                                 |batch| submit_batch(batch),
                             )?;
@@ -335,14 +303,9 @@ where
                 let read_started = Instant::now();
                 let mmap = MmapInput::open(&file.full_path)?;
                 if let Some(map) = mmap.mapping() {
-                    submitter.push_mapped_with_hint(
-                        map,
-                        0,
-                        mmap.len(),
-                        file_format,
-                        force_raw_storage,
-                        |batch| submit_batch(batch),
-                    )?;
+                    submitter.push_mapped(map, 0, mmap.len(), force_raw_storage, |batch| {
+                        submit_batch(batch)
+                    })?;
                 }
                 producer_read += read_started.elapsed();
             } else {
@@ -355,12 +318,9 @@ where
                         break;
                     }
 
-                    submitter.push_bytes_with_hint(
-                        &read_buffer[..read],
-                        file_format,
-                        force_raw_storage,
-                        |batch| submit_batch(batch),
-                    )?;
+                    submitter.push_bytes(&read_buffer[..read], force_raw_storage, |batch| {
+                        submit_batch(batch)
+                    })?;
                 }
             }
 
@@ -865,17 +825,11 @@ fn fail_directory_queueing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompressionAlgo, PreProcessingStrategy};
+    use crate::CompressionAlgo;
     use std::sync::{Arc, Mutex};
 
     fn block(id: usize) -> CompressedBlock {
-        CompressedBlock::new(
-            id,
-            vec![id as u8],
-            PreProcessingStrategy::None,
-            CompressionAlgo::Lz4,
-            1,
-        )
+        CompressedBlock::new(id, vec![id as u8], CompressionAlgo::Lz4, 1)
     }
 
     #[test]

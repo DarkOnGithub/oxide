@@ -4,13 +4,10 @@ use std::thread;
 use std::time::Duration;
 
 use bytes::Bytes;
-use oxide_core::{
-    Batch, BufferPool, CompressedBlock, CompressionAlgo, FileFormat, PreProcessingStrategy,
-    WorkerPool,
-};
+use oxide_core::{Batch, BufferPool, CompressedBlock, CompressionAlgo, WorkerPool};
 
 fn make_batch(id: usize, data: Vec<u8>) -> Batch {
-    Batch::with_hint(id, "synthetic.bin", Bytes::from(data), FileFormat::Binary)
+    Batch::new(id, "synthetic.bin", Bytes::from(data))
 }
 
 #[test]
@@ -24,7 +21,6 @@ fn worker_pool_processes_all_batches() -> Result<(), Box<dyn std::error::Error>>
         Ok(CompressedBlock::new(
             batch.id,
             scratch.to_vec(),
-            PreProcessingStrategy::None,
             compression,
             batch.len() as u64,
         ))
@@ -44,7 +40,6 @@ fn worker_pool_processes_all_batches() -> Result<(), Box<dyn std::error::Error>>
         assert_eq!(block.id, idx);
         assert_eq!(block.data.as_slice(), expected_payloads[idx].as_slice());
         assert_eq!(block.compression, CompressionAlgo::Lz4);
-        assert_eq!(block.pre_proc, PreProcessingStrategy::None);
         assert!(block.verify_crc32());
     }
 
@@ -75,13 +70,11 @@ fn worker_pool_balances_mixed_workloads() -> Result<(), Box<dyn std::error::Erro
             .expect("seen set mutex poisoned")
             .insert(worker_id);
 
-        // Simulate uneven task costs to exercise work stealing.
         thread::sleep(Duration::from_millis((batch.id % 4) as u64));
 
         Ok(CompressedBlock::new(
             batch.id,
             batch.to_owned().to_vec(),
-            PreProcessingStrategy::None,
             compression,
             batch.len() as u64,
         ))
@@ -120,7 +113,6 @@ fn shutdown_rejects_new_work_and_drains_existing_tasks() -> Result<(), Box<dyn s
         Ok(CompressedBlock::new(
             batch.id,
             batch.to_owned().to_vec(),
-            PreProcessingStrategy::None,
             compression,
             batch.len() as u64,
         ))
