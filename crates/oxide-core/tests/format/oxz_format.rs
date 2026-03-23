@@ -11,7 +11,11 @@ fn block(id: usize, payload: &[u8], compression: CompressionAlgo) -> oxide_core:
 
 #[test]
 fn compression_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let algorithms = [CompressionAlgo::Lz4, CompressionAlgo::Zstd];
+    let algorithms = [
+        CompressionAlgo::Lz4,
+        CompressionAlgo::Zstd,
+        CompressionAlgo::Lzma,
+    ];
 
     for algorithm in algorithms {
         let flags = algorithm.to_flags();
@@ -74,7 +78,11 @@ fn block_header_round_trip_preserves_raw_passthrough() -> Result<(), Box<dyn std
 
 #[test]
 fn compression_meta_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    for algo in [CompressionAlgo::Lz4, CompressionAlgo::Zstd] {
+    for algo in [
+        CompressionAlgo::Lz4,
+        CompressionAlgo::Zstd,
+        CompressionAlgo::Lzma,
+    ] {
         let meta = CompressionMeta::new(algo, CompressionPreset::Fast, true);
         let encoded = meta.to_flags();
         let decoded = CompressionMeta::from_flags(encoded)?;

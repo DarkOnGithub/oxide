@@ -1,6 +1,7 @@
 use crate::{CompressionAlgo, CompressionPreset, Result};
 
 pub mod lz4;
+pub mod lzma;
 pub(crate) mod scratch;
 pub mod zstd;
 
@@ -63,6 +64,7 @@ pub(crate) fn apply_compression_request_with_scratch(
         CompressionAlgo::Lz4 => {
             lz4::apply_with_scratch(request.data, request.preset, scratch.lz4())
         }
+        CompressionAlgo::Lzma => lzma::apply(request.data, request.preset),
         CompressionAlgo::Zstd => zstd::apply_with_scratch(
             request.data,
             request.preset,
@@ -88,6 +90,7 @@ pub(crate) fn reverse_compression_request_with_scratch(
 ) -> Result<Vec<u8>> {
     match request.algo {
         CompressionAlgo::Lz4 => lz4::reverse(request.data),
+        CompressionAlgo::Lzma => lzma::reverse(request.data),
         CompressionAlgo::Zstd => {
             zstd::reverse_with_scratch(request.data, request.raw_len, scratch.zstd())
         }
