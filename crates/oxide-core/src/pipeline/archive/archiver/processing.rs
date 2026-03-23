@@ -6,6 +6,37 @@ use crate::core::WorkerScratchArena;
 use crate::pipeline::archive::types::ProcessingThroughputTotals;
 use crate::types::{Batch, CompressedBlock, CompressedPayload, CompressionAlgo, Result};
 
+const INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN: usize = 32 * 1024;
+const INCOMPRESSIBLE_PROBE_SAMPLE_LEN: usize = 16 * 1024;
+
+#[inline]
+fn should_skip_full_compression_probe(source_len: usize) -> bool {
+    source_len >= INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN
+}
+
+fn is_likely_incompressible_sample(
+    source: &[u8],
+    plan: crate::types::ChunkEncodingPlan,
+    scratch: &mut WorkerScratchArena,
+) -> Result<bool> {
+    let sample_len = source.len().min(INCOMPRESSIBLE_PROBE_SAMPLE_LEN);
+    if sample_len == 0 {
+        return Ok(false);
+    }
+
+    let probe = apply_compression_request_with_scratch(
+        CompressionRequest {
+            data: &source[..sample_len],
+            algo: plan.algo,
+            preset: plan.preset,
+            zstd_level: plan.zstd_level,
+        },
+        scratch.compression(),
+    )?;
+
+    Ok(probe.len() >= sample_len)
+}
+
 pub fn process_batch(
     batch: Batch,
     pool: &BufferPool,
@@ -27,6 +58,22 @@ pub fn process_batch(
     let source = data.as_slice();
 
     if force_raw_storage {
+        processing_totals.record(source_len as u64, std::time::Duration::ZERO);
+        return Ok(CompressedBlock::with_chunk_encoding(
+            id,
+            stream_id,
+            CompressedPayload::from_batch_data_in_pool(data, pool),
+            plan,
+            true,
+            source_len as u64,
+        ));
+    }
+
+    if raw_fallback_enabled
+        && !skip_compression
+        && should_skip_full_compression_probe(source_len)
+        && is_likely_incompressible_sample(source, plan, scratch)?
+    {
         processing_totals.record(source_len as u64, std::time::Duration::ZERO);
         return Ok(CompressedBlock::with_chunk_encoding(
             id,
@@ -88,7 +135,9 @@ pub fn select_stored_payload<'a>(
 mod tests {
     use bytes::Bytes;
 
-    use super::process_batch;
+    use super::{
+        INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN, is_likely_incompressible_sample, process_batch,
+    };
     use crate::buffer::BufferPool;
     use crate::core::WorkerScratchArena;
     use crate::pipeline::archive::types::ProcessingThroughputTotals;
@@ -141,5 +190,37 @@ mod tests {
 
         assert!(block.raw_passthrough);
         assert_eq!(block.data.as_slice(), b"banana bandana banana");
+    }
+
+    #[test]
+    fn incompressible_probe_identifies_random_like_data() {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let sample = (0..INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN)
+            .map(|_| {
+                state ^= state << 7;
+                state ^= state >> 9;
+                state ^= state << 8;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4, CompressionPreset::Default);
+        let mut scratch = WorkerScratchArena::new();
+
+        let probe = is_likely_incompressible_sample(&sample, plan, &mut scratch)
+            .expect("probe should succeed");
+
+        assert!(probe);
+    }
+
+    #[test]
+    fn incompressible_probe_keeps_repetitive_data_compressible() {
+        let sample = vec![b'a'; INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN];
+        let plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4, CompressionPreset::Default);
+        let mut scratch = WorkerScratchArena::new();
+
+        let probe = is_likely_incompressible_sample(&sample, plan, &mut scratch)
+            .expect("probe should succeed");
+
+        assert!(!probe);
     }
 }

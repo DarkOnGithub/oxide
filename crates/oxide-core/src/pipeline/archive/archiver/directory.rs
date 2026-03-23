@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::WorkerPool;
-use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE};
+use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE, ReorderBuffer};
 use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
@@ -153,8 +153,7 @@ where
     let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
     let mut raw_passthrough_blocks = 0u64;
     let mut writer_queue_peak = 0usize;
-    let mut pending_results = BTreeMap::<usize, CompressedBlock>::new();
-    let mut next_writer_id = 0usize;
+    let mut pending_results = ReorderBuffer::<CompressedBlock>::with_limit(max_inflight_blocks);
 
     let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
     let producer_root = discovery.root.clone();
@@ -385,7 +384,6 @@ where
             &writer_tx,
             &writer_failure,
             &mut pending_results,
-            &mut next_writer_id,
             &mut completed_bytes,
             &mut first_error,
             &mut raw_passthrough_blocks,
@@ -445,7 +443,6 @@ where
                             &writer_tx,
                             &writer_failure,
                             &mut pending_results,
-                            &mut next_writer_id,
                             &mut completed_bytes,
                             &mut first_error,
                             &mut raw_passthrough_blocks,
@@ -469,7 +466,6 @@ where
                     &writer_tx,
                     &writer_failure,
                     &mut pending_results,
-                    &mut next_writer_id,
                     &mut completed_bytes,
                     &mut first_error,
                     &mut raw_passthrough_blocks,
@@ -562,7 +558,6 @@ where
             &writer_tx,
             &writer_failure,
             &mut pending_results,
-            &mut next_writer_id,
             &mut completed_bytes,
             &mut first_error,
             &mut raw_passthrough_blocks,
@@ -667,8 +662,7 @@ fn drain_worker_results(
     max_results: usize,
     writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
     writer_failure: &Arc<Mutex<Option<String>>>,
-    pending_results: &mut BTreeMap<usize, CompressedBlock>,
-    next_writer_id: &mut usize,
+    pending_results: &mut ReorderBuffer<CompressedBlock>,
     completed_bytes: &mut u64,
     first_error: &mut Option<crate::OxideError>,
     raw_passthrough_blocks: &mut u64,
@@ -686,7 +680,6 @@ fn drain_worker_results(
                     writer_tx,
                     writer_failure,
                     pending_results,
-                    next_writer_id,
                     completed_bytes,
                     first_error,
                     raw_passthrough_blocks,
@@ -707,8 +700,7 @@ fn recv_worker_result(
     result: std::result::Result<Result<CompressedBlock>, crossbeam_channel::RecvError>,
     writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
     writer_failure: &Arc<Mutex<Option<String>>>,
-    pending_results: &mut BTreeMap<usize, CompressedBlock>,
-    next_writer_id: &mut usize,
+    pending_results: &mut ReorderBuffer<CompressedBlock>,
     completed_bytes: &mut u64,
     first_error: &mut Option<crate::OxideError>,
     raw_passthrough_blocks: &mut u64,
@@ -724,7 +716,6 @@ fn recv_worker_result(
                 writer_tx,
                 writer_failure,
                 pending_results,
-                next_writer_id,
                 completed_bytes,
                 first_error,
                 raw_passthrough_blocks,
@@ -745,8 +736,7 @@ pub fn record_result_to_writer_queue(
     result: Result<CompressedBlock>,
     writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
     writer_failure: &Arc<Mutex<Option<String>>>,
-    pending_results: &mut BTreeMap<usize, CompressedBlock>,
-    next_writer_id: &mut usize,
+    pending_results: &mut ReorderBuffer<CompressedBlock>,
     completed_bytes: &mut u64,
     first_error: &mut Option<crate::OxideError>,
     raw_passthrough_blocks: &mut u64,
@@ -764,21 +754,17 @@ pub fn record_result_to_writer_queue(
                 *retired_count += 1;
                 return;
             }
-            let block_id = block.id;
-            if pending_results.insert(block_id, block).is_some() {
-                fail_directory_queueing(
-                    first_error,
-                    pending_results,
-                    retired_count,
-                    crate::OxideError::InvalidFormat(
-                        "duplicate block id received from compression workers",
-                    ),
-                );
-                *retired_count += 1;
-                return;
-            }
 
-            while let Some(block) = pending_results.remove(next_writer_id) {
+            let ready = match pending_results.push(block.id, block) {
+                Ok(ready) => ready,
+                Err(error) => {
+                    fail_directory_queueing(first_error, pending_results, retired_count, error);
+                    *retired_count += 1;
+                    return;
+                }
+            };
+
+            for block in ready {
                 let send_started = Instant::now();
                 let send_result = writer_tx.send(block);
                 *writer_enqueue_blocked += send_started.elapsed();
@@ -799,7 +785,6 @@ pub fn record_result_to_writer_queue(
                 }
                 *writer_queue_peak = (*writer_queue_peak).max(writer_tx.len());
                 *retired_count += 1;
-                *next_writer_id += 1;
             }
         }
         Err(error) => {
@@ -811,13 +796,12 @@ pub fn record_result_to_writer_queue(
 
 fn fail_directory_queueing(
     first_error: &mut Option<crate::OxideError>,
-    pending_results: &mut BTreeMap<usize, CompressedBlock>,
+    pending_results: &mut ReorderBuffer<CompressedBlock>,
     retired_count: &mut usize,
     error: crate::OxideError,
 ) {
     if first_error.is_none() {
-        *retired_count += pending_results.len();
-        pending_results.clear();
+        *retired_count += pending_results.clear();
     }
     first_error.get_or_insert(error);
 }
@@ -836,8 +820,7 @@ mod tests {
     fn worker_results_are_forwarded_in_order() {
         let (writer_tx, writer_rx) = bounded::<CompressedBlock>(4);
         let writer_failure = Arc::new(Mutex::new(None::<String>));
-        let mut pending_results = BTreeMap::new();
-        let mut next_writer_id = 0usize;
+        let mut pending_results = ReorderBuffer::with_limit(4);
         let mut completed_bytes = 0u64;
         let mut first_error = None;
         let mut raw_passthrough_blocks = 0u64;
@@ -850,7 +833,6 @@ mod tests {
             &writer_tx,
             &writer_failure,
             &mut pending_results,
-            &mut next_writer_id,
             &mut completed_bytes,
             &mut first_error,
             &mut raw_passthrough_blocks,
@@ -863,7 +845,6 @@ mod tests {
             &writer_tx,
             &writer_failure,
             &mut pending_results,
-            &mut next_writer_id,
             &mut completed_bytes,
             &mut first_error,
             &mut raw_passthrough_blocks,
@@ -876,7 +857,6 @@ mod tests {
             &writer_tx,
             &writer_failure,
             &mut pending_results,
-            &mut next_writer_id,
             &mut completed_bytes,
             &mut first_error,
             &mut raw_passthrough_blocks,
@@ -886,8 +866,7 @@ mod tests {
         );
 
         assert!(first_error.is_none());
-        assert!(pending_results.is_empty());
-        assert_eq!(next_writer_id, 3);
+        assert_eq!(pending_results.pending_len(), 0);
         assert_eq!(retired_count, 3);
         assert_eq!(completed_bytes, 3);
         assert_eq!(writer_rx.recv().unwrap().id, 0);
@@ -899,8 +878,7 @@ mod tests {
     fn writer_failure_releases_pending_results_and_surfaces_cause() {
         let (writer_tx, writer_rx) = bounded::<CompressedBlock>(1);
         let writer_failure = Arc::new(Mutex::new(Some("I/O error: disk full".to_string())));
-        let mut pending_results = BTreeMap::new();
-        let mut next_writer_id = 0usize;
+        let mut pending_results = ReorderBuffer::with_limit(4);
         let mut completed_bytes = 0u64;
         let mut first_error = None;
         let mut raw_passthrough_blocks = 0u64;
@@ -913,7 +891,6 @@ mod tests {
             &writer_tx,
             &writer_failure,
             &mut pending_results,
-            &mut next_writer_id,
             &mut completed_bytes,
             &mut first_error,
             &mut raw_passthrough_blocks,
@@ -929,7 +906,6 @@ mod tests {
             &writer_tx,
             &writer_failure,
             &mut pending_results,
-            &mut next_writer_id,
             &mut completed_bytes,
             &mut first_error,
             &mut raw_passthrough_blocks,
@@ -938,7 +914,7 @@ mod tests {
             &mut retired_count,
         );
 
-        assert!(pending_results.is_empty());
+        assert_eq!(pending_results.pending_len(), 0);
         assert_eq!(retired_count, 2);
         assert!(matches!(
             first_error,
