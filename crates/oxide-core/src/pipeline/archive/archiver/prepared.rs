@@ -1,10 +1,9 @@
-use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::core::{WorkerPool, WorkerPoolHandle};
-use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE};
+use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE, ReorderBuffer};
 use crate::pipeline::directory;
 use crate::pipeline::types::ArchivePipelineConfig;
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
@@ -72,8 +71,8 @@ where
     archive_writer
         .write_global_header_with_flags(block_count, directory::source_kind_flags(source_kind))?;
     let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
-    let mut pending_write = BTreeMap::<usize, CompressedBlock>::new();
-    let mut next_write_id = 0usize;
+    let mut pending_write = ReorderBuffer::<CompressedBlock>::with_limit(max_inflight_blocks);
+    let mut written_count = 0usize;
 
     let started_at = Instant::now();
     let mut last_emit_at = Instant::now();
@@ -105,7 +104,7 @@ where
             &handle,
             &mut archive_writer,
             &mut pending_write,
-            &mut next_write_id,
+            &mut written_count,
             &mut output_bytes_written,
             &mut completed_bytes,
             &mut first_error,
@@ -148,7 +147,7 @@ where
                 result_wait_timeout,
                 &mut archive_writer,
                 &mut pending_write,
-                &mut next_write_id,
+                &mut written_count,
                 &mut output_bytes_written,
                 &mut completed_bytes,
                 &mut first_error,
@@ -180,7 +179,7 @@ where
     if let Some(error) = first_error {
         return Err(error);
     }
-    if next_write_id != submitted_count || !pending_write.is_empty() {
+    if written_count != submitted_count || pending_write.pending_len() > 0 {
         return Err(crate::OxideError::InvalidFormat(
             "writer has pending blocks after completion",
         ));
@@ -229,8 +228,8 @@ where
 pub fn drain_results_to_writer<AW: ArchiveBlockWriter>(
     handle: &WorkerPoolHandle,
     archive_writer: &mut AW,
-    pending_write: &mut BTreeMap<usize, CompressedBlock>,
-    next_write_id: &mut usize,
+    pending_write: &mut ReorderBuffer<CompressedBlock>,
+    written_count: &mut usize,
     output_bytes_written: &mut u64,
     completed_bytes: &mut u64,
     first_error: &mut Option<crate::OxideError>,
@@ -247,7 +246,7 @@ pub fn drain_results_to_writer<AW: ArchiveBlockWriter>(
                 result,
                 archive_writer,
                 pending_write,
-                next_write_id,
+                written_count,
                 output_bytes_written,
                 completed_bytes,
                 first_error,
@@ -268,8 +267,8 @@ pub fn recv_result_to_writer<AW: ArchiveBlockWriter>(
     handle: &WorkerPoolHandle,
     timeout: Duration,
     archive_writer: &mut AW,
-    pending_write: &mut BTreeMap<usize, CompressedBlock>,
-    next_write_id: &mut usize,
+    pending_write: &mut ReorderBuffer<CompressedBlock>,
+    written_count: &mut usize,
     output_bytes_written: &mut u64,
     completed_bytes: &mut u64,
     first_error: &mut Option<crate::OxideError>,
@@ -283,7 +282,7 @@ pub fn recv_result_to_writer<AW: ArchiveBlockWriter>(
             result,
             archive_writer,
             pending_write,
-            next_write_id,
+            written_count,
             output_bytes_written,
             completed_bytes,
             first_error,
@@ -301,8 +300,8 @@ pub fn recv_result_to_writer<AW: ArchiveBlockWriter>(
 pub fn record_result_to_writer<AW: ArchiveBlockWriter>(
     result: Result<CompressedBlock>,
     archive_writer: &mut AW,
-    pending_write: &mut BTreeMap<usize, CompressedBlock>,
-    next_write_id: &mut usize,
+    pending_write: &mut ReorderBuffer<CompressedBlock>,
+    written_count: &mut usize,
     output_bytes_written: &mut u64,
     completed_bytes: &mut u64,
     first_error: &mut Option<crate::OxideError>,
@@ -320,16 +319,16 @@ pub fn record_result_to_writer<AW: ArchiveBlockWriter>(
                 return;
             }
 
-            let block_id = block.id;
-            if pending_write.insert(block_id, block).is_some() {
-                first_error.get_or_insert(crate::OxideError::InvalidFormat(
-                    "duplicate block id received from worker",
-                ));
-                return;
-            }
-            *pending_write_peak = (*pending_write_peak).max(pending_write.len());
+            let ready = match pending_write.push(block.id, block) {
+                Ok(ready) => ready,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    return;
+                }
+            };
+            *pending_write_peak = (*pending_write_peak).max(pending_write.pending_len());
 
-            while let Some(ready) = pending_write.remove(next_write_id) {
+            for ready in ready {
                 *output_bytes_written =
                     (*output_bytes_written).saturating_add(ready.data.len() as u64);
                 let write_started = Instant::now();
@@ -339,7 +338,7 @@ pub fn record_result_to_writer<AW: ArchiveBlockWriter>(
                     break;
                 }
                 *writer_time += write_started.elapsed();
-                *next_write_id += 1;
+                *written_count += 1;
             }
         }
         Err(error) => {

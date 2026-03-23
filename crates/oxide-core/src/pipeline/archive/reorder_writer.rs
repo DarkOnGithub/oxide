@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crate::format::ReorderBuffer;
@@ -35,9 +34,7 @@ pub struct ReorderWriterStats {
 #[derive(Debug)]
 pub struct BoundedReorderWriter<W, T = Vec<u8>> {
     writer: W,
-    reorder: ReorderBuffer<T>,
-    pending_sizes: BTreeMap<usize, usize>,
-    next_write_id: usize,
+    reorder: ReorderBuffer<(T, usize)>,
     pending_bytes: u64,
     stats: ReorderWriterStats,
 }
@@ -47,28 +44,18 @@ impl<W: OrderedChunkWriter, T: AsRef<[u8]>> BoundedReorderWriter<W, T> {
         Self {
             writer,
             reorder: ReorderBuffer::with_limit(max_pending.max(1)),
-            pending_sizes: BTreeMap::new(),
-            next_write_id: 0,
             pending_bytes: 0,
             stats: ReorderWriterStats::default(),
         }
     }
 
     pub fn push(&mut self, id: usize, item: T) -> Result<ReorderPushStats> {
-        if self.pending_sizes.contains_key(&id) {
-            return Err(crate::OxideError::InvalidFormat(
-                "duplicate decoded block id in reorder writer",
-            ));
-        }
-
         let item_len = item.as_ref().len();
-        self.pending_sizes.insert(id, item_len);
         self.pending_bytes = self.pending_bytes.saturating_add(item_len as u64);
 
-        let ready = match self.reorder.push(id, item) {
+        let ready = match self.reorder.push(id, (item, item_len)) {
             Ok(ready) => ready,
             Err(error) => {
-                self.pending_sizes.remove(&id);
                 self.pending_bytes = self.pending_bytes.saturating_sub(item_len as u64);
                 return Err(error);
             }
@@ -86,21 +73,12 @@ impl<W: OrderedChunkWriter, T: AsRef<[u8]>> BoundedReorderWriter<W, T> {
             ..ReorderPushStats::default()
         };
 
-        for chunk in ready {
-            let expected_id = self.next_write_id;
-            let len =
-                self.pending_sizes
-                    .remove(&expected_id)
-                    .ok_or(crate::OxideError::InvalidFormat(
-                        "decoded reorder pending state drift detected",
-                    ))?;
+        for (chunk, len) in ready {
             self.pending_bytes = self.pending_bytes.saturating_sub(len as u64);
 
             let write_started = Instant::now();
             self.writer.write_chunk(chunk.as_ref())?;
             let write_elapsed = write_started.elapsed();
-
-            self.next_write_id = self.next_write_id.saturating_add(1);
 
             push_stats.wrote_blocks = push_stats.wrote_blocks.saturating_add(1);
             push_stats.wrote_bytes = push_stats.wrote_bytes.saturating_add(len as u64);
@@ -129,12 +107,12 @@ impl<W: OrderedChunkWriter, T: AsRef<[u8]>> BoundedReorderWriter<W, T> {
     }
 
     pub fn finish(self, expected_blocks: usize) -> Result<(W, ReorderWriterStats)> {
-        if self.next_write_id != expected_blocks {
+        if self.stats.wrote_blocks != expected_blocks {
             return Err(crate::OxideError::InvalidFormat(
                 "decoded writer did not emit all expected blocks",
             ));
         }
-        if !self.pending_sizes.is_empty() || self.reorder.pending_len() > 0 {
+        if self.reorder.pending_len() > 0 || self.pending_bytes != 0 {
             return Err(crate::OxideError::InvalidFormat(
                 "decoded reorder writer closed with pending blocks",
             ));
