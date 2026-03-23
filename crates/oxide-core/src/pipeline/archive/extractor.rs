@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, TryRecvError, bounded};
 
+use crate::compression::CompressionScratchArena;
 use crate::core::WorkerRuntimeSnapshot;
 use crate::format::{ArchiveMetadata, ArchiveReader, ChunkDescriptor, GlobalHeader};
 use crate::telemetry::{ReportValue, RunTelemetryOptions, TelemetrySink};
@@ -491,11 +492,16 @@ impl Extractor {
                 let started = Instant::now();
                 let mut tasks_completed = 0usize;
                 let mut busy = Duration::ZERO;
+                let mut scratch = CompressionScratchArena::new();
                 local_runtime.mark_worker_started(worker_id);
 
                 while let Ok(task) = local_task_rx.recv() {
                     let decode_started = Instant::now();
-                    let decoded = decode_block_payload(task.header, task.block_data);
+                    let decoded = decode_block_payload_with_scratch(
+                        task.header,
+                        task.block_data,
+                        &mut scratch,
+                    );
                     let busy_elapsed = decode_started.elapsed();
                     busy += busy_elapsed;
                     local_runtime.record_worker_task(worker_id, busy_elapsed);
@@ -855,15 +861,27 @@ pub fn join_decode_workers(
 }
 
 pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Result<Vec<u8>> {
+    let mut scratch = CompressionScratchArena::new();
+    decode_block_payload_with_scratch(header, block_data, &mut scratch)
+}
+
+fn decode_block_payload_with_scratch(
+    header: ChunkDescriptor,
+    block_data: Vec<u8>,
+    scratch: &mut CompressionScratchArena,
+) -> Result<Vec<u8>> {
     let compression_meta = header.compression_meta()?;
     let decoded = if compression_meta.raw_passthrough {
         block_data
     } else {
-        crate::compression::reverse_compression_request(crate::compression::DecompressionRequest {
-            data: &block_data,
-            algo: compression_meta.algo,
-            raw_len: Some(header.raw_len as usize),
-        })?
+        crate::compression::reverse_compression_request_with_scratch(
+            crate::compression::DecompressionRequest {
+                data: &block_data,
+                algo: compression_meta.algo,
+                raw_len: Some(header.raw_len as usize),
+            },
+            scratch,
+        )?
     };
     if decoded.len() != header.raw_len as usize {
         return Err(crate::OxideError::InvalidFormat(
