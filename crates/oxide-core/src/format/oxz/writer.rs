@@ -7,9 +7,9 @@ use crate::types::duration_to_us;
 use crate::{ArchiveSourceKind, CompressedBlock, OxideError, Result};
 
 use super::{
-    encode_chunk_table, ArchiveManifest, ArchiveMetadata, Footer, GlobalHeader, ReorderBuffer,
-    ARCHIVE_METADATA_SIZE, CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE,
-    DEFAULT_REORDER_PENDING_LIMIT, GLOBAL_HEADER_SIZE,
+    ARCHIVE_METADATA_SIZE, ArchiveManifest, ArchiveMetadata, CHUNK_DESCRIPTOR_SIZE,
+    CHUNK_TABLE_HEADER_SIZE, DEFAULT_REORDER_PENDING_LIMIT, Footer, GLOBAL_HEADER_SIZE,
+    GlobalHeader, ReorderBuffer, encode_chunk_table,
 };
 
 #[derive(Debug)]

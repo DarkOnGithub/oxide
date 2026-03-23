@@ -6,8 +6,8 @@ use crate::types::duration_to_us;
 use crate::{ArchiveSourceKind, OxideError, Result};
 
 use super::{
-    decode_chunk_table, ArchiveManifest, ArchiveMetadata, ChunkDescriptor, Footer, GlobalHeader,
-    ARCHIVE_METADATA_SIZE, CHUNK_TABLE_HEADER_SIZE, FOOTER_SIZE,
+    ARCHIVE_METADATA_SIZE, ArchiveManifest, ArchiveMetadata, CHUNK_TABLE_HEADER_SIZE,
+    ChunkDescriptor, FOOTER_SIZE, Footer, GlobalHeader, decode_chunk_table,
 };
 
 /// Reads OXZ archives and provides access to individual chunk payloads.
