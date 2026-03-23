@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SOURCE="./silesia_corpus"
-OXIDE="./target/release/oxide-cli"
+OXIDE="oxide"
 OXIDE_OUTPUT="silesia_corpus.oxz"
 SQUASHFS_OUTPUT="archive.sqfs"
 
@@ -11,7 +11,7 @@ OXIDE_EXTRACT_DIR="oxide_extract_out"
 SQUASHFS_EXTRACT_DIR="squashfs_extract_out"
 
 BENCHMARK_THREADS="${BENCHMARK_THREADS:-16}"
-BENCHMARK_PASSES="${BENCHMARK_PASSES:-2}"
+BENCHMARK_PASSES="${BENCHMARK_PASSES:-5}"
 BENCHMARK_SKIP_EXTRACT="${BENCHMARK_SKIP_EXTRACT:-1}"
 SOURCE_BYTES="$(du -sb "$SOURCE" | cut -f1)"
 
@@ -191,9 +191,8 @@ run_oxide() {
     "$OXIDE" archive "$SOURCE" \
     --output "$OXIDE_OUTPUT" \
     --preset "$mode" \
-    --skip-preprocessing \
     --block-size "$OXIDE_BLOCK_SIZE" \
-    --workers "$BENCHMARK_THREADS"
+    --workers "$BENCHMARK_THREADS" --skip-preprocessing 
 }
 
 run_oxide_extract() {

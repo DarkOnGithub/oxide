@@ -9,7 +9,6 @@ use std::sync::Arc;
 use crate::buffer::{BufferPool, PooledBuffer};
 use crate::checksum::compute_checksum;
 use crate::error::OxideError;
-use crate::preprocessing::PreprocessingMetadata;
 
 pub type Result<T> = std::result::Result<T, OxideError>;
 
@@ -27,11 +26,9 @@ pub struct Batch {
     pub id: usize,
     pub source_path: PathBuf,
     pub data: BatchData,
-    pub file_type_hint: FileFormat,
-    pub preprocessing_metadata: Option<PreprocessingMetadata>,
     pub stream_id: u32,
     pub compression_plan: ChunkEncodingPlan,
-    /// Whether this batch must be stored raw without preprocessing or compression.
+    /// Whether this batch must be stored raw without compression.
     pub force_raw_storage: bool,
 }
 
@@ -44,8 +41,6 @@ pub struct ChunkEncodingPlan {
     pub preset: CompressionPreset,
     /// Optional explicit zstd compression level used only by the encoder.
     pub zstd_level: Option<i32>,
-    /// Preprocessing profile used to select per-format strategies.
-    pub preprocessing_profile: PreprocessingProfile,
 }
 
 impl ChunkEncodingPlan {
@@ -55,7 +50,6 @@ impl ChunkEncodingPlan {
             algo,
             preset,
             zstd_level: None,
-            preprocessing_profile: PreprocessingProfile::for_compression_preset(preset),
         }
     }
 
@@ -64,16 +58,6 @@ impl ChunkEncodingPlan {
         self.zstd_level = zstd_level;
         self
     }
-
-    /// Attaches an explicit preprocessing profile override.
-    pub const fn with_preprocessing_profile(
-        mut self,
-        preprocessing_profile: PreprocessingProfile,
-    ) -> Self {
-        self.preprocessing_profile = preprocessing_profile;
-        self
-    }
-
     /// Builds compression metadata for the final stored payload.
     pub fn compression_meta(self, raw_passthrough: bool) -> CompressionMeta {
         CompressionMeta::new(self.algo, self.preset, raw_passthrough)
@@ -135,33 +119,6 @@ impl Batch {
             id,
             source_path: source_path.into(),
             data: BatchData::Owned(data),
-            file_type_hint: FileFormat::Common,
-            preprocessing_metadata: None,
-            stream_id: 0,
-            compression_plan: ChunkEncodingPlan::default(),
-            force_raw_storage: false,
-        }
-    }
-
-    /// Creates a new batch with an explicit file type hint.
-    ///
-    /// # Arguments
-    /// * `id` - Unique identifier for this batch
-    /// * `source_path` - Path to the source file
-    /// * `data` - The data bytes
-    /// * `file_type_hint` - Explicit file format hint
-    pub fn with_hint(
-        id: usize,
-        source_path: impl Into<PathBuf>,
-        data: Bytes,
-        file_type_hint: FileFormat,
-    ) -> Self {
-        Self {
-            id,
-            source_path: source_path.into(),
-            data: BatchData::Owned(data),
-            file_type_hint,
-            preprocessing_metadata: None,
             stream_id: 0,
             compression_plan: ChunkEncodingPlan::default(),
             force_raw_storage: false,
@@ -176,21 +133,17 @@ impl Batch {
     /// * `map` - The mapped region of the file
     /// * `start` - The start of the mapped region
     /// * `end` - The end of the mapped region
-    /// * `file_type_hint` - Explicit file format hint
     pub fn from_mapped(
         id: usize,
         source_path: impl Into<PathBuf>,
         map: Arc<Mmap>,
         start: usize,
         end: usize,
-        file_type_hint: FileFormat,
     ) -> Self {
         Self {
             id,
             source_path: source_path.into(),
             data: BatchData::Mapped { map, start, end },
-            file_type_hint,
-            preprocessing_metadata: None,
             stream_id: 0,
             compression_plan: ChunkEncodingPlan::default(),
             force_raw_storage: false,
@@ -436,9 +389,8 @@ impl CompressionMeta {
 
 /// A compressed data block with metadata.
 ///
-/// Compressed blocks store the compressed data along with information
-/// about the compression algorithm used, preprocessing strategy, and
-/// integrity checksum.
+/// Compressed blocks store the encoded payload, compression parameters, and
+/// integrity checksum needed to restore the original bytes.
 #[derive(Debug, Clone)]
 pub struct CompressedBlock {
     /// Unique identifier for this block.
@@ -447,8 +399,6 @@ pub struct CompressedBlock {
     pub stream_id: u32,
     /// The compressed (or raw) data bytes.
     pub data: CompressedPayload,
-    /// Preprocessing strategy applied before compression.
-    pub pre_proc: PreProcessingStrategy,
     /// Compression algorithm used.
     pub compression: CompressionAlgo,
     /// Preset used for compression.
@@ -463,24 +413,15 @@ pub struct CompressedBlock {
 
 impl CompressedBlock {
     /// Creates a new compressed block with a computed checksum.
-    ///
-    /// # Arguments
-    /// * `id` - Unique identifier for this block
-    /// * `data` - The compressed data
-    /// * `pre_proc` - Preprocessing strategy used
-    /// * `compression` - Compression algorithm used
-    /// * `original_len` - Original uncompressed length
     pub fn new(
         id: usize,
         data: impl Into<CompressedPayload>,
-        pre_proc: PreProcessingStrategy,
         compression: CompressionAlgo,
         original_len: u64,
     ) -> Self {
         Self::with_compression_meta(
             id,
             data,
-            pre_proc,
             CompressionMeta::new(compression, CompressionPreset::Default, false),
             original_len,
         )
@@ -490,7 +431,6 @@ impl CompressedBlock {
     pub fn with_compression_meta(
         id: usize,
         data: impl Into<CompressedPayload>,
-        pre_proc: PreProcessingStrategy,
         compression_meta: CompressionMeta,
         original_len: u64,
     ) -> Self {
@@ -500,7 +440,6 @@ impl CompressedBlock {
             stream_id: 0,
             crc32: compute_checksum(data.as_slice()),
             data,
-            pre_proc,
             compression: compression_meta.algo,
             compression_preset: compression_meta.preset,
             raw_passthrough: compression_meta.raw_passthrough,
@@ -513,7 +452,6 @@ impl CompressedBlock {
         id: usize,
         stream_id: u32,
         data: impl Into<CompressedPayload>,
-        pre_proc: PreProcessingStrategy,
         encoding_plan: ChunkEncodingPlan,
         raw_passthrough: bool,
         original_len: u64,
@@ -524,7 +462,6 @@ impl CompressedBlock {
             stream_id,
             crc32: compute_checksum(data.as_slice()),
             data,
-            pre_proc,
             compression: encoding_plan.algo,
             compression_preset: encoding_plan.preset,
             raw_passthrough,
@@ -547,167 +484,12 @@ impl CompressedBlock {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum FileFormat {
-    /// Plain text file
-    Text,
-    /// Binary data (executable, object code, etc.)
-    Binary,
-    /// Image file (PNG, JPEG, etc.)
-    Image,
-    /// Audio file (MP3, WAV, etc.)
-    Audio,
-    /// Common/generic format or unknown
-    Common,
-}
-
-/// Per-format preprocessing profile applied during archive creation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreprocessingProfile {
-    pub text: Option<TextStrategy>,
-    pub image: Option<ImageStrategy>,
-    pub audio: Option<AudioStrategy>,
-    pub binary: Option<BinaryStrategy>,
-}
-
-impl PreprocessingProfile {
-    /// Creates a new preprocessing profile.
-    pub const fn new(
-        text: Option<TextStrategy>,
-        image: Option<ImageStrategy>,
-        audio: Option<AudioStrategy>,
-        binary: Option<BinaryStrategy>,
-    ) -> Self {
-        Self {
-            text,
-            image,
-            audio,
-            binary,
-        }
-    }
-
-    /// Creates a profile with preprocessing disabled for every file type.
-    pub const fn disabled() -> Self {
-        Self::new(None, None, None, None)
-    }
-
-    /// Returns the built-in preprocessing profile for a compression preset.
-    pub const fn for_compression_preset(preset: CompressionPreset) -> Self {
-        match preset {
-            CompressionPreset::Fast => Self::disabled(),
-            CompressionPreset::Default => Self::new(
-                Some(TextStrategy::Bpe),
-                Some(ImageStrategy::YCoCgR),
-                Some(AudioStrategy::Lpc),
-                Some(BinaryStrategy::Bcj),
-            ),
-            CompressionPreset::High => Self::new(
-                Some(TextStrategy::Bwt),
-                Some(ImageStrategy::LocoI),
-                Some(AudioStrategy::Lpc),
-                Some(BinaryStrategy::Bcj),
-            ),
-        }
-    }
-}
-
-impl Default for PreprocessingProfile {
-    fn default() -> Self {
-        Self::disabled()
-    }
-}
-
-/// Preprocessing strategy applied before compression.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PreProcessingStrategy {
-    Text(TextStrategy),
-    Image(ImageStrategy),
-    Audio(AudioStrategy),
-    Binary(BinaryStrategy),
-    None,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TextStrategy {
-    /// Byte Pair Encoding for text compression
-    Bpe,
-    /// Burrows-Wheeler Transform
-    Bwt,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ImageStrategy {
-    /// YCoCg-R color space conversion
-    YCoCgR,
-    /// Paeth predictor (PNG-style)
-    Paeth,
-    /// LOCO-I predictor (JPEG-LS)
-    LocoI,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AudioStrategy {
-    /// Linear Predictive Coding
-    Lpc,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BinaryStrategy {
-    /// Branch Call Jump filter
-    Bcj,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompressionAlgo {
     /// LZ4 fast compression - Fast
     Lz4,
     /// Zstandard compression with tunable ratio/speed levels.
     Zstd,
-}
-
-impl PreProcessingStrategy {
-    /// Encodes the preprocessing strategy into OXZ strategy flags.
-    ///
-    /// Layout:
-    /// - Bits 0-2: category
-    /// - Bits 3-5: sub-strategy
-    /// - Bits 6-7: reserved
-    pub fn to_flags(&self) -> u8 {
-        match self {
-            Self::None => 0x00,
-            Self::Text(TextStrategy::Bpe) => 0x01,
-            Self::Text(TextStrategy::Bwt) => 0x01 | (1 << 3),
-            Self::Image(ImageStrategy::YCoCgR) => 0x02,
-            Self::Image(ImageStrategy::Paeth) => 0x02 | (1 << 3),
-            Self::Image(ImageStrategy::LocoI) => 0x02 | (2 << 3),
-            Self::Audio(AudioStrategy::Lpc) => 0x03,
-            Self::Binary(BinaryStrategy::Bcj) => 0x04,
-        }
-    }
-
-    /// Decodes OXZ strategy flags into a preprocessing strategy.
-    pub fn from_flags(flags: u8) -> Result<Self> {
-        if flags & 0b1100_0000 != 0 {
-            return Err(OxideError::InvalidFormat(
-                "invalid strategy flags reserved bits",
-            ));
-        }
-
-        let category = flags & 0x07;
-        let sub_strategy = (flags >> 3) & 0x07;
-
-        match (category, sub_strategy) {
-            (0x00, 0x00) => Ok(Self::None),
-            (0x01, 0x00) => Ok(Self::Text(TextStrategy::Bpe)),
-            (0x01, 0x01) => Ok(Self::Text(TextStrategy::Bwt)),
-            (0x02, 0x00) => Ok(Self::Image(ImageStrategy::YCoCgR)),
-            (0x02, 0x01) => Ok(Self::Image(ImageStrategy::Paeth)),
-            (0x02, 0x02) => Ok(Self::Image(ImageStrategy::LocoI)),
-            (0x03, 0x00) => Ok(Self::Audio(AudioStrategy::Lpc)),
-            (0x04, 0x00) => Ok(Self::Binary(BinaryStrategy::Bcj)),
-            _ => Err(OxideError::InvalidFormat("invalid strategy flags")),
-        }
-    }
 }
 
 impl CompressionAlgo {

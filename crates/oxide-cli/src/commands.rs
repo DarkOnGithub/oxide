@@ -28,11 +28,6 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         block_size,
         workers,
         compression,
-        skip_preprocessing,
-        text_preprocessing,
-        image_preprocessing,
-        audio_preprocessing,
-        binary_preprocessing,
         skip_compression,
         zstd_level,
         preset,
@@ -46,7 +41,6 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         producer_threads,
         directory_mmap_threshold,
         writer_queue_blocks,
-        preserve_format_boundaries,
         result_wait_ms,
         telemetry_details,
     } = args;
@@ -55,11 +49,6 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         preset.as_deref(),
         ArchiveOverrides {
             compression: compression.map(Into::into),
-            skip_preprocessing,
-            text_preprocessing: text_preprocessing.map(Into::into),
-            image_preprocessing: image_preprocessing.map(Into::into),
-            audio_preprocessing: audio_preprocessing.map(Into::into),
-            binary_preprocessing: binary_preprocessing.map(Into::into),
             skip_compression,
             zstd_level,
             block_size,
@@ -73,7 +62,6 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
             producer_threads,
             directory_mmap_threshold,
             writer_queue_blocks,
-            preserve_format_boundaries,
             result_wait_ms,
         },
     )?;
@@ -216,7 +204,6 @@ fn build_archive_pipeline(
 ) -> ArchivePipeline {
     let mut performance = PipelinePerformanceOptions::default();
     performance.compression_preset = settings.compression_preset;
-    performance.preprocessing_profile = Some(settings.preprocessing_profile);
     performance.zstd_level = settings.zstd_level;
     performance.max_inflight_bytes = settings.inflight_bytes.max(1);
     performance.max_inflight_blocks_per_worker = settings.inflight_blocks_per_worker.max(1);
@@ -224,7 +211,6 @@ fn build_archive_pipeline(
     performance.producer_threads = settings.producer_threads.max(1);
     performance.directory_mmap_threshold_bytes = settings.directory_mmap_threshold.max(1);
     performance.writer_result_queue_blocks = settings.writer_queue_blocks.max(1);
-    performance.preserve_directory_format_boundaries = settings.preserve_format_boundaries;
     performance.result_wait_timeout = Duration::from_millis(settings.result_wait_ms.max(1));
 
     let mut config = ArchivePipelineConfig::new(
@@ -233,7 +219,6 @@ fn build_archive_pipeline(
         buffer_pool,
         settings.compression,
     );
-    config.skip_preprocessing = settings.skip_preprocessing;
     config.skip_compression = settings.skip_compression;
     config.performance = performance;
     ArchivePipeline::new(config)

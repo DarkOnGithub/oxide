@@ -192,7 +192,7 @@ Le système de routage analyse les flux entrants pour déterminer dynamiquement 
 
 \subsubsection*{Stratégie de détection multi-niveaux}
 
-Le routage repose sur un système de détection hybride (\textit{FormatDetector}) qui combine la précision des signatures binaires avec la flexibilité d'analyses heuristiques :
+La politique de stockage brut repose désormais sur une table d'extensions déjà compressées, ce qui évite tout coût de détection basé sur le contenu :
 
 \begin{itemize}
     \item \textbf{Signatures binaires :} Utilisation de la bibliothèque \textit{infer} pour identifier les formats standards (JPEG, PNG, WAV, etc.) via leurs \textit{magic numbers} ;

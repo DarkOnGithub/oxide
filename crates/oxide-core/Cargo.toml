@@ -1,6 +1,6 @@
 [package]
 name = "oxide-core"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2024"
 
 [features]
@@ -28,9 +28,6 @@ anyhow = "1.0"
 
 # Logging/tracing
 tracing = "0.1"
-infer = "0.16"
-image = "0.25.9"
-symphonia = "0.5.5"
 jwalk = "0.8"
 zstd = "0.13"
 regex = "1.11"
@@ -40,10 +37,6 @@ libc = "0.2"
 tempfile = "3.8"
 criterion = "0.5"
 lz4_flex = "0.11"
-
-[[bench]]
-name = "throughput"
-harness = false
 
 [[bench]]
 name = "memory_management"

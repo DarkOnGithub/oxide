@@ -7,9 +7,8 @@
 //! ## Key Components
 //!
 //! - **Pipeline**: Orchestrates the scanning, processing, and writing of archives.
-//! - **Compression**: LZ4 codec implementation and dispatch.
-//! - **Preprocessing**: Format-aware data transformations to improve compression ratios.
-//! - **IO**: Efficient I/O operations, including memory-mapped files and smart scanners.
+//! - **Compression**: LZ4 and Zstd codec dispatch.
+//! - **IO**: Efficient I/O operations, including memory-mapped files and scanners.
 //! - **Telemetry**: Comprehensive instrumentation for monitoring and profiling.
 
 pub mod buffer;
@@ -20,7 +19,6 @@ pub mod error;
 pub mod format;
 pub mod io;
 pub mod pipeline;
-pub mod preprocessing;
 pub mod telemetry;
 pub mod types;
 
@@ -35,18 +33,14 @@ pub use error::OxideError;
 pub use format::{
     ARCHIVE_METADATA_SIZE, ArchiveBlockWriter, ArchiveManifest, ArchiveMetadata, ArchiveReader,
     ArchiveWriter, BlockIterator, CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE, ChunkDescriptor,
-    DEFAULT_REORDER_PENDING_LIMIT, FOOTER_SIZE, Footer, FormatDetector, GLOBAL_HEADER_SIZE,
-    GlobalHeader, OXZ_MAGIC, OXZ_VERSION, ReorderBuffer, SeekableArchiveWriter,
+    DEFAULT_REORDER_PENDING_LIMIT, FOOTER_SIZE, Footer, GLOBAL_HEADER_SIZE, GlobalHeader,
+    OXZ_MAGIC, OXZ_VERSION, ReorderBuffer, SeekableArchiveWriter, should_force_raw_storage,
+    should_force_raw_storage_by_extension,
 };
-pub use io::{BoundaryMode, ChunkingMode, ChunkingPolicy, InputScanner, MmapInput};
+pub use io::{ChunkingMode, ChunkingPolicy, InputScanner, MmapInput};
 pub use pipeline::{
     ArchiveEntryKind, ArchiveListingEntry, ArchivePipeline, ArchivePipelineConfig,
     ArchiveSourceKind, ArchiveTimestamp, PipelinePerformanceOptions,
-};
-pub use preprocessing::{
-    AudioEndian, AudioMetadata, AudioSampleEncoding, ImageMetadata, ImagePixelFormat,
-    PreprocessingMetadata, apply_preprocessing, apply_preprocessing_with_metadata,
-    reverse_preprocessing,
 };
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use telemetry::{
@@ -55,7 +49,6 @@ pub use telemetry::{
     TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
 };
 pub use types::{
-    AudioStrategy, Batch, BatchData, BinaryStrategy, ChunkEncodingPlan, CompressedBlock,
-    CompressedPayload, CompressionAlgo, CompressionMeta, CompressionPreset, FileFormat,
-    ImageStrategy, PreProcessingStrategy, PreprocessingProfile, Result, TextStrategy,
+    Batch, BatchData, ChunkEncodingPlan, CompressedBlock, CompressedPayload, CompressionAlgo,
+    CompressionMeta, CompressionPreset, Result,
 };

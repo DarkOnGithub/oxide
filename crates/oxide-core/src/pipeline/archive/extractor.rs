@@ -865,12 +865,10 @@ pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Res
             raw_len: Some(header.raw_len as usize),
         })?
     };
-    let strategy = header.strategy()?;
-    let restored = crate::preprocessing::reverse_preprocessing(&decoded, &strategy)?;
-    if restored.len() != header.raw_len as usize {
+    if decoded.len() != header.raw_len as usize {
         return Err(crate::OxideError::InvalidFormat(
             "decoded block size mismatch",
         ));
     }
-    Ok(restored)
+    Ok(decoded)
 }

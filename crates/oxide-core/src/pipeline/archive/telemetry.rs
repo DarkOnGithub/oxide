@@ -86,13 +86,8 @@ pub fn emit_archive_progress_if_due(
             output_bytes_completed,
             read_avg_bps,
             write_avg_bps,
-            preprocessing_avg_bps: processing.preprocessing_avg_bps(),
             compression_avg_bps: processing.compression_avg_bps(),
-            preprocessing_compression_avg_bps: processing.preprocessing_compression_avg_bps(),
-            preprocessing_wall_avg_bps: processing.preprocessing_wall_avg_bps(elapsed),
             compression_wall_avg_bps: processing.compression_wall_avg_bps(elapsed),
-            preprocessing_compression_wall_avg_bps: processing
-                .preprocessing_compression_wall_avg_bps(elapsed),
             output_input_ratio,
             compression_ratio,
             blocks_total,
@@ -190,16 +185,9 @@ pub fn build_stats_extensions(
         .map(|worker| worker.busy.as_micros())
         .sum::<u128>()
         .min(u64::MAX as u128) as u64;
-    let preprocessing_busy_us = duration_to_us(processing_snapshot.preprocessing_elapsed);
     let compression_busy_us = duration_to_us(processing_snapshot.compression_elapsed);
-    let preprocessing_avg_bps = processing_snapshot.preprocessing_avg_bps();
     let compression_avg_bps = processing_snapshot.compression_avg_bps();
-    let preprocessing_compression_avg_bps = processing_snapshot.preprocessing_compression_avg_bps();
-    let preprocessing_wall_avg_bps =
-        processing_snapshot.preprocessing_wall_avg_bps(runtime.elapsed);
     let compression_wall_avg_bps = processing_snapshot.compression_wall_avg_bps(runtime.elapsed);
-    let preprocessing_compression_wall_avg_bps =
-        processing_snapshot.preprocessing_compression_wall_avg_bps(runtime.elapsed);
     let elapsed_us = runtime.elapsed.as_micros().max(1).min(u64::MAX as u128) as u64;
     let effective_cores = compress_busy_us as f64 / elapsed_us as f64;
 
@@ -225,16 +213,8 @@ pub fn build_stats_extensions(
         StatValue::U64(compress_busy_us),
     );
     extensions.insert(
-        "runtime.preprocessing_busy_us".to_string(),
-        StatValue::U64(preprocessing_busy_us),
-    );
-    extensions.insert(
         "runtime.compression_busy_us".to_string(),
         StatValue::U64(compression_busy_us),
-    );
-    extensions.insert(
-        "runtime.preprocessing_input_bytes".to_string(),
-        StatValue::U64(processing_snapshot.preprocessing_input_bytes),
     );
     extensions.insert(
         "runtime.compression_input_bytes".to_string(),
@@ -245,28 +225,12 @@ pub fn build_stats_extensions(
         StatValue::F64(effective_cores),
     );
     extensions.insert(
-        "throughput.preprocessing_avg_bps".to_string(),
-        StatValue::F64(preprocessing_avg_bps),
-    );
-    extensions.insert(
         "throughput.compression_avg_bps".to_string(),
         StatValue::F64(compression_avg_bps),
     );
     extensions.insert(
-        "throughput.preprocessing_compression_avg_bps".to_string(),
-        StatValue::F64(preprocessing_compression_avg_bps),
-    );
-    extensions.insert(
-        "throughput.preprocessing_wall_avg_bps".to_string(),
-        StatValue::F64(preprocessing_wall_avg_bps),
-    );
-    extensions.insert(
         "throughput.compression_wall_avg_bps".to_string(),
         StatValue::F64(compression_wall_avg_bps),
-    );
-    extensions.insert(
-        "throughput.preprocessing_compression_wall_avg_bps".to_string(),
-        StatValue::F64(preprocessing_compression_wall_avg_bps),
     );
     extensions.insert(
         "tuning.block_size".to_string(),
@@ -315,10 +279,6 @@ pub fn build_stats_extensions(
     extensions.insert(
         "stage.discovery_us".to_string(),
         StatValue::U64(stage_timings.discovery.as_micros().min(u64::MAX as u128) as u64),
-    );
-    extensions.insert(
-        "stage.format_probe_us".to_string(),
-        StatValue::U64(stage_timings.format_probe.as_micros().min(u64::MAX as u128) as u64),
     );
     extensions.insert(
         "stage.producer_read_us".to_string(),

@@ -1,42 +1,27 @@
 use bytes::Bytes;
 use oxide_core::{
-    compute_checksum, Batch, BatchData, BinaryStrategy, CompressedBlock, CompressedPayload,
-    CompressionAlgo, FileFormat, MmapInput, PreProcessingStrategy,
+    Batch, BatchData, CompressedBlock, CompressedPayload, CompressionAlgo, MmapInput,
+    compute_checksum,
 };
 use std::io::Write;
 use tempfile::NamedTempFile;
 
 #[test]
-fn batch_constructor_defaults_to_unknown() {
+fn batch_constructor_defaults() {
     let batch = Batch::new(7, "sample.bin", Bytes::from_static(b"abc"));
 
     assert_eq!(batch.id, 7);
     assert_eq!(batch.source_path, std::path::PathBuf::from("sample.bin"));
-    assert_eq!(batch.file_type_hint, FileFormat::Common);
-    assert!(batch.preprocessing_metadata.is_none());
     assert_eq!(batch.len(), 3);
     assert!(!batch.is_empty());
-}
-
-#[test]
-fn batch_constructor_with_hint() {
-    let batch = Batch::with_hint(1, "sound.wav", Bytes::new(), FileFormat::Audio);
-
-    assert_eq!(batch.file_type_hint, FileFormat::Audio);
-    assert!(batch.preprocessing_metadata.is_none());
-    assert!(batch.is_empty());
+    assert_eq!(batch.stream_id, 0);
+    assert!(!batch.force_raw_storage);
 }
 
 #[test]
 fn compressed_block_constructor_sets_crc() {
     let payload = vec![1, 2, 3, 4];
-    let block = CompressedBlock::new(
-        2,
-        payload.clone(),
-        PreProcessingStrategy::Binary(BinaryStrategy::Bcj),
-        CompressionAlgo::Lz4,
-        2048,
-    );
+    let block = CompressedBlock::new(2, payload.clone(), CompressionAlgo::Lz4, 2048);
 
     assert_eq!(block.crc32, compute_checksum(&payload));
     assert!(block.verify_crc32());
@@ -44,13 +29,7 @@ fn compressed_block_constructor_sets_crc() {
 
 #[test]
 fn compressed_block_crc_detects_payload_mutation() {
-    let block = CompressedBlock::new(
-        2,
-        vec![1, 2, 3, 4],
-        PreProcessingStrategy::None,
-        CompressionAlgo::Lz4,
-        4,
-    );
+    let block = CompressedBlock::new(2, vec![1, 2, 3, 4], CompressionAlgo::Lz4, 4);
 
     let mutated = CompressedBlock {
         data: CompressedPayload::from(vec![1, 2, 3, 4, 5]),
@@ -78,10 +57,8 @@ fn mapped_batch_data_reports_len_and_slice() -> Result<(), Box<dyn std::error::E
         BatchData::Owned(_) => panic!("expected mapped slice"),
     };
 
-    let batch = Batch::from_mapped(3, "mapped.bin", map, start, end, FileFormat::Binary);
+    let batch = Batch::from_mapped(3, "mapped.bin", map, start, end);
     assert_eq!(batch.data(), b"cdef");
-    assert_eq!(batch.file_type_hint, FileFormat::Binary);
-    assert!(batch.preprocessing_metadata.is_none());
 
     Ok(())
 }

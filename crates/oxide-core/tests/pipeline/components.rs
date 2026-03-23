@@ -6,7 +6,7 @@ use oxide_core::pipeline::{
     archive::ArchivePipeline,
     directory::{BlockCountPlanner, DirectoryBatchSubmitter},
 };
-use oxide_core::types::{BatchData, FileFormat};
+use oxide_core::types::BatchData;
 use tempfile::tempdir;
 
 mod archive_tests {
@@ -66,22 +66,16 @@ mod directory_tests {
     use super::*;
 
     #[test]
-    fn submitter_flushes_on_format_change_when_preserve_boundaries_enabled() {
-        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8, true);
+    fn submitter_batches_fixed_size_chunks() {
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8);
         let mut batches = Vec::new();
 
         submitter
-            .push_bytes_with_hint(b"aaaaaa", FileFormat::Text, false, |batch| {
+            .push_bytes(b"aaaaaabbbbbb", false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
-            .expect("text push should succeed");
-        submitter
-            .push_bytes_with_hint(b"bbbbbb", FileFormat::Binary, false, |batch| {
-                batches.push(batch);
-                Ok(())
-            })
-            .expect("binary push should succeed");
+            .expect("push should succeed");
         submitter
             .finish(|batch| {
                 batches.push(batch);
@@ -90,75 +84,29 @@ mod directory_tests {
             .expect("finish should succeed");
 
         assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].file_type_hint, FileFormat::Text);
-        assert_eq!(batches[0].len(), 6);
-        assert_eq!(batches[1].file_type_hint, FileFormat::Binary);
-        assert_eq!(batches[1].len(), 6);
-    }
-
-    #[test]
-    fn submitter_merges_formats_when_preserve_boundaries_disabled() {
-        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8, false);
-        let mut batches = Vec::new();
-
-        submitter
-            .push_bytes_with_hint(b"aaaaaa", FileFormat::Text, false, |batch| {
-                batches.push(batch);
-                Ok(())
-            })
-            .expect("text push should succeed");
-        submitter
-            .push_bytes_with_hint(b"bbbbbb", FileFormat::Binary, false, |batch| {
-                batches.push(batch);
-                Ok(())
-            })
-            .expect("binary push should succeed");
-        submitter
-            .finish(|batch| {
-                batches.push(batch);
-                Ok(())
-            })
-            .expect("finish should succeed");
-
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].file_type_hint, FileFormat::Common);
         assert_eq!(batches[0].len(), 8);
-        assert_eq!(batches[1].file_type_hint, FileFormat::Binary);
         assert_eq!(batches[1].len(), 4);
-    }
-
-    #[test]
-    fn block_count_planner_respects_boundary_toggle() {
-        let mut preserving = BlockCountPlanner::new(8, true);
-        preserving.push_len(4, FileFormat::Text, false);
-        preserving.push_len(4, FileFormat::Binary, false);
-        preserving.push_len(4, FileFormat::Text, false);
-        assert_eq!(preserving.finish(), 3);
-
-        let mut merging = BlockCountPlanner::new(8, false);
-        merging.push_len(4, FileFormat::Text, false);
-        merging.push_len(4, FileFormat::Binary, false);
-        merging.push_len(4, FileFormat::Text, false);
-        assert_eq!(merging.finish(), 2);
+        assert!(!batches[0].force_raw_storage);
+        assert!(!batches[1].force_raw_storage);
     }
 
     #[test]
     fn submitter_flushes_on_raw_storage_policy_change() {
-        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8, false);
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8);
         let mut batches = Vec::new();
 
         submitter
-            .push_bytes_with_hint(b"aaaaaa", FileFormat::Text, false, |batch| {
+            .push_bytes(b"aaaaaa", false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
-            .expect("text push should succeed");
+            .expect("first push should succeed");
         submitter
-            .push_bytes_with_hint(b"bbbbbb", FileFormat::Common, true, |batch| {
+            .push_bytes(b"bbbbbb", true, |batch| {
                 batches.push(batch);
                 Ok(())
             })
-            .expect("raw push should succeed");
+            .expect("second push should succeed");
         submitter
             .finish(|batch| {
                 batches.push(batch);
@@ -167,17 +115,17 @@ mod directory_tests {
             .expect("finish should succeed");
 
         assert_eq!(batches.len(), 2);
-        assert!(!batches[0].force_raw_storage);
         assert_eq!(batches[0].len(), 6);
-        assert!(batches[1].force_raw_storage);
+        assert!(!batches[0].force_raw_storage);
         assert_eq!(batches[1].len(), 6);
+        assert!(batches[1].force_raw_storage);
     }
 
     #[test]
     fn block_count_planner_flushes_on_raw_storage_policy_change() {
-        let mut planner = BlockCountPlanner::new(8, false);
-        planner.push_len(6, FileFormat::Text, false);
-        planner.push_len(6, FileFormat::Common, true);
+        let mut planner = BlockCountPlanner::new(8);
+        planner.push_len(6, false);
+        planner.push_len(6, true);
 
         assert_eq!(planner.finish(), 2);
     }
@@ -190,11 +138,11 @@ mod directory_tests {
 
         let mmap = MmapInput::open(&file_path).expect("open mmap");
         let map = mmap.mapping().expect("mapped file");
-        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 4, false);
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 4);
         let mut batches = Vec::new();
 
         submitter
-            .push_mapped_with_hint(map, 0, mmap.len(), FileFormat::Binary, false, |batch| {
+            .push_mapped(map, 0, mmap.len(), false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
@@ -223,17 +171,17 @@ mod directory_tests {
 
         let mmap = MmapInput::open(&file_path).expect("open mmap");
         let map = mmap.mapping().expect("mapped file");
-        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 4, false);
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 4);
         let mut batches = Vec::new();
 
         submitter
-            .push_bytes_with_hint(b"ab", FileFormat::Binary, false, |batch| {
+            .push_bytes(b"ab", false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
             .expect("owned push should succeed");
         submitter
-            .push_mapped_with_hint(map, 0, mmap.len(), FileFormat::Binary, false, |batch| {
+            .push_mapped(map, 0, mmap.len(), false, |batch| {
                 batches.push(batch);
                 Ok(())
             })

@@ -7,9 +7,9 @@ use crate::types::duration_to_us;
 use crate::{ArchiveSourceKind, CompressedBlock, OxideError, Result};
 
 use super::{
-    ARCHIVE_METADATA_SIZE, ArchiveManifest, ArchiveMetadata, CHUNK_DESCRIPTOR_SIZE,
-    CHUNK_TABLE_HEADER_SIZE, DEFAULT_REORDER_PENDING_LIMIT, Footer, GLOBAL_HEADER_SIZE,
-    GlobalHeader, ReorderBuffer, encode_chunk_table,
+    encode_chunk_table, ArchiveManifest, ArchiveMetadata, Footer, GlobalHeader, ReorderBuffer,
+    ARCHIVE_METADATA_SIZE, CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE,
+    DEFAULT_REORDER_PENDING_LIMIT, GLOBAL_HEADER_SIZE,
 };
 
 #[derive(Debug)]
@@ -239,7 +239,6 @@ impl<W: Write> ArchiveWriter<W> {
             id: block.id,
             stream_id: block.stream_id,
             data: block.data.clone(),
-            pre_proc: block.pre_proc.clone(),
             compression: block.compression,
             compression_preset: block.compression_preset,
             raw_passthrough: block.raw_passthrough,
@@ -371,7 +370,6 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             id: block.id,
             stream_id: block.stream_id,
             data: block.data.clone(),
-            pre_proc: block.pre_proc.clone(),
             compression: block.compression,
             compression_preset: block.compression_preset,
             raw_passthrough: block.raw_passthrough,

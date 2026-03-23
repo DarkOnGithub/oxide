@@ -9,8 +9,8 @@ use oxide_core::{
 };
 
 use crate::ui::{
-    format_bytes, format_bytes_f64, format_duration, format_duration_compact, format_rate, paint,
-    progress_bar, StreamTarget, Tone,
+    StreamTarget, Tone, format_bytes, format_bytes_f64, format_duration, format_duration_compact,
+    format_rate, paint, progress_bar,
 };
 
 const CHART_WIDTH: usize = 28;
@@ -119,16 +119,6 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
     ];
     push_optional_rate_row(
         &mut throughput_rows,
-        "preprocess avg",
-        extension_f64(&report.extensions, "throughput.preprocessing_avg_bps"),
-    );
-    push_optional_rate_row(
-        &mut throughput_rows,
-        "preprocess wall",
-        extension_f64(&report.extensions, "throughput.preprocessing_wall_avg_bps"),
-    );
-    push_optional_rate_row(
-        &mut throughput_rows,
         "compress avg",
         extension_f64(&report.extensions, "throughput.compression_avg_bps"),
     );
@@ -136,22 +126,6 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
         &mut throughput_rows,
         "compress wall",
         extension_f64(&report.extensions, "throughput.compression_wall_avg_bps"),
-    );
-    push_optional_rate_row(
-        &mut throughput_rows,
-        "prep+compress avg",
-        extension_f64(
-            &report.extensions,
-            "throughput.preprocessing_compression_avg_bps",
-        ),
-    );
-    push_optional_rate_row(
-        &mut throughput_rows,
-        "prep+compress wall",
-        extension_f64(
-            &report.extensions,
-            "throughput.preprocessing_compression_wall_avg_bps",
-        ),
     );
     print_table(
         "Throughput table",
@@ -173,7 +147,9 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
                 format_rate_per_second(report.write_avg_bps),
             ),
         ];
-        if let Some(value) = extension_f64(&report.extensions, "throughput.compression_wall_avg_bps") {
+        if let Some(value) =
+            extension_f64(&report.extensions, "throughput.compression_wall_avg_bps")
+        {
             throughput_chart.push((
                 "compress wall".to_string(),
                 value,
@@ -206,12 +182,6 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
         );
         push_optional_string_row(
             &mut runtime_rows,
-            "Preprocess busy",
-            extension_u64(&report.extensions, "runtime.preprocessing_busy_us")
-                .map(|value| format_duration(Duration::from_micros(value))),
-        );
-        push_optional_string_row(
-            &mut runtime_rows,
             "Compression busy",
             extension_u64(&report.extensions, "runtime.compression_busy_us")
                 .map(|value| format_duration(Duration::from_micros(value))),
@@ -234,7 +204,8 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
         push_optional_string_row(
             &mut runtime_rows,
             "Configured inflight",
-            extension_u64(&report.extensions, "pipeline.configured_inflight_bytes").map(format_bytes),
+            extension_u64(&report.extensions, "pipeline.configured_inflight_bytes")
+                .map(format_bytes),
         );
         push_optional_string_row(
             &mut runtime_rows,

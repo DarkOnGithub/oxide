@@ -5,8 +5,7 @@ use std::time::Duration;
 use oxide_core::{
     ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader,
     BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo, CompressionPreset, ExtractProgressEvent,
-    FOOTER_SIZE, PreProcessingStrategy, ReportValue, RunTelemetryOptions, TelemetryEvent,
-    TelemetrySink, TextStrategy,
+    FOOTER_SIZE, ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -270,7 +269,7 @@ fn pipeline_forces_raw_storage_for_known_compressed_extensions()
         let (header, payload) = block?;
         let compression = header.compression_meta()?;
         assert!(compression.raw_passthrough);
-        assert_eq!(header.strategy()?, PreProcessingStrategy::None);
+        assert_eq!(header.reserved, 0);
         assert_eq!(payload.len(), header.raw_len as usize);
         raw_blocks += 1;
     }
@@ -283,11 +282,11 @@ fn pipeline_forces_raw_storage_for_known_compressed_extensions()
 }
 
 #[test]
-fn pipeline_forces_raw_storage_for_known_signatures() -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_forces_raw_storage_for_known_extensions() -> Result<(), Box<dyn std::error::Error>> {
     let mut data = build_text_fixture(64 * 1024);
     data.splice(0..4, [0xFF, 0xD8, 0xFF, 0xE0]);
     let root = tempfile::tempdir()?;
-    let input = root.path().join("fixture.bin");
+    let input = root.path().join("fixture.jpg");
     std::fs::write(&input, &data)?;
 
     let mut config = ArchivePipelineConfig::new(
@@ -310,7 +309,7 @@ fn pipeline_forces_raw_storage_for_known_signatures() -> Result<(), Box<dyn std:
     for block in reader.iter_blocks() {
         let (header, _payload) = block?;
         assert!(header.compression_meta()?.raw_passthrough);
-        assert_eq!(header.strategy()?, PreProcessingStrategy::None);
+        assert_eq!(header.reserved, 0);
     }
 
     let (restored, _report) =
@@ -320,14 +319,14 @@ fn pipeline_forces_raw_storage_for_known_signatures() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn directory_archives_split_batches_when_raw_storage_signature_changes()
+fn directory_archives_split_batches_when_raw_storage_policy_changes()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = tempfile::tempdir()?;
     let text = build_text_fixture(8 * 1024);
     let mut image = build_text_fixture(8 * 1024);
     image.splice(0..4, [0xFF, 0xD8, 0xFF, 0xE0]);
     write_directory_file(&root, "01-notes.txt", &text)?;
-    write_directory_file(&root, "02-photo.bin", &image)?;
+    write_directory_file(&root, "02-photo.jpg", &image)?;
 
     let mut config = ArchivePipelineConfig::new(
         64 * 1024,
@@ -368,7 +367,7 @@ fn directory_archives_split_batches_when_raw_storage_signature_changes()
         None,
     )?;
     assert_eq!(std::fs::read(output.path().join("01-notes.txt"))?, text);
-    assert_eq!(std::fs::read(output.path().join("02-photo.bin"))?, image);
+    assert_eq!(std::fs::read(output.path().join("02-photo.jpg"))?, image);
     Ok(())
 }
 
@@ -406,7 +405,8 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn pipeline_records_no_preprocessing_in_fast_mode() -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_records_fast_mode_chunk_headers_are_reserved() -> Result<(), Box<dyn std::error::Error>>
+{
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -424,7 +424,7 @@ fn pipeline_records_no_preprocessing_in_fast_mode() -> Result<(), Box<dyn std::e
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, payload) = reader.read_block(0)?;
 
-    assert_eq!(header.strategy()?, PreProcessingStrategy::None);
+    assert_eq!(header.reserved, 0);
     assert_eq!(header.compression()?, CompressionAlgo::Lz4);
     assert_eq!(payload.len(), header.encoded_len as usize);
 
@@ -432,8 +432,8 @@ fn pipeline_records_no_preprocessing_in_fast_mode() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn pipeline_records_text_preprocessing_in_balanced_mode() -> Result<(), Box<dyn std::error::Error>>
-{
+fn pipeline_records_balanced_mode_chunk_headers_are_reserved()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -458,15 +458,13 @@ fn pipeline_records_text_preprocessing_in_balanced_mode() -> Result<(), Box<dyn 
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, _payload) = reader.read_block(0)?;
 
-    assert_eq!(
-        header.strategy()?,
-        PreProcessingStrategy::Text(TextStrategy::Bpe)
-    );
+    assert_eq!(header.reserved, 0);
     Ok(())
 }
 
 #[test]
-fn pipeline_records_text_preprocessing_in_ultra_mode() -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_records_ultra_mode_chunk_headers_are_reserved() -> Result<(), Box<dyn std::error::Error>>
+{
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -491,10 +489,7 @@ fn pipeline_records_text_preprocessing_in_ultra_mode() -> Result<(), Box<dyn std
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, _payload) = reader.read_block(0)?;
 
-    assert_eq!(
-        header.strategy()?,
-        PreProcessingStrategy::Text(TextStrategy::Bwt)
-    );
+    assert_eq!(header.reserved, 0);
     Ok(())
 }
 
@@ -689,8 +684,8 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode()
--> Result<(), Box<dyn std::error::Error>> {
+fn directory_archive_fast_mode_chunk_headers_are_reserved() -> Result<(), Box<dyn std::error::Error>>
+{
     let source = tempfile::tempdir()?;
     write_directory_file(
         &source,
@@ -718,7 +713,7 @@ fn directory_archive_marks_blocks_without_preprocessing_in_fast_mode()
 
     for block in reader.iter_blocks() {
         let (header, _payload) = block?;
-        assert_eq!(header.strategy()?, PreProcessingStrategy::None);
+        assert_eq!(header.reserved, 0);
     }
 
     Ok(())
@@ -1297,12 +1292,8 @@ fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn st
 
     let final_snapshot = sink.snapshots.last().expect("missing final snapshot");
     assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
-    assert!(final_snapshot.preprocessing_avg_bps >= 0.0);
     assert!(final_snapshot.compression_avg_bps >= 0.0);
-    assert!(final_snapshot.preprocessing_compression_avg_bps >= 0.0);
-    assert!(final_snapshot.preprocessing_wall_avg_bps >= 0.0);
     assert!(final_snapshot.compression_wall_avg_bps >= 0.0);
-    assert!(final_snapshot.preprocessing_compression_wall_avg_bps >= 0.0);
 
     let report = &run.report;
     assert_eq!(report.blocks_total, final_snapshot.blocks_total);
@@ -1332,33 +1323,11 @@ fn archive_path_reports_progress_and_extensible_stats() -> Result<(), Box<dyn st
         Some(ReportValue::U64(_))
     ));
     assert!(matches!(
-        report.extensions.get("throughput.preprocessing_avg_bps"),
-        Some(ReportValue::F64(_))
-    ));
-    assert!(matches!(
         report.extensions.get("throughput.compression_avg_bps"),
         Some(ReportValue::F64(_))
     ));
     assert!(matches!(
-        report
-            .extensions
-            .get("throughput.preprocessing_compression_avg_bps"),
-        Some(ReportValue::F64(_))
-    ));
-    assert!(matches!(
-        report
-            .extensions
-            .get("throughput.preprocessing_wall_avg_bps"),
-        Some(ReportValue::F64(_))
-    ));
-    assert!(matches!(
         report.extensions.get("throughput.compression_wall_avg_bps"),
-        Some(ReportValue::F64(_))
-    ));
-    assert!(matches!(
-        report
-            .extensions
-            .get("throughput.preprocessing_compression_wall_avg_bps"),
         Some(ReportValue::F64(_))
     ));
     assert!(matches!(

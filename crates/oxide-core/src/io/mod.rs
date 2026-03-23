@@ -4,4 +4,4 @@ pub mod scanner;
 
 pub use chunking::{ChunkingMode, ChunkingPolicy};
 pub use mmap::MmapInput;
-pub use scanner::{BoundaryMode, InputScanner};
+pub use scanner::InputScanner;

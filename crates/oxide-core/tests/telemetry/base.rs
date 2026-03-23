@@ -3,7 +3,6 @@ mod telemetry_enabled_tests {
     use std::io::Write;
     use std::time::Duration;
 
-    use oxide_core::format::FormatDetector;
     use oxide_core::telemetry;
     use oxide_core::telemetry::tags;
     use oxide_core::{DefaultWorkerTelemetry, InputScanner, MmapInput, WorkerTelemetry};
@@ -26,7 +25,6 @@ mod telemetry_enabled_tests {
         let mmap = MmapInput::open(file.path())?;
         let _ = mmap.slice(0, 5)?;
 
-        let _ = FormatDetector::detect(b"this is plain text");
         let scanner = InputScanner::new(8);
         let batches = scanner.scan_file(file.path())?;
         assert!(!batches.is_empty());
@@ -39,10 +37,6 @@ mod telemetry_enabled_tests {
             .expect("mmap open histogram missing");
         assert!(open_hist.count >= 1);
 
-        let detect_hist = snapshot
-            .histogram(tags::METRIC_FORMAT_DETECT_LATENCY_US)
-            .expect("format detect histogram missing");
-        assert!(detect_hist.count >= 2);
         let scanner_hist = snapshot
             .histogram(tags::METRIC_SCANNER_SCAN_LATENCY_US)
             .expect("scanner scan histogram missing");

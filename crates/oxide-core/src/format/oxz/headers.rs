@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 
 use crate::{
     ArchiveSourceKind, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset,
-    OxideError, PreProcessingStrategy, Result,
+    OxideError, Result,
 };
 
 use super::{
@@ -204,7 +204,7 @@ pub struct ChunkDescriptor {
     pub raw_len: u32,
     pub checksum: u32,
     pub compression_flags: u8,
-    pub strategy_flags: u8,
+    pub reserved: u8,
 }
 
 impl ChunkDescriptor {
@@ -212,7 +212,6 @@ impl ChunkDescriptor {
         payload_offset: u64,
         raw_len: u32,
         encoded_len: u32,
-        strategy: PreProcessingStrategy,
         compression: CompressionAlgo,
         checksum: u32,
     ) -> Self {
@@ -220,7 +219,6 @@ impl ChunkDescriptor {
             payload_offset,
             raw_len,
             encoded_len,
-            strategy,
             CompressionMeta::new(compression, CompressionPreset::Default, false),
             checksum,
         )
@@ -230,7 +228,6 @@ impl ChunkDescriptor {
         payload_offset: u64,
         raw_len: u32,
         encoded_len: u32,
-        strategy: PreProcessingStrategy,
         compression_meta: CompressionMeta,
         checksum: u32,
     ) -> Self {
@@ -240,7 +237,7 @@ impl ChunkDescriptor {
             raw_len,
             checksum,
             compression_flags: compression_meta.to_flags(),
-            strategy_flags: strategy.to_flags(),
+            reserved: 0,
         }
     }
 
@@ -254,7 +251,6 @@ impl ChunkDescriptor {
             payload_offset,
             raw_len,
             encoded_len,
-            block.pre_proc.clone(),
             block.compression_meta(),
             block.crc32,
         );
@@ -270,10 +266,6 @@ impl ChunkDescriptor {
         let mut bytes = [0u8; CHUNK_DESCRIPTOR_SIZE];
         reader.read_exact(&mut bytes)?;
         Self::from_bytes(bytes)
-    }
-
-    pub fn strategy(&self) -> Result<PreProcessingStrategy> {
-        PreProcessingStrategy::from_flags(self.strategy_flags)
     }
 
     pub fn compression(&self) -> Result<CompressionAlgo> {
@@ -297,7 +289,7 @@ impl ChunkDescriptor {
         bytes[12..16].copy_from_slice(&self.raw_len.to_le_bytes());
         bytes[16..20].copy_from_slice(&self.checksum.to_le_bytes());
         bytes[20] = self.compression_flags;
-        bytes[21] = self.strategy_flags;
+        bytes[21] = self.reserved;
         bytes
     }
 
@@ -310,7 +302,7 @@ impl ChunkDescriptor {
             raw_len: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
             checksum: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
             compression_flags: bytes[20],
-            strategy_flags: bytes[21],
+            reserved: bytes[21],
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -319,7 +311,11 @@ impl ChunkDescriptor {
     fn validate(&self) -> Result<()> {
         self.payload_end()?;
         self.compression_meta()?;
-        self.strategy()?;
+        if self.reserved != 0 {
+            return Err(OxideError::InvalidFormat(
+                "invalid chunk descriptor reserved bits",
+            ));
+        }
         Ok(())
     }
 }

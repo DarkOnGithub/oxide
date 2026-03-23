@@ -5,9 +5,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::CompressionPreset;
 use crate::buffer::BufferPool;
 use crate::types::CompressionAlgo;
-use crate::{CompressionPreset, PreprocessingProfile};
 
 /// Indicates whether the archive source is a single file or a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,8 +227,6 @@ pub struct PipelinePerformanceOptions {
     pub raw_fallback_enabled: bool,
     /// Compression preset metadata stored in each block.
     pub compression_preset: CompressionPreset,
-    /// Optional preprocessing profile override applied to every chunk.
-    pub preprocessing_profile: Option<PreprocessingProfile>,
     /// Optional explicit zstd compression level used only during encoding.
     pub zstd_level: Option<i32>,
     /// Maximum in-flight block payload bytes pending worker completion.
@@ -237,8 +235,6 @@ pub struct PipelinePerformanceOptions {
     pub max_inflight_blocks_per_worker: usize,
     /// Streaming read buffer size used by directory producer path.
     pub directory_stream_read_buffer_size: usize,
-    /// Preserves file format boundaries when building directory batches.
-    pub preserve_directory_format_boundaries: bool,
     /// Timeout used when waiting for worker results.
     pub result_wait_timeout: Duration,
     /// Total number of directory producer threads, including prefetch helpers.
@@ -254,12 +250,10 @@ impl Default for PipelinePerformanceOptions {
         Self {
             raw_fallback_enabled: true,
             compression_preset: CompressionPreset::Fast,
-            preprocessing_profile: None,
             zstd_level: None,
             max_inflight_bytes: 512 * 1024 * 1024,
             max_inflight_blocks_per_worker: 256,
             directory_stream_read_buffer_size: 16 * 1024 * 1024,
-            preserve_directory_format_boundaries: false,
             result_wait_timeout: Duration::from_millis(5),
             producer_threads: 1,
             directory_mmap_threshold_bytes: 8 * 1024 * 1024,
@@ -279,8 +273,6 @@ pub struct ArchivePipelineConfig {
     pub buffer_pool: Arc<BufferPool>,
     /// Compression algorithm to use.
     pub compression_algo: CompressionAlgo,
-    /// Whether preprocessing should be skipped entirely.
-    pub skip_preprocessing: bool,
     /// Whether compression should be skipped entirely.
     pub skip_compression: bool,
     /// Performance tuning options.
@@ -300,7 +292,6 @@ impl ArchivePipelineConfig {
             workers,
             buffer_pool,
             compression_algo,
-            skip_preprocessing: false,
             skip_compression: false,
             performance: PipelinePerformanceOptions::default(),
         }

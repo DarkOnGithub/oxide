@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-use oxide_core::{AudioStrategy, BinaryStrategy, CompressionAlgo, ImageStrategy, TextStrategy};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use oxide_core::CompressionAlgo;
 
 #[derive(Parser)]
 #[command(
@@ -45,26 +45,6 @@ pub struct ArchiveArgs {
     /// Compression algorithm to store in archive metadata.
     #[arg(long, value_enum)]
     pub compression: Option<CompressionArg>,
-
-    /// Store blocks without preprocessing.
-    #[arg(long, default_value_t = false)]
-    pub skip_preprocessing: bool,
-
-    /// Text preprocessing override.
-    #[arg(long, value_enum)]
-    pub text_preprocessing: Option<TextPreprocessingArg>,
-
-    /// Image preprocessing override.
-    #[arg(long, value_enum)]
-    pub image_preprocessing: Option<ImagePreprocessingArg>,
-
-    /// Audio preprocessing override.
-    #[arg(long, value_enum)]
-    pub audio_preprocessing: Option<AudioPreprocessingArg>,
-
-    /// Binary preprocessing override.
-    #[arg(long, value_enum)]
-    pub binary_preprocessing: Option<BinaryPreprocessingArg>,
 
     /// Store blocks without compression.
     #[arg(long, default_value_t = false)]
@@ -117,16 +97,6 @@ pub struct ArchiveArgs {
     /// Capacity of the writer result queue (in blocks).
     #[arg(long)]
     pub writer_queue_blocks: Option<usize>,
-
-    /// Keep file-type boundaries as hard block boundaries in directory mode.
-    #[arg(
-        long,
-        action = ArgAction::Set,
-        default_missing_value = "true",
-        num_args = 0..=1,
-        require_equals = true
-    )]
-    pub preserve_format_boundaries: Option<bool>,
 
     /// Timeout in milliseconds while waiting for worker results.
     #[arg(long)]
@@ -195,72 +165,6 @@ impl From<CompressionArg> for CompressionAlgo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum TextPreprocessingArg {
-    None,
-    Bpe,
-    Bwt,
-}
-
-impl From<TextPreprocessingArg> for Option<TextStrategy> {
-    fn from(value: TextPreprocessingArg) -> Self {
-        match value {
-            TextPreprocessingArg::None => None,
-            TextPreprocessingArg::Bpe => Some(TextStrategy::Bpe),
-            TextPreprocessingArg::Bwt => Some(TextStrategy::Bwt),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ImagePreprocessingArg {
-    None,
-    Ycocgr,
-    Paeth,
-    Locoi,
-}
-
-impl From<ImagePreprocessingArg> for Option<ImageStrategy> {
-    fn from(value: ImagePreprocessingArg) -> Self {
-        match value {
-            ImagePreprocessingArg::None => None,
-            ImagePreprocessingArg::Ycocgr => Some(ImageStrategy::YCoCgR),
-            ImagePreprocessingArg::Paeth => Some(ImageStrategy::Paeth),
-            ImagePreprocessingArg::Locoi => Some(ImageStrategy::LocoI),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum AudioPreprocessingArg {
-    None,
-    Lpc,
-}
-
-impl From<AudioPreprocessingArg> for Option<AudioStrategy> {
-    fn from(value: AudioPreprocessingArg) -> Self {
-        match value {
-            AudioPreprocessingArg::None => None,
-            AudioPreprocessingArg::Lpc => Some(AudioStrategy::Lpc),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum BinaryPreprocessingArg {
-    None,
-    Bcj,
-}
-
-impl From<BinaryPreprocessingArg> for Option<BinaryStrategy> {
-    fn from(value: BinaryPreprocessingArg) -> Self {
-        match value {
-            BinaryPreprocessingArg::None => None,
-            BinaryPreprocessingArg::Bcj => Some(BinaryStrategy::Bcj),
-        }
-    }
-}
-
 pub fn default_output_path(input: &Path) -> PathBuf {
     let mut out = input.as_os_str().to_os_string();
     out.push(".oxz");
@@ -325,10 +229,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{
-        Cli, Commands, ImagePreprocessingArg, TextPreprocessingArg, default_extract_output_path,
-        default_output_path, parse_size,
-    };
+    use super::{Cli, Commands, default_extract_output_path, default_output_path, parse_size};
 
     #[test]
     fn parse_size_supports_binary_suffixes() {
@@ -407,43 +308,12 @@ mod tests {
     }
 
     #[test]
-    fn archive_command_accepts_skip_processing_flags_together() {
-        let cli = Cli::try_parse_from([
-            "oxide",
-            "archive",
-            "demo/input",
-            "--skip-preprocessing",
-            "--skip-compression",
-        ])
-        .expect("archive arguments should parse");
+    fn archive_command_accepts_skip_compression_flag() {
+        let cli = Cli::try_parse_from(["oxide", "archive", "demo/input", "--skip-compression"])
+            .expect("archive arguments should parse");
 
         match cli.command {
-            Commands::Archive(args) => {
-                assert!(args.skip_preprocessing);
-                assert!(args.skip_compression);
-            }
-            _ => panic!("expected archive command"),
-        }
-    }
-
-    #[test]
-    fn archive_command_accepts_preprocessing_override_flags() {
-        let cli = Cli::try_parse_from([
-            "oxide",
-            "archive",
-            "demo/input",
-            "--text-preprocessing",
-            "bwt",
-            "--image-preprocessing",
-            "locoi",
-        ])
-        .expect("archive arguments should parse");
-
-        match cli.command {
-            Commands::Archive(args) => {
-                assert_eq!(args.text_preprocessing, Some(TextPreprocessingArg::Bwt));
-                assert_eq!(args.image_preprocessing, Some(ImagePreprocessingArg::Locoi));
-            }
+            Commands::Archive(args) => assert!(args.skip_compression),
             _ => panic!("expected archive command"),
         }
     }
