@@ -15,6 +15,7 @@ fn compression_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         CompressionAlgo::Lz4,
         CompressionAlgo::Zstd,
         CompressionAlgo::Lzma,
+        CompressionAlgo::Zpaq,
     ];
 
     for algorithm in algorithms {
@@ -82,6 +83,7 @@ fn compression_meta_flags_round_trip() -> Result<(), Box<dyn std::error::Error>>
         CompressionAlgo::Lz4,
         CompressionAlgo::Zstd,
         CompressionAlgo::Lzma,
+        CompressionAlgo::Zpaq,
     ] {
         let meta = CompressionMeta::new(algo, CompressionPreset::Fast, true);
         let encoded = meta.to_flags();
@@ -92,7 +94,8 @@ fn compression_meta_flags_round_trip() -> Result<(), Box<dyn std::error::Error>>
         assert!(decoded.raw_passthrough);
     }
 
-    assert!(CompressionMeta::from_flags(0b1110_0001).is_err());
+    assert!(CompressionMeta::from_flags(0b0010_0001).is_err());
+    assert!(CompressionMeta::from_flags(0b0100_0000).is_err());
     assert!(CompressionMeta::from_flags(0b0001_0000).is_err());
     Ok(())
 }
