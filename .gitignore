@@ -336,3 +336,4 @@ silesia_corpus/
 .venv
 ARCHIVER_PRODUCTION_READINESS.md
 __pycache__/
+benchmark_telemetry/
