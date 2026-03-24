@@ -71,23 +71,6 @@
       },
       "extreme": {
         "compression": {
-          "compressor": "zpaq",
-          "level": 5
-        },
-        "block_size": "8M",
-        "workers": 0,
-        "pool_capacity": "8M",
-        "pool_buffers": 128,
-        "stream_read_buffer": "16M",
-        "inflight_bytes": "768M",
-        "inflight_blocks_per_worker": 8,
-        "producer_threads": 1,
-        "directory_mmap_threshold": "16M",
-        "writer_queue_blocks": 96,
-        "result_wait_ms": 6
-      },
-      "compact": {
-        "compression": {
           "compressor": "lzma",
           "level": 9
         },
@@ -102,23 +85,6 @@
         "directory_mmap_threshold": "16M",
         "writer_queue_blocks": 96,
         "result_wait_ms": 6
-      },
-      "maximum": {
-        "compression": {
-          "compressor": "zpaq",
-          "level": 5
-        },
-        "block_size": "16M",
-        "workers": 0,
-        "pool_capacity": "16M",
-        "pool_buffers": 96,
-        "stream_read_buffer": "8M",
-        "inflight_bytes": "1G",
-        "inflight_blocks_per_worker": 4,
-        "producer_threads": 1,
-        "directory_mmap_threshold": "16M",
-        "writer_queue_blocks": 64,
-        "result_wait_ms": 8
       }
     }
   }

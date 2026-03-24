@@ -3,7 +3,6 @@ use crate::{CompressionAlgo, Result};
 pub mod lz4;
 pub mod lzma;
 pub(crate) mod scratch;
-pub mod zpaq;
 pub mod zstd;
 
 pub(crate) use scratch::CompressionScratchArena;
@@ -57,7 +56,7 @@ pub fn apply_compression(data: &[u8], algo: CompressionAlgo) -> Result<Vec<u8>> 
 
 #[inline]
 pub(crate) fn supports_direct_buffer_output(algo: CompressionAlgo) -> bool {
-    matches!(algo, CompressionAlgo::Lzma | CompressionAlgo::Zpaq)
+    matches!(algo, CompressionAlgo::Lzma)
 }
 
 pub(crate) fn apply_compression_request_with_scratch(
@@ -68,9 +67,6 @@ pub(crate) fn apply_compression_request_with_scratch(
         CompressionAlgo::Lz4 => lz4::apply_with_scratch(request.data, scratch.lz4()),
         CompressionAlgo::Lzma => {
             lzma::apply_with_scratch(request.data, request.level, scratch.lzma())
-        }
-        CompressionAlgo::Zpaq => {
-            zpaq::apply_with_scratch(request.data, request.level, scratch.zpaq())
         }
         CompressionAlgo::Zstd => {
             zstd::apply_with_scratch(request.data, request.level, scratch.zstd())
@@ -91,7 +87,6 @@ pub(crate) fn apply_compression_request_with_scratch_into(
             Ok(())
         }
         CompressionAlgo::Lzma => lzma::apply_into_vec(request.data, request.level, output),
-        CompressionAlgo::Zpaq => zpaq::apply_into_vec(request.data, request.level, output),
         CompressionAlgo::Zstd => {
             let compressed = zstd::apply_with_scratch(request.data, request.level, scratch.zstd())?;
             output.clear();
@@ -108,7 +103,6 @@ pub(crate) fn recycle_compression_buffer(
 ) {
     match algo {
         CompressionAlgo::Lzma => lzma::recycle_output(buffer, scratch.lzma()),
-        CompressionAlgo::Zpaq => zpaq::recycle_output(buffer, scratch.zpaq()),
         CompressionAlgo::Lz4 | CompressionAlgo::Zstd => {
             let _ = buffer;
         }
@@ -132,7 +126,6 @@ pub(crate) fn reverse_compression_request_with_scratch(
     match request.algo {
         CompressionAlgo::Lz4 => lz4::reverse(request.data),
         CompressionAlgo::Lzma => lzma::reverse_with_scratch(request.data, scratch.lzma()),
-        CompressionAlgo::Zpaq => zpaq::reverse_with_scratch(request.data, scratch.zpaq()),
         CompressionAlgo::Zstd => {
             zstd::reverse_with_scratch(request.data, request.raw_len, scratch.zstd())
         }
@@ -152,7 +145,6 @@ pub(crate) fn reverse_compression_request_with_scratch_into(
             Ok(())
         }
         CompressionAlgo::Lzma => lzma::reverse_into_vec(request.data, output),
-        CompressionAlgo::Zpaq => zpaq::reverse_into_vec(request.data, output),
         CompressionAlgo::Zstd => {
             let decoded =
                 zstd::reverse_with_scratch(request.data, request.raw_len, scratch.zstd())?;

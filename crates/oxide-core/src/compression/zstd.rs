@@ -55,7 +55,7 @@ pub(crate) fn reverse_with_scratch(
 
 #[cfg(test)]
 mod tests {
-    use super::{ZSTD_DEFAULT_LEVEL, apply_with_scratch, resolve_level, reverse_with_scratch};
+    use super::{apply_with_scratch, resolve_level, reverse_with_scratch, ZSTD_DEFAULT_LEVEL};
     use crate::compression::scratch::ZstdScratch;
 
     #[test]

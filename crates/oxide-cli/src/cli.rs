@@ -154,7 +154,6 @@ pub struct TreeArgs {
 pub enum CompressionArg {
     Lz4,
     Lzma,
-    Zpaq,
     Zstd,
 }
 
@@ -163,7 +162,6 @@ impl From<CompressionArg> for CompressionAlgo {
         match value {
             CompressionArg::Lz4 => CompressionAlgo::Lz4,
             CompressionArg::Lzma => CompressionAlgo::Lzma,
-            CompressionArg::Zpaq => CompressionAlgo::Zpaq,
             CompressionArg::Zstd => CompressionAlgo::Zstd,
         }
     }
@@ -233,7 +231,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, Commands, default_extract_output_path, default_output_path, parse_size};
+    use super::{default_extract_output_path, default_output_path, parse_size, Cli, Commands};
 
     #[test]
     fn parse_size_supports_binary_suffixes() {
@@ -310,22 +308,6 @@ mod tests {
                 assert!(matches!(
                     args.compression,
                     Some(super::CompressionArg::Lzma)
-                ));
-            }
-            _ => panic!("expected archive command"),
-        }
-    }
-
-    #[test]
-    fn archive_command_accepts_zpaq_compression() {
-        let cli = Cli::try_parse_from(["oxide", "archive", "demo/input", "--compression", "zpaq"])
-            .expect("archive arguments should parse");
-
-        match cli.command {
-            Commands::Archive(args) => {
-                assert!(matches!(
-                    args.compression,
-                    Some(super::CompressionArg::Zpaq)
                 ));
             }
             _ => panic!("expected archive command"),

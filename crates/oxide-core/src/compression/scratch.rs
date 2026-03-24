@@ -31,34 +31,6 @@ impl LzmaScratch {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct ZpaqScratch {
-    output: Vec<u8>,
-}
-
-impl fmt::Debug for ZpaqScratch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ZpaqScratch")
-            .field("output_capacity", &self.output.capacity())
-            .finish()
-    }
-}
-
-impl ZpaqScratch {
-    pub(crate) fn take_output(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.output)
-    }
-
-    pub(crate) fn recycle_output(&mut self, mut output: Vec<u8>) {
-        output.clear();
-        self.output = output;
-    }
-
-    pub(crate) fn allocated_bytes(&self) -> usize {
-        self.output.capacity()
-    }
-}
-
 pub(crate) struct ZstdScratch {
     compressor: Option<zstd::bulk::Compressor<'static>>,
     compressor_level: Option<i32>,
@@ -138,7 +110,6 @@ impl ZstdScratch {
 pub(crate) struct CompressionScratchArena {
     lz4: Lz4Scratch,
     lzma: LzmaScratch,
-    zpaq: ZpaqScratch,
     zstd: ZstdScratch,
 }
 
@@ -147,7 +118,6 @@ impl fmt::Debug for CompressionScratchArena {
         f.debug_struct("CompressionScratchArena")
             .field("lz4", &self.lz4)
             .field("lzma", &self.lzma)
-            .field("zpaq", &self.zpaq)
             .field("zstd", &self.zstd)
             .finish()
     }
@@ -166,18 +136,11 @@ impl CompressionScratchArena {
         &mut self.lzma
     }
 
-    pub(crate) fn zpaq(&mut self) -> &mut ZpaqScratch {
-        &mut self.zpaq
-    }
-
     pub(crate) fn zstd(&mut self) -> &mut ZstdScratch {
         &mut self.zstd
     }
 
     pub(crate) fn allocated_bytes(&self) -> usize {
-        self.lz4.allocated_bytes()
-            + self.lzma.allocated_bytes()
-            + self.zpaq.allocated_bytes()
-            + self.zstd.allocated_bytes()
+        self.lz4.allocated_bytes() + self.lzma.allocated_bytes() + self.zstd.allocated_bytes()
     }
 }

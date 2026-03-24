@@ -1,7 +1,7 @@
 use oxide_core::{
-    ARCHIVE_METADATA_SIZE, ArchiveReader, ArchiveWriter, CHUNK_DESCRIPTOR_SIZE, ChunkDescriptor,
-    CompressionAlgo, CompressionMeta, Footer, GLOBAL_HEADER_SIZE, GlobalHeader, OxideError,
-    ReorderBuffer, SeekableArchiveWriter,
+    ArchiveReader, ArchiveWriter, ChunkDescriptor, CompressionAlgo, CompressionMeta, Footer,
+    GlobalHeader, OxideError, ReorderBuffer, SeekableArchiveWriter, ARCHIVE_METADATA_SIZE,
+    CHUNK_DESCRIPTOR_SIZE, GLOBAL_HEADER_SIZE,
 };
 use std::io::Cursor;
 
@@ -15,7 +15,6 @@ fn compression_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         CompressionAlgo::Lz4,
         CompressionAlgo::Zstd,
         CompressionAlgo::Lzma,
-        CompressionAlgo::Zpaq,
     ];
 
     for algorithm in algorithms {
@@ -82,7 +81,6 @@ fn compression_meta_flags_round_trip() -> Result<(), Box<dyn std::error::Error>>
         CompressionAlgo::Lz4,
         CompressionAlgo::Zstd,
         CompressionAlgo::Lzma,
-        CompressionAlgo::Zpaq,
     ] {
         let meta = CompressionMeta::new(algo, true);
         let encoded = meta.to_flags();
@@ -108,8 +106,8 @@ fn footer_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn archive_writer_and_reader_support_random_and_sequential_access()
--> Result<(), Box<dyn std::error::Error>> {
+fn archive_writer_and_reader_support_random_and_sequential_access(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(3)?;
     writer.write_block(&block(0, b"alpha", CompressionAlgo::Lz4))?;
@@ -169,8 +167,8 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn seekable_archive_writer_streams_payload_and_round_trips()
--> Result<(), Box<dyn std::error::Error>> {
+fn seekable_archive_writer_streams_payload_and_round_trips(
+) -> Result<(), Box<dyn std::error::Error>> {
     let cursor = Cursor::new(Vec::new());
     let mut writer = SeekableArchiveWriter::new(cursor);
     writer.write_global_header(3)?;

@@ -1,4 +1,4 @@
-use oxide_core::compression::{lz4, lzma, zpaq};
+use oxide_core::compression::{lz4, lzma};
 
 fn decode_hex(hex: &str) -> Vec<u8> {
     assert_eq!(hex.len() % 2, 0);
@@ -17,12 +17,6 @@ fn round_trip_case(data: &[u8]) {
 fn round_trip_lzma_case(data: &[u8]) {
     let encoded = lzma::apply(data, None).expect("compress should succeed");
     let decoded = lzma::reverse(&encoded).expect("decompress should succeed");
-    assert_eq!(decoded, data);
-}
-
-fn round_trip_zpaq_case(data: &[u8]) {
-    let encoded = zpaq::apply(data, None).expect("compress should succeed");
-    let decoded = zpaq::reverse(&encoded).expect("decompress should succeed");
     assert_eq!(decoded, data);
 }
 
@@ -80,23 +74,6 @@ fn lzma_roundtrip_large_mixed() {
         data.extend((0u8..=63).cycle().take(8));
     }
     round_trip_lzma_case(&data);
-}
-
-#[test]
-fn zpaq_roundtrip_small_literal_only() {
-    round_trip_zpaq_case(b"abc");
-}
-
-#[test]
-fn zpaq_roundtrip_large_mixed() {
-    let mut data = Vec::with_capacity(256 * 1024);
-    for i in 0..(1024 * 8) {
-        data.extend_from_slice(b"oxide-zpaq-");
-        data.push((i & 0xFF) as u8);
-        data.push(((i * 7) & 0xFF) as u8);
-        data.extend((0u8..=63).cycle().take(8));
-    }
-    round_trip_zpaq_case(&data);
 }
 
 #[test]
