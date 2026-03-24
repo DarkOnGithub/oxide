@@ -7,7 +7,7 @@
 //! ## Key Components
 //!
 //! - **Pipeline**: Orchestrates the scanning, processing, and writing of archives.
-//! - **Compression**: LZ4 and Zstd codec dispatch.
+//! - **Compression**: LZ4, LZMA, ZPAQ, and Zstd codec dispatch.
 //! - **IO**: Efficient I/O operations, including memory-mapped files and scanners.
 //! - **Telemetry**: Comprehensive instrumentation for monitoring and profiling.
 
