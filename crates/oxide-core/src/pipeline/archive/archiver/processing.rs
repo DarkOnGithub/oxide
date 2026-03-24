@@ -1,7 +1,11 @@
 use std::time::Instant;
 
 use crate::buffer::BufferPool;
-use crate::compression::{CompressionRequest, apply_compression_request_with_scratch};
+use crate::compression::{
+    CompressionRequest, apply_compression_request_with_scratch,
+    apply_compression_request_with_scratch_into, recycle_compression_buffer,
+    supports_direct_buffer_output,
+};
 use crate::core::WorkerScratchArena;
 use crate::pipeline::archive::types::ProcessingThroughputTotals;
 use crate::types::{Batch, CompressedBlock, CompressedPayload, CompressionAlgo, Result};
@@ -34,7 +38,10 @@ fn is_likely_incompressible_sample(
         scratch.compression(),
     )?;
 
-    Ok(probe.len() >= sample_len)
+    let likely_incompressible = probe.len() >= sample_len;
+    recycle_compression_buffer(plan.algo, probe, scratch.compression());
+
+    Ok(likely_incompressible)
 }
 
 pub fn process_batch(
@@ -56,6 +63,12 @@ pub fn process_batch(
     } = batch;
     let source_len = data.len();
     let source = data.as_slice();
+    let request = CompressionRequest {
+        data: source,
+        algo: plan.algo,
+        preset: plan.preset,
+        zstd_level: plan.zstd_level,
+    };
 
     if force_raw_storage {
         processing_totals.record(source_len as u64, std::time::Duration::ZERO);
@@ -85,19 +98,39 @@ pub fn process_batch(
         ));
     }
 
+    if !skip_compression && supports_direct_buffer_output(plan.algo) {
+        let compression_started = Instant::now();
+        let mut compressed = pool.acquire();
+        apply_compression_request_with_scratch_into(
+            request,
+            scratch.compression(),
+            compressed.as_mut_vec(),
+        )?;
+        let compression_elapsed = compression_started.elapsed();
+        processing_totals.record(source_len as u64, compression_elapsed);
+
+        let raw_passthrough = raw_fallback_enabled && compressed.len() >= source_len;
+        let data = if raw_passthrough {
+            CompressedPayload::from_batch_data_in_pool(data, pool)
+        } else {
+            CompressedPayload::from(compressed)
+        };
+
+        return Ok(CompressedBlock::with_chunk_encoding(
+            id,
+            stream_id,
+            data,
+            plan,
+            raw_passthrough,
+            source_len as u64,
+        ));
+    }
+
     let (compressed, compression_elapsed) = if skip_compression {
         (source.to_vec(), std::time::Duration::ZERO)
     } else {
         let compression_started = Instant::now();
-        let compressed = apply_compression_request_with_scratch(
-            CompressionRequest {
-                data: source,
-                algo: plan.algo,
-                preset: plan.preset,
-                zstd_level: plan.zstd_level,
-            },
-            scratch.compression(),
-        )?;
+        let compressed = apply_compression_request_with_scratch(request, scratch.compression())?;
         (compressed, compression_started.elapsed())
     };
     processing_totals.record(source_len as u64, compression_elapsed);

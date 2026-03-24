@@ -514,6 +514,7 @@ impl Extractor {
             let local_task_rx = task_rx.clone();
             let local_result_tx = result_tx.clone();
             let local_runtime = Arc::clone(&runtime_state);
+            let local_buffer_pool = Arc::clone(&self.buffer_pool);
             let handle = thread::spawn(move || -> DecodeWorkerOutcome {
                 let started = Instant::now();
                 let mut tasks_completed = 0usize;
@@ -527,6 +528,7 @@ impl Extractor {
                         task.header,
                         task.block_data,
                         &mut scratch,
+                        &local_buffer_pool,
                     );
                     let busy_elapsed = decode_started.elapsed();
                     busy += busy_elapsed;
@@ -892,6 +894,18 @@ pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Res
     let compression_meta = header.compression_meta()?;
     let decoded = if compression_meta.raw_passthrough {
         block_data
+    } else if crate::compression::supports_direct_buffer_output(compression_meta.algo) {
+        let mut decoded = Vec::new();
+        crate::compression::reverse_compression_request_with_scratch_into(
+            crate::compression::DecompressionRequest {
+                data: &block_data,
+                algo: compression_meta.algo,
+                raw_len: Some(header.raw_len as usize),
+            },
+            &mut scratch,
+            &mut decoded,
+        )?;
+        decoded
     } else {
         crate::compression::reverse_compression_request_with_scratch(
             crate::compression::DecompressionRequest {
@@ -914,10 +928,23 @@ fn decode_block_payload_with_scratch(
     header: ChunkDescriptor,
     block_data: PooledBuffer,
     scratch: &mut CompressionScratchArena,
+    pool: &BufferPool,
 ) -> Result<DecodedBlock> {
     let compression_meta = header.compression_meta()?;
     let decoded = if compression_meta.raw_passthrough {
         DecodedBlock::Pooled(block_data)
+    } else if crate::compression::supports_direct_buffer_output(compression_meta.algo) {
+        let mut decoded = pool.acquire();
+        crate::compression::reverse_compression_request_with_scratch_into(
+            crate::compression::DecompressionRequest {
+                data: block_data.as_slice(),
+                algo: compression_meta.algo,
+                raw_len: Some(header.raw_len as usize),
+            },
+            scratch,
+            decoded.as_mut_vec(),
+        )?;
+        DecodedBlock::Pooled(decoded)
     } else {
         DecodedBlock::Owned(
             crate::compression::reverse_compression_request_with_scratch(

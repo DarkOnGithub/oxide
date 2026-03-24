@@ -357,10 +357,10 @@ impl CompressionMeta {
     /// Encodes compression metadata into OXZ compression flags.
     ///
     /// Layout:
-    /// - Bits 0..=1: algorithm (01 LZ4, 10 Zstd, 11 LZMA)
+    /// - Bits 0..=1: legacy algorithm selector (01 LZ4, 10 Zstd, 11 LZMA, 00 = extended)
     /// - Bit 2: raw passthrough marker
     /// - Bits 3..=4: preset (00 Fast, 01 Default, 10 High)
-    /// - Bits 5..=7: reserved (must be zero)
+    /// - Bits 5..=7: extended algorithm identifier when bits 0..=1 are 00 (001 = ZPAQ)
     pub fn to_flags(self) -> u8 {
         let algo = self.algo.to_flags();
         let raw = if self.raw_passthrough { 1 << 2 } else { 0 };
@@ -369,13 +369,13 @@ impl CompressionMeta {
 
     /// Decodes compression metadata from OXZ compression flags.
     pub fn from_flags(flags: u8) -> Result<Self> {
-        if flags & 0b1110_0000 != 0 {
+        if flags & 0b11 != 0 && flags & 0b1110_0000 != 0 {
             return Err(OxideError::InvalidFormat(
                 "invalid compression flags reserved bits",
             ));
         }
 
-        let algo = CompressionAlgo::from_flags(flags & 0b11)?;
+        let algo = CompressionAlgo::from_flags(flags)?;
         let preset = CompressionPreset::from_flag_bits(flags)?;
         let raw_passthrough = flags & (1 << 2) != 0;
 
@@ -490,6 +490,8 @@ pub enum CompressionAlgo {
     Lz4,
     /// LZMA/XZ compression with high-ratio presets.
     Lzma,
+    /// ZPAQ compression with very high-ratio presets.
+    Zpaq,
     /// Zstandard compression with tunable ratio/speed levels.
     Zstd,
 }
@@ -501,15 +503,20 @@ impl CompressionAlgo {
             Self::Lz4 => 0x01,
             Self::Zstd => 0x02,
             Self::Lzma => 0x03,
+            Self::Zpaq => 0b0010_0000,
         }
     }
 
     /// Decodes OXZ compression flags into a compression algorithm.
     pub fn from_flags(flags: u8) -> Result<Self> {
-        match flags {
-            0x01 => Ok(Self::Lz4),
-            0x02 => Ok(Self::Zstd),
-            0x03 => Ok(Self::Lzma),
+        let legacy_algo = flags & 0b11;
+        let extended_algo = (flags >> 5) & 0b111;
+
+        match (legacy_algo, extended_algo) {
+            (0x01, 0) => Ok(Self::Lz4),
+            (0x02, 0) => Ok(Self::Zstd),
+            (0x03, 0) => Ok(Self::Lzma),
+            (0x00, 0b001) => Ok(Self::Zpaq),
             _ => Err(OxideError::InvalidFormat("invalid compression flags")),
         }
     }
