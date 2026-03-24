@@ -438,8 +438,6 @@ pub enum CompressionAlgo {
     Lz4,
     /// LZMA/XZ compression with high-ratio presets.
     Lzma,
-    /// ZPAQ compression with very high-ratio presets.
-    Zpaq,
     /// Zstandard compression with tunable ratio/speed levels.
     Zstd,
 }
@@ -451,7 +449,6 @@ impl CompressionAlgo {
             Self::Lz4 => 0b001,
             Self::Zstd => 0b010,
             Self::Lzma => 0b011,
-            Self::Zpaq => 0b100,
         }
     }
 
@@ -461,7 +458,6 @@ impl CompressionAlgo {
             0b001 => Ok(Self::Lz4),
             0b010 => Ok(Self::Zstd),
             0b011 => Ok(Self::Lzma),
-            0b100 => Ok(Self::Zpaq),
             _ => Err(OxideError::InvalidFormat("invalid compression flags")),
         }
     }

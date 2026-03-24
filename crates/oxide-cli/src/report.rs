@@ -786,7 +786,6 @@ fn compression_label(compression: CompressionAlgo, level: Option<i32>) -> String
     let name = match compression {
         CompressionAlgo::Lz4 => "lz4",
         CompressionAlgo::Lzma => "lzma",
-        CompressionAlgo::Zpaq => "zpaq",
         CompressionAlgo::Zstd => "zstd",
     };
 

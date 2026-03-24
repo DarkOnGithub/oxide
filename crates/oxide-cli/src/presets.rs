@@ -6,8 +6,8 @@ use std::path::Path;
 use oxide_core::CompressionAlgo;
 use serde::Deserialize;
 
+use crate::cli::{parse_size, CompressionArg};
 use crate::AppResult;
-use crate::cli::{CompressionArg, parse_size};
 
 const DEFAULT_PRESETS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/presets.json");
 
@@ -314,7 +314,6 @@ fn parse_compression_algo(value: &str) -> Result<CompressionAlgo, io::Error> {
     match value.trim().to_ascii_lowercase().as_str() {
         "lz4" => Ok(CompressionArg::Lz4.into()),
         "lzma" | "xz" => Ok(CompressionArg::Lzma.into()),
-        "zpaq" => Ok(CompressionArg::Zpaq.into()),
         "zstd" => Ok(CompressionArg::Zstd.into()),
         other => Err(invalid_input(format!("unsupported compression '{other}'"))),
     }
@@ -337,9 +336,6 @@ fn validate_compression_level(
         ))),
         CompressionAlgo::Lzma if !(1..=9).contains(&level) => Err(invalid_input(format!(
             "invalid compression.level '{level}' for lzma: expected an integer between 1 and 9"
-        ))),
-        CompressionAlgo::Zpaq if !(1..=5).contains(&level) => Err(invalid_input(format!(
-            "invalid compression.level '{level}' for zpaq: expected an integer between 1 and 5"
         ))),
         _ => Ok(()),
     }
@@ -373,7 +369,7 @@ mod tests {
 
     use oxide_core::CompressionAlgo;
 
-    use super::{ArchiveOverrides, DEFAULT_PRESETS_PATH, PresetFile};
+    use super::{ArchiveOverrides, PresetFile, DEFAULT_PRESETS_PATH};
 
     fn parse_fixture(json: &str) -> PresetFile {
         serde_json::from_str(json).expect("fixture should parse")
@@ -460,12 +456,12 @@ mod tests {
         assert_eq!(balanced.compression_level, Some(6));
         assert_eq!(ultra.compression, CompressionAlgo::Lzma);
         assert_eq!(ultra.compression_level, Some(9));
-        assert_eq!(extreme.compression, CompressionAlgo::Zpaq);
-        assert_eq!(extreme.compression_level, Some(5));
+        assert_eq!(extreme.compression, CompressionAlgo::Lzma);
+        assert_eq!(extreme.compression_level, Some(9));
     }
 
     #[test]
-    fn resolves_lzma_compression_from_config() {
+    fn resolves_maximum_lzma_compression_from_config() {
         let file = parse_fixture(
             r#"{
               "archive": {
@@ -511,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_zpaq_compression_from_config() {
+    fn resolves_lzma_compression_from_config() {
         let file = parse_fixture(
             r#"{
               "archive": {
@@ -536,8 +532,8 @@ mod tests {
                 "presets": {
                   "maximum": {
                     "compression": {
-                      "compressor": "zpaq",
-                      "level": 5
+                      "compressor": "lzma",
+                      "level": 9
                     }
                   }
                 }
@@ -552,8 +548,8 @@ mod tests {
             .resolve("maximum", "fixture", ArchiveOverrides::default())
             .expect("settings should resolve");
 
-        assert_eq!(resolved.compression, CompressionAlgo::Zpaq);
-        assert_eq!(resolved.compression_level, Some(5));
+        assert_eq!(resolved.compression, CompressionAlgo::Lzma);
+        assert_eq!(resolved.compression_level, Some(9));
     }
 
     #[test]
