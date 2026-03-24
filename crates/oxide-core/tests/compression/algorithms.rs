@@ -15,15 +15,13 @@ fn round_trip_case(data: &[u8]) {
 }
 
 fn round_trip_lzma_case(data: &[u8]) {
-    let encoded =
-        lzma::apply(data, oxide_core::CompressionPreset::Default).expect("compress should succeed");
+    let encoded = lzma::apply(data, None).expect("compress should succeed");
     let decoded = lzma::reverse(&encoded).expect("decompress should succeed");
     assert_eq!(decoded, data);
 }
 
 fn round_trip_zpaq_case(data: &[u8]) {
-    let encoded =
-        zpaq::apply(data, oxide_core::CompressionPreset::Default).expect("compress should succeed");
+    let encoded = zpaq::apply(data, None).expect("compress should succeed");
     let decoded = zpaq::reverse(&encoded).expect("decompress should succeed");
     assert_eq!(decoded, data);
 }

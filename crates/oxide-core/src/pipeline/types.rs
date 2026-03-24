@@ -5,7 +5,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::CompressionPreset;
 use crate::buffer::BufferPool;
 use crate::types::CompressionAlgo;
 
@@ -225,10 +224,8 @@ pub enum StatValue {
 pub struct PipelinePerformanceOptions {
     /// Enables per-block raw passthrough when compression does not reduce size.
     pub raw_fallback_enabled: bool,
-    /// Compression preset metadata stored in each block.
-    pub compression_preset: CompressionPreset,
-    /// Optional explicit zstd compression level used only during encoding.
-    pub zstd_level: Option<i32>,
+    /// Optional explicit codec-specific compression level used only during encoding.
+    pub compression_level: Option<i32>,
     /// Maximum in-flight block payload bytes pending worker completion.
     pub max_inflight_bytes: usize,
     /// Maximum in-flight blocks scaled by worker count.
@@ -249,8 +246,7 @@ impl Default for PipelinePerformanceOptions {
     fn default() -> Self {
         Self {
             raw_fallback_enabled: true,
-            compression_preset: CompressionPreset::Fast,
-            zstd_level: None,
+            compression_level: None,
             max_inflight_bytes: 512 * 1024 * 1024,
             max_inflight_blocks_per_worker: 256,
             directory_stream_read_buffer_size: 16 * 1024 * 1024,

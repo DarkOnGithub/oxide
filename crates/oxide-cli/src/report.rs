@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use oxide_core::telemetry::{HistogramSnapshot, TelemetrySnapshot};
 use oxide_core::{
-    ArchiveReport, ArchiveSourceKind, BufferPool, CompressionAlgo, CompressionPreset,
-    ExtractReport, ReportValue, ThreadReport, WorkerReport,
+    ArchiveReport, ArchiveSourceKind, BufferPool, CompressionAlgo, ExtractReport, ReportValue,
+    ThreadReport, WorkerReport,
 };
 
 use crate::ui::{
@@ -20,7 +20,7 @@ pub struct ArchiveReportSummary<'a> {
     pub output: &'a Path,
     pub profile_name: &'a str,
     pub compression: CompressionAlgo,
-    pub preset: CompressionPreset,
+    pub compression_level: Option<i32>,
     pub report: &'a ArchiveReport,
     pub peak_read_bps: f64,
     pub peak_write_bps: f64,
@@ -41,7 +41,7 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
         output,
         profile_name,
         compression,
-        preset,
+        compression_level,
         report,
         peak_read_bps,
         peak_write_bps,
@@ -70,10 +70,9 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
             (
                 "Profile".to_string(),
                 format!(
-                    "{} | {} / {}",
+                    "{} | {}",
                     profile_name,
-                    compression_label(compression),
-                    preset_label(preset)
+                    compression_label(compression, compression_level)
                 ),
             ),
             ("Elapsed".to_string(), format_duration(report.elapsed)),
@@ -783,20 +782,17 @@ fn thread_stage_summary(thread: &ThreadReport, order: &[(&str, &str)]) -> Option
     (!pieces.is_empty()).then(|| pieces.join(" | "))
 }
 
-fn compression_label(compression: CompressionAlgo) -> &'static str {
-    match compression {
+fn compression_label(compression: CompressionAlgo, level: Option<i32>) -> String {
+    let name = match compression {
         CompressionAlgo::Lz4 => "lz4",
         CompressionAlgo::Lzma => "lzma",
         CompressionAlgo::Zpaq => "zpaq",
         CompressionAlgo::Zstd => "zstd",
-    }
-}
+    };
 
-fn preset_label(preset: CompressionPreset) -> &'static str {
-    match preset {
-        CompressionPreset::Fast => "fast",
-        CompressionPreset::Default => "default",
-        CompressionPreset::High => "high",
+    match level {
+        Some(level) => format!("{name}/{level}"),
+        None => name.to_string(),
     }
 }
 

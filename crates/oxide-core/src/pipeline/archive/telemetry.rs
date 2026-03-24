@@ -6,7 +6,7 @@ use crate::telemetry::{
     self, ArchiveProgressEvent, ArchiveReport, ExtractProgressEvent, ExtractReport, ReportValue,
     RunTelemetryOptions, TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport, profile, tags,
 };
-use crate::types::{CompressionPreset, duration_to_us};
+use crate::types::duration_to_us;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -166,7 +166,7 @@ pub fn build_stats_extensions(
     runtime: &PoolRuntimeSnapshot,
     block_size: usize,
     raw_passthrough_blocks: u64,
-    compression_preset: CompressionPreset,
+    compression_level: Option<i32>,
     max_inflight_blocks: usize,
     max_inflight_bytes: usize,
     configured_inflight_bytes: usize,
@@ -240,10 +240,12 @@ pub fn build_stats_extensions(
         "compression.raw_passthrough_blocks".to_string(),
         StatValue::U64(raw_passthrough_blocks),
     );
-    extensions.insert(
-        "compression.preset".to_string(),
-        StatValue::Text(format!("{compression_preset:?}")),
-    );
+    if let Some(level) = compression_level {
+        extensions.insert(
+            "compression.level".to_string(),
+            StatValue::U64(level as u64),
+        );
+    }
     extensions.insert(
         "pipeline.max_inflight_blocks".to_string(),
         StatValue::U64(max_inflight_blocks as u64),

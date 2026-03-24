@@ -2,8 +2,9 @@
   "archive": {
     "default_preset": "balanced",
     "defaults": {
-      "compression": "lz4",
-      "compression_preset": "fast",
+      "compression": {
+        "compressor": "lz4"
+      },
       "block_size": "1M",
       "workers": 14,
       "pool_capacity": "2M",
@@ -19,8 +20,9 @@
     },
     "presets": {
       "fast": {
-        "compression": "lz4",
-        "compression_preset": "fast",
+        "compression": {
+          "compressor": "lz4"
+        },
         "block_size": "1M",
         "stream_read_buffer": "256M",
         "inflight_bytes": "3G",
@@ -30,9 +32,10 @@
         "workers": 6
       },
       "balanced": {
-        "compression": "zstd",
-        "zstd_level": 6,
-        "compression_preset": "balanced",
+        "compression": {
+          "compressor": "zstd",
+          "level": 6
+        },
         "block_size": "2M",
         "stream_read_buffer": "128M",
         "directory_mmap_threshold": "8M",
@@ -41,8 +44,10 @@
         "result_wait_ms": 1
       },
       "ultra": {
-        "compression": "lzma",
-        "compression_preset": "high",
+        "compression": {
+          "compressor": "lzma",
+          "level": 9
+        },
         "block_size": "4M",
         "stream_read_buffer": "256M",
         "inflight_bytes": "4G",
@@ -52,8 +57,10 @@
         "result_wait_ms": 2
       },
       "extreme": {
-        "compression": "zpaq",
-        "compression_preset": "high",
+        "compression": {
+          "compressor": "zpaq",
+          "level": 5
+        },
         "block_size": "4M",
         "stream_read_buffer": "256M",
         "inflight_bytes": "4G",
@@ -63,8 +70,10 @@
         "result_wait_ms": 2
       },
       "compact": {
-        "compression": "lzma",
-        "compression_preset": "high",
+        "compression": {
+          "compressor": "lzma",
+          "level": 9
+        },
         "block_size": "4M",
         "stream_read_buffer": "256M",
         "inflight_bytes": "4G",
@@ -74,8 +83,10 @@
         "result_wait_ms": 2
       },
       "maximum": {
-        "compression": "zpaq",
-        "compression_preset": "high",
+        "compression": {
+          "compressor": "zpaq",
+          "level": 5
+        },
         "block_size": "4M",
         "stream_read_buffer": "256M",
         "inflight_bytes": "4G",

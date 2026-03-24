@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader,
-    BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo, CompressionPreset, ExtractProgressEvent,
-    FOOTER_SIZE, ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink,
+    BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo, ExtractProgressEvent, FOOTER_SIZE,
+    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -253,7 +253,6 @@ fn pipeline_forces_raw_storage_for_known_compressed_extensions()
         Arc::new(BufferPool::new(16 * 1024, 64)),
         CompressionAlgo::Lz4,
     );
-    config.performance.compression_preset = CompressionPreset::High;
     let pipeline = ArchivePipeline::new(config);
 
     let run = pipeline.archive_path(&input, Vec::new(), RunTelemetryOptions::default(), None)?;
@@ -295,7 +294,6 @@ fn pipeline_forces_raw_storage_for_known_extensions() -> Result<(), Box<dyn std:
         Arc::new(BufferPool::new(16 * 1024, 64)),
         CompressionAlgo::Lz4,
     );
-    config.performance.compression_preset = CompressionPreset::High;
     let pipeline = ArchivePipeline::new(config);
 
     let run = pipeline.archive_path(&input, Vec::new(), RunTelemetryOptions::default(), None)?;
@@ -334,7 +332,6 @@ fn directory_archives_split_batches_when_raw_storage_policy_changes()
         Arc::new(BufferPool::new(16 * 1024, 64)),
         CompressionAlgo::Lz4,
     );
-    config.performance.compression_preset = CompressionPreset::High;
     let pipeline = ArchivePipeline::new(config);
 
     let run = pipeline.archive_path(
@@ -443,7 +440,6 @@ fn pipeline_records_balanced_mode_chunk_headers_are_reserved()
         Arc::new(BufferPool::new(16 * 1024, 64)),
         CompressionAlgo::Lz4,
     );
-    config.performance.compression_preset = CompressionPreset::Default;
     let pipeline = ArchivePipeline::new(config);
 
     let archive = pipeline
@@ -474,7 +470,6 @@ fn pipeline_records_ultra_mode_chunk_headers_are_reserved() -> Result<(), Box<dy
         Arc::new(BufferPool::new(16 * 1024, 64)),
         CompressionAlgo::Lz4,
     );
-    config.performance.compression_preset = CompressionPreset::High;
     let pipeline = ArchivePipeline::new(config);
 
     let archive = pipeline
@@ -494,7 +489,8 @@ fn pipeline_records_ultra_mode_chunk_headers_are_reserved() -> Result<(), Box<dy
 }
 
 #[test]
-fn file_archive_uses_requested_compression_preset() -> Result<(), Box<dyn std::error::Error>> {
+fn file_archive_records_requested_compression_algorithm() -> Result<(), Box<dyn std::error::Error>>
+{
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -504,7 +500,6 @@ fn file_archive_uses_requested_compression_preset() -> Result<(), Box<dyn std::e
         Arc::new(BufferPool::new(16 * 1024, 64)),
         CompressionAlgo::Lz4,
     );
-    config.performance.compression_preset = CompressionPreset::High;
     let pipeline = ArchivePipeline::new(config);
 
     let archive = pipeline
@@ -519,7 +514,7 @@ fn file_archive_uses_requested_compression_preset() -> Result<(), Box<dyn std::e
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, _payload) = reader.read_block(0)?;
 
-    assert_eq!(header.compression_meta()?.preset, CompressionPreset::High);
+    assert_eq!(header.compression_meta()?.algo, CompressionAlgo::Lz4);
     Ok(())
 }
 
@@ -720,7 +715,8 @@ fn directory_archive_fast_mode_chunk_headers_are_reserved() -> Result<(), Box<dy
 }
 
 #[test]
-fn directory_archive_uses_requested_compression_preset() -> Result<(), Box<dyn std::error::Error>> {
+fn directory_archive_records_requested_compression_algorithm()
+-> Result<(), Box<dyn std::error::Error>> {
     let source = TempDir::new()?;
     write_directory_file(&source, "sample.txt", &build_text_fixture(64 * 1024))?;
 
@@ -730,7 +726,6 @@ fn directory_archive_uses_requested_compression_preset() -> Result<(), Box<dyn s
         Arc::new(BufferPool::new(16 * 1024, 64)),
         CompressionAlgo::Lz4,
     );
-    config.performance.compression_preset = CompressionPreset::High;
     let pipeline = ArchivePipeline::new(config);
 
     let archive = pipeline
@@ -745,7 +740,7 @@ fn directory_archive_uses_requested_compression_preset() -> Result<(), Box<dyn s
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, _payload) = reader.read_block(0)?;
 
-    assert_eq!(header.compression_meta()?.preset, CompressionPreset::High);
+    assert_eq!(header.compression_meta()?.algo, CompressionAlgo::Lz4);
     Ok(())
 }
 

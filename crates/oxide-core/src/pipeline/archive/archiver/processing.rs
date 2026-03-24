@@ -32,8 +32,7 @@ fn is_likely_incompressible_sample(
         CompressionRequest {
             data: &source[..sample_len],
             algo: plan.algo,
-            preset: plan.preset,
-            zstd_level: plan.zstd_level,
+            level: plan.level,
         },
         scratch.compression(),
     )?;
@@ -66,8 +65,7 @@ pub fn process_batch(
     let request = CompressionRequest {
         data: source,
         algo: plan.algo,
-        preset: plan.preset,
-        zstd_level: plan.zstd_level,
+        level: plan.level,
     };
 
     if force_raw_storage {
@@ -174,13 +172,12 @@ mod tests {
     use crate::buffer::BufferPool;
     use crate::core::WorkerScratchArena;
     use crate::pipeline::archive::types::ProcessingThroughputTotals;
-    use crate::types::{Batch, ChunkEncodingPlan, CompressionAlgo, CompressionPreset};
+    use crate::types::{Batch, ChunkEncodingPlan, CompressionAlgo};
 
     #[test]
     fn skip_compression_stores_source_bytes_raw() {
         let mut batch = Batch::new(0, "demo.txt", Bytes::from_static(b"banana bandana banana"));
-        batch.compression_plan =
-            ChunkEncodingPlan::new(CompressionAlgo::Lz4, CompressionPreset::Default);
+        batch.compression_plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4);
 
         let pool = BufferPool::new(1024, 4);
         let totals = ProcessingThroughputTotals::default();
@@ -203,8 +200,7 @@ mod tests {
     #[test]
     fn force_raw_storage_bypasses_compression() {
         let mut batch = Batch::new(0, "photo.jpg", Bytes::from_static(b"banana bandana banana"));
-        batch.compression_plan =
-            ChunkEncodingPlan::new(CompressionAlgo::Lz4, CompressionPreset::Default);
+        batch.compression_plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4);
         batch.force_raw_storage = true;
 
         let pool = BufferPool::new(1024, 4);
@@ -236,7 +232,7 @@ mod tests {
                 state as u8
             })
             .collect::<Vec<_>>();
-        let plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4, CompressionPreset::Default);
+        let plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4);
         let mut scratch = WorkerScratchArena::new();
 
         let probe = is_likely_incompressible_sample(&sample, plan, &mut scratch)
@@ -248,7 +244,7 @@ mod tests {
     #[test]
     fn incompressible_probe_keeps_repetitive_data_compressible() {
         let sample = vec![b'a'; INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN];
-        let plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4, CompressionPreset::Default);
+        let plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4);
         let mut scratch = WorkerScratchArena::new();
 
         let probe = is_likely_incompressible_sample(&sample, plan, &mut scratch)

@@ -50,9 +50,9 @@ pub struct ArchiveArgs {
     #[arg(long, default_value_t = false)]
     pub skip_compression: bool,
 
-    /// Explicit zstd level (1-22). Only valid with `--compression zstd` or zstd presets.
+    /// Explicit codec-specific compression level.
     #[arg(long)]
-    pub zstd_level: Option<i32>,
+    pub compression_level: Option<i32>,
 
     /// Archive tuning preset name from the preset config file.
     #[arg(long)]
@@ -333,12 +333,18 @@ mod tests {
     }
 
     #[test]
-    fn archive_command_accepts_zstd_level_flag() {
-        let cli = Cli::try_parse_from(["oxide", "archive", "demo/input", "--zstd-level", "19"])
-            .expect("archive arguments should parse");
+    fn archive_command_accepts_compression_level_flag() {
+        let cli = Cli::try_parse_from([
+            "oxide",
+            "archive",
+            "demo/input",
+            "--compression-level",
+            "19",
+        ])
+        .expect("archive arguments should parse");
 
         match cli.command {
-            Commands::Archive(args) => assert_eq!(args.zstd_level, Some(19)),
+            Commands::Archive(args) => assert_eq!(args.compression_level, Some(19)),
             _ => panic!("expected archive command"),
         }
     }

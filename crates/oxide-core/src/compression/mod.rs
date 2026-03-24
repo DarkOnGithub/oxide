@@ -1,4 +1,4 @@
-use crate::{CompressionAlgo, CompressionPreset, Result};
+use crate::{CompressionAlgo, Result};
 
 pub mod lz4;
 pub mod lzma;
@@ -13,8 +13,7 @@ pub(crate) use scratch::CompressionScratchArena;
 pub struct CompressionRequest<'a> {
     pub data: &'a [u8],
     pub algo: CompressionAlgo,
-    pub preset: CompressionPreset,
-    pub zstd_level: Option<i32>,
+    pub level: Option<i32>,
 }
 
 impl<'a> CompressionRequest<'a> {
@@ -22,8 +21,7 @@ impl<'a> CompressionRequest<'a> {
         Self {
             data,
             algo,
-            preset: CompressionPreset::Default,
-            zstd_level: None,
+            level: None,
         }
     }
 }
@@ -67,21 +65,16 @@ pub(crate) fn apply_compression_request_with_scratch(
     scratch: &mut CompressionScratchArena,
 ) -> Result<Vec<u8>> {
     match request.algo {
-        CompressionAlgo::Lz4 => {
-            lz4::apply_with_scratch(request.data, request.preset, scratch.lz4())
-        }
+        CompressionAlgo::Lz4 => lz4::apply_with_scratch(request.data, scratch.lz4()),
         CompressionAlgo::Lzma => {
-            lzma::apply_with_scratch(request.data, request.preset, scratch.lzma())
+            lzma::apply_with_scratch(request.data, request.level, scratch.lzma())
         }
         CompressionAlgo::Zpaq => {
-            zpaq::apply_with_scratch(request.data, request.preset, scratch.zpaq())
+            zpaq::apply_with_scratch(request.data, request.level, scratch.zpaq())
         }
-        CompressionAlgo::Zstd => zstd::apply_with_scratch(
-            request.data,
-            request.preset,
-            request.zstd_level,
-            scratch.zstd(),
-        ),
+        CompressionAlgo::Zstd => {
+            zstd::apply_with_scratch(request.data, request.level, scratch.zstd())
+        }
     }
 }
 
@@ -92,20 +85,15 @@ pub(crate) fn apply_compression_request_with_scratch_into(
 ) -> Result<()> {
     match request.algo {
         CompressionAlgo::Lz4 => {
-            let compressed = lz4::apply_with_scratch(request.data, request.preset, scratch.lz4())?;
+            let compressed = lz4::apply_with_scratch(request.data, scratch.lz4())?;
             output.clear();
             output.extend_from_slice(&compressed);
             Ok(())
         }
-        CompressionAlgo::Lzma => lzma::apply_into_vec(request.data, request.preset, output),
-        CompressionAlgo::Zpaq => zpaq::apply_into_vec(request.data, request.preset, output),
+        CompressionAlgo::Lzma => lzma::apply_into_vec(request.data, request.level, output),
+        CompressionAlgo::Zpaq => zpaq::apply_into_vec(request.data, request.level, output),
         CompressionAlgo::Zstd => {
-            let compressed = zstd::apply_with_scratch(
-                request.data,
-                request.preset,
-                request.zstd_level,
-                scratch.zstd(),
-            )?;
+            let compressed = zstd::apply_with_scratch(request.data, request.level, scratch.zstd())?;
             output.clear();
             output.extend_from_slice(&compressed);
             Ok(())

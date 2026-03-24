@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use oxide_core::{CompressionAlgo, CompressionPreset};
+use oxide_core::CompressionAlgo;
 use serde::Deserialize;
 
 use crate::AppResult;
@@ -17,8 +17,7 @@ pub struct ResolvedArchiveSettings {
     pub profile_source: String,
     pub compression: CompressionAlgo,
     pub skip_compression: bool,
-    pub compression_preset: CompressionPreset,
-    pub zstd_level: Option<i32>,
+    pub compression_level: Option<i32>,
     pub block_size: usize,
     pub workers: usize,
     pub pool_capacity: usize,
@@ -37,7 +36,7 @@ pub struct ResolvedArchiveSettings {
 pub struct ArchiveOverrides {
     pub compression: Option<CompressionAlgo>,
     pub skip_compression: bool,
-    pub zstd_level: Option<i32>,
+    pub compression_level: Option<i32>,
     pub block_size: Option<usize>,
     pub workers: Option<usize>,
     pub pool_capacity: Option<usize>,
@@ -104,11 +103,9 @@ struct ArchivePresetRegistry {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct ArchivePresetConfig {
-    compression: Option<String>,
-    compression_preset: Option<String>,
-    zstd_level: Option<i32>,
+    compression: Option<CompressionConfig>,
     block_size: Option<SizeValue>,
     workers: Option<usize>,
     pool_capacity: Option<SizeValue>,
@@ -123,14 +120,22 @@ struct ArchivePresetConfig {
     result_wait_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CompressionConfig {
+    compressor: Option<String>,
+    level: Option<i32>,
+}
+
 impl ArchivePresetConfig {
     fn merge_from(&mut self, other: &Self) {
-        merge_option(&mut self.compression, other.compression.clone());
-        merge_option(
-            &mut self.compression_preset,
-            other.compression_preset.clone(),
+        merge_nested_option(
+            &mut self.compression,
+            other.compression.clone(),
+            |current, incoming| {
+                current.merge_from(&incoming);
+            },
         );
-        merge_option(&mut self.zstd_level, other.zstd_level);
         merge_option(&mut self.block_size, other.block_size.clone());
         merge_option(&mut self.workers, other.workers);
         merge_option(&mut self.pool_capacity, other.pool_capacity.clone());
@@ -160,30 +165,17 @@ impl ArchivePresetConfig {
         source_label: &str,
         overrides: ArchiveOverrides,
     ) -> AppResult<ResolvedArchiveSettings> {
-        let compression = match overrides.compression {
-            Some(compression) => compression,
-            None => self
-                .compression
-                .as_deref()
-                .map(parse_compression_algo)
-                .transpose()?
-                .ok_or_else(|| invalid_input("archive preset is missing compression"))?,
-        };
-        let compression_preset = self
-            .compression_preset
-            .as_deref()
-            .map(parse_compression_preset)
-            .transpose()?
-            .ok_or_else(|| invalid_input("archive preset is missing compression_preset"))?;
-        let zstd_level = resolve_zstd_level(compression, overrides.zstd_level.or(self.zstd_level))?;
+        let compression = self
+            .compression
+            .ok_or_else(|| invalid_input("archive preset is missing compression"))?
+            .resolve(overrides.compression, overrides.compression_level)?;
 
         Ok(ResolvedArchiveSettings {
             profile_name: preset_name.to_string(),
             profile_source: source_label.to_string(),
-            compression,
+            compression: compression.algo,
             skip_compression: overrides.skip_compression,
-            compression_preset,
-            zstd_level,
+            compression_level: compression.level,
             block_size: resolve_usize(overrides.block_size, self.block_size, "block_size")?,
             workers: resolve_number(overrides.workers, self.workers, "workers")?,
             pool_capacity: resolve_usize(
@@ -240,6 +232,43 @@ impl ArchivePresetConfig {
     }
 }
 
+impl CompressionConfig {
+    fn merge_from(&mut self, other: &Self) {
+        if other.compressor.is_some() {
+            *self = Self::default();
+        }
+
+        merge_option(&mut self.compressor, other.compressor.clone());
+        merge_option(&mut self.level, other.level);
+    }
+
+    fn resolve(
+        self,
+        override_algo: Option<CompressionAlgo>,
+        override_level: Option<i32>,
+    ) -> Result<ResolvedCompressionSettings, io::Error> {
+        let algo = match override_algo {
+            Some(algo) => algo,
+            None => self
+                .compressor
+                .as_deref()
+                .map(parse_compression_algo)
+                .transpose()?
+                .ok_or_else(|| invalid_input("archive preset compression is missing compressor"))?,
+        };
+        let level = override_level.or(self.level);
+        validate_compression_level(algo, level)?;
+
+        Ok(ResolvedCompressionSettings { algo, level })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedCompressionSettings {
+    algo: CompressionAlgo,
+    level: Option<i32>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum SizeValue {
@@ -291,43 +320,46 @@ fn parse_compression_algo(value: &str) -> Result<CompressionAlgo, io::Error> {
     }
 }
 
-fn parse_compression_preset(value: &str) -> Result<CompressionPreset, io::Error> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "fast" => Ok(CompressionPreset::Fast),
-        "default" | "balanced" => Ok(CompressionPreset::Default),
-        "high" | "compact" => Ok(CompressionPreset::High),
-        other => Err(invalid_input(format!(
-            "unsupported compression_preset '{other}'"
-        ))),
-    }
-}
-
-fn resolve_zstd_level(
+fn validate_compression_level(
     compression: CompressionAlgo,
-    zstd_level: Option<i32>,
-) -> Result<Option<i32>, io::Error> {
-    let Some(level) = zstd_level else {
-        return Ok(None);
+    level: Option<i32>,
+) -> Result<(), io::Error> {
+    let Some(level) = level else {
+        return Ok(());
     };
 
-    if compression != CompressionAlgo::Zstd {
-        return Err(invalid_input(
-            "zstd_level can only be used when compression is 'zstd'",
-        ));
+    match compression {
+        CompressionAlgo::Lz4 => Err(invalid_input(
+            "compression.level is not supported when compression.compressor is 'lz4'",
+        )),
+        CompressionAlgo::Zstd if !(1..=22).contains(&level) => Err(invalid_input(format!(
+            "invalid compression.level '{level}' for zstd: expected an integer between 1 and 22"
+        ))),
+        CompressionAlgo::Lzma if !(1..=9).contains(&level) => Err(invalid_input(format!(
+            "invalid compression.level '{level}' for lzma: expected an integer between 1 and 9"
+        ))),
+        CompressionAlgo::Zpaq if !(1..=5).contains(&level) => Err(invalid_input(format!(
+            "invalid compression.level '{level}' for zpaq: expected an integer between 1 and 5"
+        ))),
+        _ => Ok(()),
     }
-
-    if !(1..=22).contains(&level) {
-        return Err(invalid_input(format!(
-            "invalid zstd_level '{level}': expected an integer between 1 and 22"
-        )));
-    }
-
-    Ok(Some(level))
 }
 
 fn merge_option<T>(slot: &mut Option<T>, incoming: Option<T>) {
     if let Some(value) = incoming {
         *slot = Some(value);
+    }
+}
+
+fn merge_nested_option<T>(
+    slot: &mut Option<T>,
+    incoming: Option<T>,
+    merge: impl FnOnce(&mut T, T),
+) {
+    match (slot.as_mut(), incoming) {
+        (Some(current), Some(incoming)) => merge(current, incoming),
+        (None, Some(incoming)) => *slot = Some(incoming),
+        _ => {}
     }
 }
 
@@ -339,7 +371,7 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 mod tests {
     use std::fs;
 
-    use oxide_core::{CompressionAlgo, CompressionPreset};
+    use oxide_core::CompressionAlgo;
 
     use super::{ArchiveOverrides, DEFAULT_PRESETS_PATH, PresetFile};
 
@@ -354,9 +386,9 @@ mod tests {
               "archive": {
                 "default_preset": "fast",
                 "defaults": {
-                  "compression": "lz4",
-                  "compression_preset": "fast",
-                  "zstd_level": null,
+                  "compression": {
+                    "compressor": "lz4"
+                  },
                   "block_size": "2M",
                   "workers": 0,
                   "pool_capacity": "1M",
@@ -371,11 +403,8 @@ mod tests {
                   "result_wait_ms": 1
                 },
                 "presets": {
-                  "fast": {
-                    "compression_preset": "fast"
-                  },
+                  "fast": {},
                   "compact": {
-                    "compression_preset": "high",
                     "block_size": "8M"
                   }
                 }
@@ -383,11 +412,7 @@ mod tests {
             }"#,
         );
 
-        let preset = file
-            .archive
-            .presets
-            .get("compact")
-            .expect("compact preset should exist");
+        let preset = file.archive.presets.get("compact").unwrap();
         let mut merged = file.archive.defaults.clone();
         merged.merge_from(preset);
         let preset = merged
@@ -395,7 +420,6 @@ mod tests {
                 "compact",
                 "fixture",
                 ArchiveOverrides {
-                    zstd_level: None,
                     block_size: Some(16 * 1024 * 1024),
                     ..ArchiveOverrides::default()
                 },
@@ -404,14 +428,12 @@ mod tests {
 
         assert_eq!(preset.profile_name, "compact");
         assert_eq!(preset.compression, CompressionAlgo::Lz4);
-        assert!(!preset.skip_compression);
-        assert_eq!(preset.compression_preset, CompressionPreset::High);
-        assert_eq!(preset.zstd_level, None);
+        assert_eq!(preset.compression_level, None);
         assert_eq!(preset.block_size, 16 * 1024 * 1024);
     }
 
     #[test]
-    fn default_preset_file_balanced_and_ultra_use_zstd() {
+    fn default_preset_file_balanced_ultra_and_extreme_use_expected_codecs() {
         let file = parse_fixture(
             &fs::read_to_string(DEFAULT_PRESETS_PATH).expect("default presets should be readable"),
         );
@@ -428,12 +450,18 @@ mod tests {
             .resolve("ultra", "default file", ArchiveOverrides::default())
             .expect("ultra should resolve");
 
+        let mut extreme = file.archive.defaults.clone();
+        extreme.merge_from(file.archive.presets.get("extreme").unwrap());
+        let extreme = extreme
+            .resolve("extreme", "default file", ArchiveOverrides::default())
+            .expect("extreme should resolve");
+
         assert_eq!(balanced.compression, CompressionAlgo::Zstd);
-        assert_eq!(balanced.compression_preset, CompressionPreset::Default);
-        assert_eq!(balanced.zstd_level, Some(6));
-        assert_eq!(ultra.compression, CompressionAlgo::Zstd);
-        assert_eq!(ultra.compression_preset, CompressionPreset::High);
-        assert_eq!(ultra.zstd_level, Some(19));
+        assert_eq!(balanced.compression_level, Some(6));
+        assert_eq!(ultra.compression, CompressionAlgo::Lzma);
+        assert_eq!(ultra.compression_level, Some(9));
+        assert_eq!(extreme.compression, CompressionAlgo::Zpaq);
+        assert_eq!(extreme.compression_level, Some(5));
     }
 
     #[test]
@@ -443,8 +471,9 @@ mod tests {
               "archive": {
                 "default_preset": "compact",
                 "defaults": {
-                  "compression": "lz4",
-                  "compression_preset": "fast",
+                  "compression": {
+                    "compressor": "lz4"
+                  },
                   "block_size": "2M",
                   "workers": 0,
                   "pool_capacity": "1M",
@@ -460,8 +489,10 @@ mod tests {
                 },
                 "presets": {
                   "compact": {
-                    "compression": "lzma",
-                    "compression_preset": "high"
+                    "compression": {
+                      "compressor": "lzma",
+                      "level": 9
+                    }
                   }
                 }
               }
@@ -476,8 +507,7 @@ mod tests {
             .expect("settings should resolve");
 
         assert_eq!(resolved.compression, CompressionAlgo::Lzma);
-        assert_eq!(resolved.compression_preset, CompressionPreset::High);
-        assert_eq!(resolved.zstd_level, None);
+        assert_eq!(resolved.compression_level, Some(9));
     }
 
     #[test]
@@ -487,8 +517,9 @@ mod tests {
               "archive": {
                 "default_preset": "maximum",
                 "defaults": {
-                  "compression": "lz4",
-                  "compression_preset": "fast",
+                  "compression": {
+                    "compressor": "lz4"
+                  },
                   "block_size": "2M",
                   "workers": 0,
                   "pool_capacity": "1M",
@@ -504,8 +535,10 @@ mod tests {
                 },
                 "presets": {
                   "maximum": {
-                    "compression": "zpaq",
-                    "compression_preset": "high"
+                    "compression": {
+                      "compressor": "zpaq",
+                      "level": 5
+                    }
                   }
                 }
               }
@@ -520,19 +553,19 @@ mod tests {
             .expect("settings should resolve");
 
         assert_eq!(resolved.compression, CompressionAlgo::Zpaq);
-        assert_eq!(resolved.compression_preset, CompressionPreset::High);
-        assert_eq!(resolved.zstd_level, None);
+        assert_eq!(resolved.compression_level, Some(5));
     }
 
     #[test]
-    fn rejects_zstd_level_for_non_zstd_compression() {
+    fn rejects_level_for_lz4() {
         let file = parse_fixture(
             r#"{
               "archive": {
                 "default_preset": "bad",
                 "defaults": {
-                  "compression": "lz4",
-                  "compression_preset": "fast",
+                  "compression": {
+                    "compressor": "lz4"
+                  },
                   "block_size": "2M",
                   "workers": 0,
                   "pool_capacity": "1M",
@@ -548,7 +581,9 @@ mod tests {
                 },
                 "presets": {
                   "bad": {
-                    "zstd_level": 7
+                    "compression": {
+                      "level": 7
+                    }
                   }
                 }
               }
@@ -564,7 +599,51 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "zstd_level can only be used when compression is 'zstd'"
+            "compression.level is not supported when compression.compressor is 'lz4'"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_zstd_level() {
+        let file = parse_fixture(
+            r#"{
+              "archive": {
+                "default_preset": "bad",
+                "defaults": {
+                  "compression": {
+                    "compressor": "zstd",
+                    "level": 99
+                  },
+                  "block_size": "2M",
+                  "workers": 0,
+                  "pool_capacity": "1M",
+                  "pool_buffers": 512,
+                  "stats_interval_ms": 250,
+                  "inflight_bytes": "2G",
+                  "inflight_blocks_per_worker": 256,
+                  "stream_read_buffer": "64M",
+                  "producer_threads": 1,
+                  "directory_mmap_threshold": "8M",
+                  "writer_queue_blocks": 1024,
+                  "result_wait_ms": 1
+                },
+                "presets": {
+                  "bad": {}
+                }
+              }
+            }"#,
+        );
+
+        let preset = file.archive.presets.get("bad").unwrap();
+        let mut merged = file.archive.defaults.clone();
+        merged.merge_from(preset);
+
+        let error = merged
+            .resolve("bad", "fixture", ArchiveOverrides::default())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid compression.level '99' for zstd: expected an integer between 1 and 22"
         );
     }
 }

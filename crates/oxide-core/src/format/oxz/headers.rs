@@ -1,8 +1,7 @@
 use std::io::{Read, Write};
 
 use crate::{
-    ArchiveSourceKind, CompressedBlock, CompressionAlgo, CompressionMeta, CompressionPreset,
-    OxideError, Result,
+    ArchiveSourceKind, CompressedBlock, CompressionAlgo, CompressionMeta, OxideError, Result,
 };
 
 use super::{
@@ -219,7 +218,7 @@ impl ChunkDescriptor {
             payload_offset,
             raw_len,
             encoded_len,
-            CompressionMeta::new(compression, CompressionPreset::Default, false),
+            CompressionMeta::new(compression, false),
             checksum,
         )
     }

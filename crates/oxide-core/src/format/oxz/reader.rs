@@ -294,7 +294,7 @@ mod tests {
 
     use crate::{
         ArchiveManifest, ArchiveReader, ArchiveWriter, ChunkDescriptor, CompressedBlock,
-        CompressionAlgo, CompressionMeta, CompressionPreset,
+        CompressionAlgo, CompressionMeta,
     };
 
     #[derive(Debug, Clone)]
@@ -335,7 +335,7 @@ mod tests {
             .write_global_header_with_flags(2, 0)
             .expect("test archive header should write");
 
-        let meta = CompressionMeta::new(CompressionAlgo::Lz4, CompressionPreset::Default, true);
+        let meta = CompressionMeta::new(CompressionAlgo::Lz4, true);
         writer
             .write_owned_block(CompressedBlock::with_compression_meta(
                 0,
