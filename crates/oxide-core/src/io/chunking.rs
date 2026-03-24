@@ -1,5 +1,3 @@
-use crate::CompressionPreset;
-
 /// Chunk boundary mode used by the scanner and planner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkingMode {
@@ -30,7 +28,7 @@ impl ChunkingPolicy {
         }
     }
 
-    pub fn for_preset(target_size: usize, _preset: CompressionPreset) -> Self {
+    pub fn fixed_for_target(target_size: usize) -> Self {
         Self::fixed(target_size)
     }
 

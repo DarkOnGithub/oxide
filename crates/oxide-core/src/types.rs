@@ -37,36 +37,31 @@ pub struct Batch {
 pub struct ChunkEncodingPlan {
     /// Compression algorithm selected for the chunk.
     pub algo: CompressionAlgo,
-    /// Compression preset selected for the chunk.
-    pub preset: CompressionPreset,
-    /// Optional explicit zstd compression level used only by the encoder.
-    pub zstd_level: Option<i32>,
+    /// Optional explicit codec-specific compression level used only by the encoder.
+    pub level: Option<i32>,
 }
 
 impl ChunkEncodingPlan {
     /// Creates a new chunk encoding plan.
-    pub const fn new(algo: CompressionAlgo, preset: CompressionPreset) -> Self {
-        Self {
-            algo,
-            preset,
-            zstd_level: None,
-        }
+    pub const fn new(algo: CompressionAlgo) -> Self {
+        Self { algo, level: None }
     }
 
-    /// Attaches an explicit zstd level override for encoding.
-    pub const fn with_zstd_level(mut self, zstd_level: Option<i32>) -> Self {
-        self.zstd_level = zstd_level;
+    /// Attaches an explicit codec-specific compression level override for encoding.
+    pub const fn with_level(mut self, level: Option<i32>) -> Self {
+        self.level = level;
         self
     }
+
     /// Builds compression metadata for the final stored payload.
     pub fn compression_meta(self, raw_passthrough: bool) -> CompressionMeta {
-        CompressionMeta::new(self.algo, self.preset, raw_passthrough)
+        CompressionMeta::new(self.algo, raw_passthrough)
     }
 }
 
 impl Default for ChunkEncodingPlan {
     fn default() -> Self {
-        Self::new(CompressionAlgo::Lz4, CompressionPreset::Default)
+        Self::new(CompressionAlgo::Lz4)
     }
 }
 
@@ -295,61 +290,22 @@ impl From<BatchData> for Bytes {
     }
 }
 
-/// Compression preset used by a codec.
-///
-/// Presets allow balancing between compression speed and ratio.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CompressionPreset {
-    /// High-speed compression with lower ratio.
-    Fast,
-    /// Balanced compression speed and ratio.
-    Default,
-    /// High-ratio compression with lower speed.
-    High,
-}
-
-impl CompressionPreset {
-    /// Encodes the preset into bits 3..=4 of compression flags.
-    pub fn to_flag_bits(self) -> u8 {
-        match self {
-            Self::Fast => 0b00 << 3,
-            Self::Default => 0b01 << 3,
-            Self::High => 0b10 << 3,
-        }
-    }
-
-    /// Decodes bits 3..=4 from compression flags.
-    pub fn from_flag_bits(flags: u8) -> Result<Self> {
-        match (flags >> 3) & 0b11 {
-            0b00 => Ok(Self::Fast),
-            0b01 => Ok(Self::Default),
-            0b10 => Ok(Self::High),
-            _ => Err(OxideError::InvalidFormat(
-                "invalid compression preset flags",
-            )),
-        }
-    }
-}
-
 /// Compression metadata carried per block.
 ///
-/// Encapsulates the algorithm, preset, and whether raw passthrough was used.
+/// Encapsulates the algorithm and whether raw passthrough was used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionMeta {
     /// Algorithm used for compression.
     pub algo: CompressionAlgo,
-    /// Preset used for compression.
-    pub preset: CompressionPreset,
     /// Whether the data is stored in raw format (e.g., if compression failed to reduce size).
     pub raw_passthrough: bool,
 }
 
 impl CompressionMeta {
     /// Creates a new compression metadata object.
-    pub fn new(algo: CompressionAlgo, preset: CompressionPreset, raw_passthrough: bool) -> Self {
+    pub fn new(algo: CompressionAlgo, raw_passthrough: bool) -> Self {
         Self {
             algo,
-            preset,
             raw_passthrough,
         }
     }
@@ -357,31 +313,28 @@ impl CompressionMeta {
     /// Encodes compression metadata into OXZ compression flags.
     ///
     /// Layout:
-    /// - Bits 0..=1: legacy algorithm selector (01 LZ4, 10 Zstd, 11 LZMA, 00 = extended)
-    /// - Bit 2: raw passthrough marker
-    /// - Bits 3..=4: preset (00 Fast, 01 Default, 10 High)
-    /// - Bits 5..=7: extended algorithm identifier when bits 0..=1 are 00 (001 = ZPAQ)
+    /// - Bits 0..=2: algorithm selector (001 LZ4, 010 Zstd, 011 LZMA, 100 ZPAQ)
+    /// - Bit 3: raw passthrough marker
+    /// - Bits 4..=7: reserved
     pub fn to_flags(self) -> u8 {
         let algo = self.algo.to_flags();
-        let raw = if self.raw_passthrough { 1 << 2 } else { 0 };
-        algo | raw | self.preset.to_flag_bits()
+        let raw = if self.raw_passthrough { 1 << 3 } else { 0 };
+        algo | raw
     }
 
     /// Decodes compression metadata from OXZ compression flags.
     pub fn from_flags(flags: u8) -> Result<Self> {
-        if flags & 0b11 != 0 && flags & 0b1110_0000 != 0 {
+        if flags & 0b1111_0000 != 0 {
             return Err(OxideError::InvalidFormat(
                 "invalid compression flags reserved bits",
             ));
         }
 
         let algo = CompressionAlgo::from_flags(flags)?;
-        let preset = CompressionPreset::from_flag_bits(flags)?;
-        let raw_passthrough = flags & (1 << 2) != 0;
+        let raw_passthrough = flags & (1 << 3) != 0;
 
         Ok(Self {
             algo,
-            preset,
             raw_passthrough,
         })
     }
@@ -401,8 +354,6 @@ pub struct CompressedBlock {
     pub data: CompressedPayload,
     /// Compression algorithm used.
     pub compression: CompressionAlgo,
-    /// Preset used for compression.
-    pub compression_preset: CompressionPreset,
     /// Whether the data is stored raw.
     pub raw_passthrough: bool,
     /// Original uncompressed length.
@@ -422,7 +373,7 @@ impl CompressedBlock {
         Self::with_compression_meta(
             id,
             data,
-            CompressionMeta::new(compression, CompressionPreset::Default, false),
+            CompressionMeta::new(compression, false),
             original_len,
         )
     }
@@ -441,7 +392,6 @@ impl CompressedBlock {
             crc32: compute_checksum(data.as_slice()),
             data,
             compression: compression_meta.algo,
-            compression_preset: compression_meta.preset,
             raw_passthrough: compression_meta.raw_passthrough,
             original_len,
         }
@@ -463,7 +413,6 @@ impl CompressedBlock {
             crc32: compute_checksum(data.as_slice()),
             data,
             compression: encoding_plan.algo,
-            compression_preset: encoding_plan.preset,
             raw_passthrough,
             original_len,
         }
@@ -473,7 +422,6 @@ impl CompressedBlock {
     pub fn compression_meta(&self) -> CompressionMeta {
         CompressionMeta {
             algo: self.compression,
-            preset: self.compression_preset,
             raw_passthrough: self.raw_passthrough,
         }
     }
@@ -500,23 +448,20 @@ impl CompressionAlgo {
     /// Encodes the compression algorithm into OXZ compression flags.
     pub fn to_flags(self) -> u8 {
         match self {
-            Self::Lz4 => 0x01,
-            Self::Zstd => 0x02,
-            Self::Lzma => 0x03,
-            Self::Zpaq => 0b0010_0000,
+            Self::Lz4 => 0b001,
+            Self::Zstd => 0b010,
+            Self::Lzma => 0b011,
+            Self::Zpaq => 0b100,
         }
     }
 
     /// Decodes OXZ compression flags into a compression algorithm.
     pub fn from_flags(flags: u8) -> Result<Self> {
-        let legacy_algo = flags & 0b11;
-        let extended_algo = (flags >> 5) & 0b111;
-
-        match (legacy_algo, extended_algo) {
-            (0x01, 0) => Ok(Self::Lz4),
-            (0x02, 0) => Ok(Self::Zstd),
-            (0x03, 0) => Ok(Self::Lzma),
-            (0x00, 0b001) => Ok(Self::Zpaq),
+        match flags & 0b111 {
+            0b001 => Ok(Self::Lz4),
+            0b010 => Ok(Self::Zstd),
+            0b011 => Ok(Self::Lzma),
+            0b100 => Ok(Self::Zpaq),
             _ => Err(OxideError::InvalidFormat("invalid compression flags")),
         }
     }

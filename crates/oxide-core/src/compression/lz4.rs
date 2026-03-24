@@ -1,7 +1,7 @@
 use core::mem::size_of;
 use core::ptr;
 
-use crate::{CompressionPreset, OxideError, Result};
+use crate::{OxideError, Result};
 
 #[path = "lz4/copy.rs"]
 mod copy;
@@ -40,27 +40,15 @@ struct CompressionTuning {
     skip_strength: usize,
 }
 
-impl CompressionTuning {
-    fn for_preset(preset: CompressionPreset) -> Self {
-        match preset {
-            CompressionPreset::Fast => Self { skip_strength: 8 },
-            CompressionPreset::Default => Self { skip_strength: 6 },
-            CompressionPreset::High => Self { skip_strength: 4 },
-        }
-    }
-}
+const DEFAULT_TUNING: CompressionTuning = CompressionTuning { skip_strength: 6 };
 
 /// Compresses data using the LZ4 algorithm.
 pub fn apply(data: &[u8]) -> Result<Vec<u8>> {
     let mut scratch = Lz4Scratch::default();
-    apply_with_scratch(data, CompressionPreset::Default, &mut scratch)
+    apply_with_scratch(data, &mut scratch)
 }
 
-pub(crate) fn apply_with_scratch(
-    data: &[u8],
-    preset: CompressionPreset,
-    scratch: &mut Lz4Scratch,
-) -> Result<Vec<u8>> {
+pub(crate) fn apply_with_scratch(data: &[u8], scratch: &mut Lz4Scratch) -> Result<Vec<u8>> {
     if data.len() > u32::MAX as usize {
         return Err(OxideError::CompressionError(
             "lz4 input exceeds 32-bit size prefix".to_string(),
@@ -70,9 +58,8 @@ pub(crate) fn apply_with_scratch(
     let mut output = Vec::with_capacity(4 + max_compressed_size(data.len()));
     output.extend_from_slice(&(data.len() as u32).to_le_bytes());
 
-    let tuning = CompressionTuning::for_preset(preset);
     let table = &mut scratch.table;
-    compress_block(data, 0, &mut output, table, tuning);
+    compress_block(data, 0, &mut output, table, DEFAULT_TUNING);
 
     Ok(output)
 }

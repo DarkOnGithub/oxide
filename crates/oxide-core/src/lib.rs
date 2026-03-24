@@ -50,5 +50,5 @@ pub use telemetry::{
 };
 pub use types::{
     Batch, BatchData, ChunkEncodingPlan, CompressedBlock, CompressedPayload, CompressionAlgo,
-    CompressionMeta, CompressionPreset, Result,
+    CompressionMeta, Result,
 };

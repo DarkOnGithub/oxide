@@ -196,7 +196,7 @@ where
         &final_runtime,
         block_size,
         raw_passthrough_blocks,
-        config.performance.compression_preset,
+        config.performance.compression_level,
         max_inflight_blocks,
         max_inflight_bytes,
         config.performance.max_inflight_bytes,

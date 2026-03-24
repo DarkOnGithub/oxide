@@ -6,43 +6,47 @@ use liblzma::{
 };
 
 use super::scratch::LzmaScratch;
-use crate::{CompressionPreset, OxideError, Result};
+use crate::{OxideError, Result};
 
-const LZMA_FAST_LEVEL: u32 = 1;
-const LZMA_BALANCED_LEVEL: u32 = 6;
-const LZMA_HIGH_LEVEL: u32 = 9 | PRESET_EXTREME;
+pub(crate) const LZMA_DEFAULT_LEVEL: i32 = 6;
+const LZMA_MIN_LEVEL: i32 = 1;
+const LZMA_MAX_LEVEL: i32 = 9;
 
 #[inline]
-fn level_for_preset(preset: CompressionPreset) -> u32 {
-    match preset {
-        CompressionPreset::Fast => LZMA_FAST_LEVEL,
-        CompressionPreset::Default => LZMA_BALANCED_LEVEL,
-        CompressionPreset::High => LZMA_HIGH_LEVEL,
+fn resolve_level(level: Option<i32>) -> Result<u32> {
+    let level = level.unwrap_or(LZMA_DEFAULT_LEVEL);
+    if !(LZMA_MIN_LEVEL..=LZMA_MAX_LEVEL).contains(&level) {
+        return Err(OxideError::CompressionError(format!(
+            "invalid lzma level {level}: expected {LZMA_MIN_LEVEL}..={LZMA_MAX_LEVEL}"
+        )));
     }
+
+    let level = if level == LZMA_MAX_LEVEL {
+        (level as u32) | PRESET_EXTREME
+    } else {
+        level as u32
+    };
+    Ok(level)
 }
 
-pub fn apply(data: &[u8], preset: CompressionPreset) -> Result<Vec<u8>> {
+pub fn apply(data: &[u8], level: Option<i32>) -> Result<Vec<u8>> {
     let mut scratch = LzmaScratch::default();
-    apply_with_scratch(data, preset, &mut scratch)
+    apply_with_scratch(data, level, &mut scratch)
 }
 
 pub(crate) fn apply_with_scratch(
     data: &[u8],
-    preset: CompressionPreset,
+    level: Option<i32>,
     scratch: &mut LzmaScratch,
 ) -> Result<Vec<u8>> {
     let mut output = scratch.take_output();
-    apply_into_vec(data, preset, &mut output)?;
+    apply_into_vec(data, level, &mut output)?;
     Ok(output)
 }
 
-pub(crate) fn apply_into_vec(
-    data: &[u8],
-    preset: CompressionPreset,
-    output: &mut Vec<u8>,
-) -> Result<()> {
+pub(crate) fn apply_into_vec(data: &[u8], level: Option<i32>, output: &mut Vec<u8>) -> Result<()> {
     output.clear();
-    let mut encoder = XzEncoder::new(data, level_for_preset(preset));
+    let mut encoder = XzEncoder::new(data, resolve_level(level)?);
     encoder
         .read_to_end(output)
         .map_err(|err| OxideError::CompressionError(format!("lzma encode failed: {err}")))?;

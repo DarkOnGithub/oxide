@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oxide_core::{
-    ArchivePipeline, ArchivePipelineConfig, BufferPool, CompressionAlgo, CompressionPreset,
+    ArchivePipeline, ArchivePipelineConfig, BufferPool, CompressionAlgo,
     PipelinePerformanceOptions, RunTelemetryOptions,
 };
 
@@ -29,7 +29,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         workers,
         compression,
         skip_compression,
-        zstd_level,
+        compression_level,
         preset,
         preset_file,
         pool_capacity,
@@ -50,7 +50,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         ArchiveOverrides {
             compression: compression.map(Into::into),
             skip_compression,
-            zstd_level,
+            compression_level,
             block_size,
             workers,
             pool_capacity,
@@ -96,10 +96,9 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
                 Tone::Info,
                 "preset",
                 &format!(
-                    "using {} ({}/{}) from {}",
+                    "using {} ({}) from {}",
                     settings.profile_name,
-                    compression_name(settings.compression),
-                    compression_preset_name(settings.compression_preset),
+                    compression_name(settings.compression, settings.compression_level),
                     settings.profile_source
                 ),
             )
@@ -129,7 +128,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         output: &output_path,
         profile_name: &settings.profile_name,
         compression: settings.compression,
-        preset: settings.compression_preset,
+        compression_level: settings.compression_level,
         report: &run.report,
         peak_read_bps: live_rates.peak_read_bps,
         peak_write_bps: live_rates.peak_write_bps,
@@ -203,8 +202,7 @@ fn build_archive_pipeline(
     buffer_pool: Arc<BufferPool>,
 ) -> ArchivePipeline {
     let mut performance = PipelinePerformanceOptions::default();
-    performance.compression_preset = settings.compression_preset;
-    performance.zstd_level = settings.zstd_level;
+    performance.compression_level = settings.compression_level;
     performance.max_inflight_bytes = settings.inflight_bytes.max(1);
     performance.max_inflight_blocks_per_worker = settings.inflight_blocks_per_worker.max(1);
     performance.directory_stream_read_buffer_size = settings.stream_read_buffer.max(1);
@@ -270,19 +268,16 @@ mod tests {
     }
 }
 
-fn compression_name(compression: CompressionAlgo) -> &'static str {
-    match compression {
+fn compression_name(compression: CompressionAlgo, level: Option<i32>) -> String {
+    let name = match compression {
         CompressionAlgo::Lz4 => "lz4",
         CompressionAlgo::Lzma => "lzma",
         CompressionAlgo::Zpaq => "zpaq",
         CompressionAlgo::Zstd => "zstd",
-    }
-}
+    };
 
-fn compression_preset_name(preset: CompressionPreset) -> &'static str {
-    match preset {
-        CompressionPreset::Fast => "fast",
-        CompressionPreset::Default => "default",
-        CompressionPreset::High => "high",
+    match level {
+        Some(level) => format!("{name}/{level}"),
+        None => name.to_string(),
     }
 }

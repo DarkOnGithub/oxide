@@ -199,12 +199,9 @@ impl<'a> Archiver<'a> {
 
     pub fn prepare_file(&self, path: &Path, block_size: usize) -> Result<PreparedInput> {
         let scanner = InputScanner::with_chunking_policy_and_plan(
-            ChunkingPolicy::for_preset(block_size, self.config.performance.compression_preset),
-            ChunkEncodingPlan::new(
-                self.config.compression_algo,
-                self.config.performance.compression_preset,
-            )
-            .with_zstd_level(self.config.performance.zstd_level),
+            ChunkingPolicy::fixed_for_target(block_size),
+            ChunkEncodingPlan::new(self.config.compression_algo)
+                .with_level(self.config.performance.compression_level),
         );
         let mut batches = scanner.scan_file(path)?;
         let force_raw_storage = batches
