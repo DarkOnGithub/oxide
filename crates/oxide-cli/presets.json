@@ -41,9 +41,41 @@
         "result_wait_ms": 1
       },
       "ultra": {
-        "compression": "zstd",
+        "compression": "lzma",
         "compression_preset": "high",
-        "zstd_level": 19,
+        "block_size": "4M",
+        "stream_read_buffer": "256M",
+        "inflight_bytes": "4G",
+        "inflight_blocks_per_worker": 128,
+        "producer_threads": 4,
+        "writer_queue_blocks": 4096,
+        "result_wait_ms": 2
+      },
+      "extreme": {
+        "compression": "zpaq",
+        "compression_preset": "high",
+        "block_size": "4M",
+        "stream_read_buffer": "256M",
+        "inflight_bytes": "4G",
+        "inflight_blocks_per_worker": 128,
+        "producer_threads": 4,
+        "writer_queue_blocks": 4096,
+        "result_wait_ms": 2
+      },
+      "compact": {
+        "compression": "lzma",
+        "compression_preset": "high",
+        "block_size": "4M",
+        "stream_read_buffer": "256M",
+        "inflight_bytes": "4G",
+        "inflight_blocks_per_worker": 128,
+        "producer_threads": 4,
+        "writer_queue_blocks": 4096,
+        "result_wait_ms": 2
+      },
+      "maximum": {
+        "compression": "zpaq",
+        "compression_preset": "high",
         "block_size": "4M",
         "stream_read_buffer": "256M",
         "inflight_bytes": "4G",
