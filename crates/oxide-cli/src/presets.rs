@@ -284,6 +284,8 @@ fn resolve_number<T: Copy>(
 fn parse_compression_algo(value: &str) -> Result<CompressionAlgo, io::Error> {
     match value.trim().to_ascii_lowercase().as_str() {
         "lz4" => Ok(CompressionArg::Lz4.into()),
+        "lzma" | "xz" => Ok(CompressionArg::Lzma.into()),
+        "zpaq" => Ok(CompressionArg::Zpaq.into()),
         "zstd" => Ok(CompressionArg::Zstd.into()),
         other => Err(invalid_input(format!("unsupported compression '{other}'"))),
     }
@@ -432,6 +434,94 @@ mod tests {
         assert_eq!(ultra.compression, CompressionAlgo::Zstd);
         assert_eq!(ultra.compression_preset, CompressionPreset::High);
         assert_eq!(ultra.zstd_level, Some(19));
+    }
+
+    #[test]
+    fn resolves_lzma_compression_from_config() {
+        let file = parse_fixture(
+            r#"{
+              "archive": {
+                "default_preset": "compact",
+                "defaults": {
+                  "compression": "lz4",
+                  "compression_preset": "fast",
+                  "block_size": "2M",
+                  "workers": 0,
+                  "pool_capacity": "1M",
+                  "pool_buffers": 512,
+                  "stats_interval_ms": 250,
+                  "inflight_bytes": "2G",
+                  "inflight_blocks_per_worker": 256,
+                  "stream_read_buffer": "64M",
+                  "producer_threads": 1,
+                  "directory_mmap_threshold": "8M",
+                  "writer_queue_blocks": 1024,
+                  "result_wait_ms": 1
+                },
+                "presets": {
+                  "compact": {
+                    "compression": "lzma",
+                    "compression_preset": "high"
+                  }
+                }
+              }
+            }"#,
+        );
+
+        let preset = file.archive.presets.get("compact").unwrap();
+        let mut merged = file.archive.defaults.clone();
+        merged.merge_from(preset);
+        let resolved = merged
+            .resolve("compact", "fixture", ArchiveOverrides::default())
+            .expect("settings should resolve");
+
+        assert_eq!(resolved.compression, CompressionAlgo::Lzma);
+        assert_eq!(resolved.compression_preset, CompressionPreset::High);
+        assert_eq!(resolved.zstd_level, None);
+    }
+
+    #[test]
+    fn resolves_zpaq_compression_from_config() {
+        let file = parse_fixture(
+            r#"{
+              "archive": {
+                "default_preset": "maximum",
+                "defaults": {
+                  "compression": "lz4",
+                  "compression_preset": "fast",
+                  "block_size": "2M",
+                  "workers": 0,
+                  "pool_capacity": "1M",
+                  "pool_buffers": 512,
+                  "stats_interval_ms": 250,
+                  "inflight_bytes": "2G",
+                  "inflight_blocks_per_worker": 256,
+                  "stream_read_buffer": "64M",
+                  "producer_threads": 1,
+                  "directory_mmap_threshold": "8M",
+                  "writer_queue_blocks": 1024,
+                  "result_wait_ms": 1
+                },
+                "presets": {
+                  "maximum": {
+                    "compression": "zpaq",
+                    "compression_preset": "high"
+                  }
+                }
+              }
+            }"#,
+        );
+
+        let preset = file.archive.presets.get("maximum").unwrap();
+        let mut merged = file.archive.defaults.clone();
+        merged.merge_from(preset);
+        let resolved = merged
+            .resolve("maximum", "fixture", ArchiveOverrides::default())
+            .expect("settings should resolve");
+
+        assert_eq!(resolved.compression, CompressionAlgo::Zpaq);
+        assert_eq!(resolved.compression_preset, CompressionPreset::High);
+        assert_eq!(resolved.zstd_level, None);
     }
 
     #[test]

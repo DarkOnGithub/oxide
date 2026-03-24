@@ -273,6 +273,8 @@ mod tests {
 fn compression_name(compression: CompressionAlgo) -> &'static str {
     match compression {
         CompressionAlgo::Lz4 => "lz4",
+        CompressionAlgo::Lzma => "lzma",
+        CompressionAlgo::Zpaq => "zpaq",
         CompressionAlgo::Zstd => "zstd",
     }
 }
