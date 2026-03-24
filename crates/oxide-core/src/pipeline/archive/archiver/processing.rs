@@ -2,9 +2,8 @@ use std::time::Instant;
 
 use crate::buffer::BufferPool;
 use crate::compression::{
-    CompressionRequest, apply_compression_request_with_scratch,
-    apply_compression_request_with_scratch_into, recycle_compression_buffer,
-    supports_direct_buffer_output,
+    apply_compression_request_with_scratch, apply_compression_request_with_scratch_into,
+    recycle_compression_buffer, supports_direct_buffer_output, CompressionRequest,
 };
 use crate::core::WorkerScratchArena;
 use crate::pipeline::archive::types::ProcessingThroughputTotals;
@@ -167,7 +166,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::{
-        INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN, is_likely_incompressible_sample, process_batch,
+        is_likely_incompressible_sample, process_batch, INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN,
     };
     use crate::buffer::BufferPool;
     use crate::core::WorkerScratchArena;

@@ -10,8 +10,8 @@ pub mod tags;
 pub mod worker;
 
 pub use events::{
-    ArchiveProgressEvent, ExtractProgressEvent, GlobalTelemetrySink, ProfileEvent, TelemetryEvent,
-    TelemetrySink,
+    ArchivePlanningCompleteEvent, ArchiveProgressEvent, ExtractProgressEvent, GlobalTelemetrySink,
+    ProfileEvent, TelemetryEvent, TelemetrySink,
 };
 pub use memory::ProcessMemorySample;
 pub use report::{

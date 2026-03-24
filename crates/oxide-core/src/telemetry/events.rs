@@ -6,6 +6,17 @@ use crate::pipeline::ArchiveSourceKind;
 
 use super::report::{ArchiveReport, ExtractReport};
 
+/// Event emitted when archive discovery/planning is complete and workers are about to start.
+#[derive(Debug, Clone)]
+pub struct ArchivePlanningCompleteEvent {
+    /// Total time elapsed during the discovery/planning phase.
+    pub elapsed: Duration,
+    /// Total input bytes to be processed.
+    pub input_bytes_total: u64,
+    /// Total number of blocks to process.
+    pub blocks_total: u32,
+}
+
 /// Event emitted during the archive process to report real-time progress.
 #[derive(Debug, Clone)]
 pub struct ArchiveProgressEvent {
@@ -86,6 +97,8 @@ pub struct ProfileEvent {
 /// Unified telemetry event enum covering progress, completion, and profiling.
 #[derive(Debug, Clone)]
 pub enum TelemetryEvent {
+    /// Discovery/planning phase complete, workers about to start.
+    ArchivePlanningComplete(ArchivePlanningCompleteEvent),
     /// Periodic progress update for an archive operation.
     ArchiveProgress(ArchiveProgressEvent),
     /// Periodic progress update for an extract operation.

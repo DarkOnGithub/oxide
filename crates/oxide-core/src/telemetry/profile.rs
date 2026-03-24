@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 #[cfg(feature = "profiling")]
-use crate::telemetry::events::{ProfileEvent, TelemetryEvent, emit_global};
+use crate::telemetry::events::{emit_global, ProfileEvent, TelemetryEvent};
 #[cfg(feature = "profiling")]
 use crate::telemetry::tags;
 #[cfg(feature = "profiling")]
@@ -40,7 +40,11 @@ fn parse_tags(raw: &str) -> Option<BTreeSet<String>> {
         tags.insert(normalized);
     }
 
-    if tags.is_empty() { None } else { Some(tags) }
+    if tags.is_empty() {
+        None
+    } else {
+        Some(tags)
+    }
 }
 
 #[cfg(feature = "profiling")]
