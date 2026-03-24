@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::core::{WorkerPool, WorkerPoolHandle};
-use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE, ReorderBuffer};
+use crate::format::{ArchiveBlockWriter, ArchiveManifest, ReorderBuffer, FOOTER_SIZE};
 use crate::pipeline::directory;
 use crate::pipeline::types::ArchivePipelineConfig;
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
@@ -141,6 +141,20 @@ where
         }
 
         if drained == 0 {
+            emit_archive_progress_if_due(
+                handle.runtime_snapshot(),
+                processing_totals.snapshot(),
+                source_kind,
+                started_at,
+                input_bytes_total,
+                completed_bytes,
+                output_bytes_written,
+                block_count,
+                emit_every,
+                &mut last_emit_at,
+                false,
+                sink,
+            );
             let wait_started = Instant::now();
             recv_result_to_writer(
                 &handle,

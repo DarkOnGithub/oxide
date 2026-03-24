@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, TryRecvError, bounded, select};
+use crossbeam_channel::{bounded, select, Receiver, RecvTimeoutError, TryRecvError};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -9,11 +9,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::WorkerPool;
-use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE, ReorderBuffer};
+use crate::format::{ArchiveBlockWriter, ArchiveManifest, ReorderBuffer, FOOTER_SIZE};
 use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
-use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
+use crate::telemetry::{
+    ArchivePlanningCompleteEvent, ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink,
+};
 use crate::types::{Batch, ChunkEncodingPlan, CompressedBlock, Result};
 
 use super::super::telemetry::*;
@@ -35,6 +37,7 @@ where
     F: FnOnce(W, ArchiveManifest, usize) -> AW + Send + 'static,
 {
     let mut stage_timings = StageTimings::default();
+    let planning_started = Instant::now();
 
     let discovery_started = Instant::now();
     let discovery = directory::discover_directory_tree(root)?;
@@ -145,6 +148,10 @@ where
     let started_at = Instant::now();
     let mut last_emit_at = Instant::now();
     let emit_every = options.progress_interval.max(Duration::from_millis(100));
+    let wait_timeout = config
+        .performance
+        .result_wait_timeout
+        .max(Duration::from_millis(1));
     let mut completed_bytes = 0u64;
     let mut received_count = 0usize;
     let mut retired_count = 0usize;
@@ -354,6 +361,13 @@ where
     });
 
     let results_rx = handle.results_receiver().clone();
+    sink.on_event(TelemetryEvent::ArchivePlanningComplete(
+        ArchivePlanningCompleteEvent {
+            elapsed: planning_started.elapsed(),
+            input_bytes_total,
+            blocks_total: block_count,
+        },
+    ));
     let mut producer_done = false;
     let mut shutdown_called = false;
     loop {
@@ -417,6 +431,22 @@ where
         }
 
         if !progressed {
+            output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
+            emit_archive_progress_if_due(
+                handle.runtime_snapshot(),
+                processing_totals.snapshot(),
+                ArchiveSourceKind::Directory,
+                started_at,
+                input_bytes_total,
+                completed_bytes,
+                output_bytes_written,
+                block_count,
+                emit_every,
+                &mut last_emit_at,
+                false,
+                sink,
+            );
+
             let inflight = submitted_count.saturating_sub(received_count);
             if !producer_done && inflight < max_inflight_blocks {
                 let wait_started = Instant::now();
@@ -449,37 +479,49 @@ where
                             &mut received_count,
                         )?;
                     }
+                    default(wait_timeout) => {}
                 }
             } else if received_count < submitted_count {
                 let wait_started = Instant::now();
-                let result = results_rx.recv();
+                let result = results_rx.recv_timeout(wait_timeout);
                 let waited = wait_started.elapsed();
-                stage_timings.result_wait += waited;
-                if inflight >= max_inflight_blocks {
-                    stage_timings.submit_wait += waited;
+                match result {
+                    Ok(result) => {
+                        stage_timings.result_wait += waited;
+                        if inflight >= max_inflight_blocks {
+                            stage_timings.submit_wait += waited;
+                        }
+                        recv_worker_result(
+                            Ok(result),
+                            &writer_tx,
+                            &writer_failure,
+                            &mut pending_results,
+                            &mut completed_bytes,
+                            &mut first_error,
+                            &mut raw_passthrough_blocks,
+                            &mut writer_queue_peak,
+                            &mut stage_timings.writer_enqueue_blocked,
+                            &mut retired_count,
+                            &mut received_count,
+                        )?;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return Err(crate::OxideError::CompressionError(
+                            "worker result channel closed before completion".to_string(),
+                        ));
+                    }
                 }
-                recv_worker_result(
-                    result,
-                    &writer_tx,
-                    &writer_failure,
-                    &mut pending_results,
-                    &mut completed_bytes,
-                    &mut first_error,
-                    &mut raw_passthrough_blocks,
-                    &mut writer_queue_peak,
-                    &mut stage_timings.writer_enqueue_blocked,
-                    &mut retired_count,
-                    &mut received_count,
-                )?;
             } else if !producer_done {
                 let wait_started = Instant::now();
-                match batch_rx.recv() {
+                match batch_rx.recv_timeout(wait_timeout) {
                     Ok(batch) => {
                         stage_timings.submit_wait += wait_started.elapsed();
                         handle.submit(batch)?;
                         submitted_count += 1;
                     }
-                    Err(_) => {
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
                         stage_timings.submit_wait += wait_started.elapsed();
                         producer_done = true;
                     }

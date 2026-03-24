@@ -1,5 +1,5 @@
 use crate::format::{
-    ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter, should_force_raw_storage,
+    should_force_raw_storage, ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter,
 };
 use crate::io::{ChunkingPolicy, InputScanner};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
@@ -9,6 +9,7 @@ use crate::types::Result;
 use std::fs;
 use std::io::{Seek, Write};
 use std::path::Path;
+use std::time::Instant;
 
 pub mod directory;
 pub mod prepared;
@@ -24,6 +25,7 @@ use self::directory::archive_directory_streaming_with_writer;
 use self::prepared::archive_prepared_with_writer;
 use super::telemetry;
 use super::types::PreparedInput;
+use crate::telemetry::{ArchivePlanningCompleteEvent, TelemetryEvent};
 
 pub struct Archiver<'a> {
     pub config: &'a ArchivePipelineConfig,
@@ -49,7 +51,17 @@ impl<'a> Archiver<'a> {
         }
         telemetry::begin_archive_run_telemetry();
         let block_size = self.config.target_block_size;
+        let planning_started = Instant::now();
         let prepared = self.prepare_file(path, block_size)?;
+        let blocks_total = u32::try_from(prepared.batches.len())
+            .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
+        sink.on_event(TelemetryEvent::ArchivePlanningComplete(
+            ArchivePlanningCompleteEvent {
+                elapsed: planning_started.elapsed(),
+                input_bytes_total: prepared.input_bytes_total,
+                blocks_total,
+            },
+        ));
         self.archive_prepared_with_writer(
             prepared,
             writer,
@@ -75,7 +87,17 @@ impl<'a> Archiver<'a> {
         }
         telemetry::begin_archive_run_telemetry();
         let block_size = self.config.target_block_size;
+        let planning_started = Instant::now();
         let prepared = self.prepare_file(path, block_size)?;
+        let blocks_total = u32::try_from(prepared.batches.len())
+            .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v1"))?;
+        sink.on_event(TelemetryEvent::ArchivePlanningComplete(
+            ArchivePlanningCompleteEvent {
+                elapsed: planning_started.elapsed(),
+                input_bytes_total: prepared.input_bytes_total,
+                blocks_total,
+            },
+        ));
         self.archive_prepared_with_writer(
             prepared,
             writer,

@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use oxide_core::{ArchiveProgressEvent, TelemetryEvent, TelemetrySink};
 
 use crate::ui::{
-    StreamTarget, Tone, format_bytes, format_duration, format_live_rate, tagged_message,
-    terminal_width,
+    format_bytes, format_duration, format_live_rate, tagged_message, terminal_width, StreamTarget,
+    Tone,
 };
 
 pub struct ArchiveCliSink<'a> {
@@ -33,25 +33,37 @@ impl<'a> ArchiveCliSink<'a> {
 
     pub fn finish_discovery_notice(&mut self) {
         if self.interactive && !self.discovery_reported {
+            self.report_discovery_ready(self.discovery_started.elapsed());
+        }
+    }
+
+    fn report_discovery_ready(&mut self, elapsed: Duration) {
+        if self.interactive && !self.discovery_reported {
             self.discovery_reported = true;
-            eprintln!("{}", ready_message(self.discovery_started.elapsed()));
+            eprintln!("{}", ready_message(elapsed));
         }
     }
 }
 
 impl TelemetrySink for ArchiveCliSink<'_> {
     fn on_event(&mut self, event: TelemetryEvent) {
-        let TelemetryEvent::ArchiveProgress(snapshot) = event else {
-            return;
-        };
         if !self.interactive {
             return;
         }
 
-        if !self.discovery_reported {
-            self.discovery_reported = true;
-            eprintln!("{}", ready_message(self.discovery_started.elapsed()));
-        }
+        let snapshot = match event {
+            TelemetryEvent::ArchivePlanningComplete(ready) => {
+                self.report_discovery_ready(ready.elapsed);
+                return;
+            }
+            TelemetryEvent::ArchiveProgress(snapshot) => {
+                if !self.discovery_reported {
+                    self.report_discovery_ready(self.discovery_started.elapsed());
+                }
+                snapshot
+            }
+            _ => return,
+        };
 
         let total = snapshot.input_bytes_total;
         let done = snapshot.input_bytes_completed.min(total);
@@ -97,7 +109,7 @@ impl TelemetrySink for ArchiveCliSink<'_> {
                 progress_row("Read", &format_live_rate(read_instant_bps), panel_width),
                 progress_row("Write", &format_live_rate(write_instant_bps), panel_width),
                 progress_row(
-                    "Compress",
+                    "Compress wall",
                     &format_live_rate(snapshot.compression_wall_avg_bps),
                     panel_width,
                 ),

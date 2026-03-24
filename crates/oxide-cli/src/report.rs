@@ -9,8 +9,8 @@ use oxide_core::{
 };
 
 use crate::ui::{
-    StreamTarget, Tone, format_bytes, format_bytes_f64, format_duration, format_duration_compact,
-    format_rate, paint, progress_bar,
+    format_bytes, format_bytes_f64, format_duration, format_duration_compact, format_rate, paint,
+    progress_bar, StreamTarget, Tone,
 };
 
 const CHART_WIDTH: usize = 28;
@@ -118,12 +118,12 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
     ];
     push_optional_rate_row(
         &mut throughput_rows,
-        "compress avg",
+        "compress cpu avg",
         extension_f64(&report.extensions, "throughput.compression_avg_bps"),
     );
     push_optional_rate_row(
         &mut throughput_rows,
-        "compress wall",
+        "compress wall avg",
         extension_f64(&report.extensions, "throughput.compression_wall_avg_bps"),
     );
     print_table(
@@ -150,7 +150,7 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
             extension_f64(&report.extensions, "throughput.compression_wall_avg_bps")
         {
             throughput_chart.push((
-                "compress wall".to_string(),
+                "compress wall avg".to_string(),
                 value,
                 format_rate_per_second(value),
             ));
