@@ -441,6 +441,14 @@ pub fn build_extract_report(
         ReportValue::U64(pipeline_stats.decode_result_queue_peak as u64),
     );
     extensions.insert(
+        "pipeline.ordered_write_queue_capacity".to_string(),
+        ReportValue::U64(pipeline_stats.ordered_write_queue_capacity as u64),
+    );
+    extensions.insert(
+        "pipeline.ordered_write_queue_peak".to_string(),
+        ReportValue::U64(pipeline_stats.ordered_write_queue_peak as u64),
+    );
+    extensions.insert(
         "pipeline.reorder_pending_limit".to_string(),
         ReportValue::U64(pipeline_stats.reorder_pending_limit as u64),
     );
@@ -472,6 +480,13 @@ pub fn build_extract_report(
     main_thread.stage_us.insert(
         "decode_wait".to_string(),
         stage_timings.decode_wait.as_micros().min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
+        "writer_enqueue_blocked".to_string(),
+        stage_timings
+            .writer_enqueue_blocked
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
     );
     main_thread.stage_us.insert(
         "merge".to_string(),

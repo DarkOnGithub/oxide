@@ -17,6 +17,7 @@ impl<T: OrderedChunkWriter + ?Sized> OrderedChunkWriter for &mut T {
 pub struct ReorderPushStats {
     pub wrote_blocks: usize,
     pub wrote_bytes: u64,
+    pub push_elapsed: Duration,
     pub write_elapsed: Duration,
     pub pending_blocks: usize,
     pub pending_bytes: u64,
@@ -26,6 +27,7 @@ pub struct ReorderPushStats {
 pub struct ReorderWriterStats {
     pub wrote_blocks: usize,
     pub wrote_bytes: u64,
+    pub push_elapsed: Duration,
     pub write_elapsed: Duration,
     pub pending_blocks_peak: usize,
     pub pending_bytes_peak: u64,
@@ -50,6 +52,7 @@ impl<W: OrderedChunkWriter, T: AsRef<[u8]>> BoundedReorderWriter<W, T> {
     }
 
     pub fn push(&mut self, id: usize, item: T) -> Result<ReorderPushStats> {
+        let push_started = Instant::now();
         let item_len = item.as_ref().len();
         self.pending_bytes = self.pending_bytes.saturating_add(item_len as u64);
 
@@ -87,6 +90,7 @@ impl<W: OrderedChunkWriter, T: AsRef<[u8]>> BoundedReorderWriter<W, T> {
 
         push_stats.pending_blocks = self.reorder.pending_len();
         push_stats.pending_bytes = self.pending_bytes;
+        push_stats.push_elapsed = push_started.elapsed();
 
         self.stats.wrote_blocks = self
             .stats
@@ -96,6 +100,7 @@ impl<W: OrderedChunkWriter, T: AsRef<[u8]>> BoundedReorderWriter<W, T> {
             .stats
             .wrote_bytes
             .saturating_add(push_stats.wrote_bytes);
+        self.stats.push_elapsed += push_stats.push_elapsed;
         self.stats.write_elapsed += push_stats.write_elapsed;
         self.stats.pending_blocks_peak = self
             .stats
@@ -118,6 +123,10 @@ impl<W: OrderedChunkWriter, T: AsRef<[u8]>> BoundedReorderWriter<W, T> {
             ));
         }
         Ok((self.writer, self.stats))
+    }
+
+    pub fn into_parts(self) -> (W, ReorderWriterStats) {
+        (self.writer, self.stats)
     }
 
     pub fn pending_len(&self) -> usize {
