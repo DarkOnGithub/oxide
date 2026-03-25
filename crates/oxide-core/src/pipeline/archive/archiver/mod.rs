@@ -1,5 +1,6 @@
+use crate::dictionary::{ArchiveDictionaryBank, ArchiveDictionaryMode, DictionaryTrainer};
 use crate::format::{
-    ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter, should_force_raw_storage,
+    should_force_raw_storage, ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter,
 };
 use crate::io::{ChunkingPolicy, InputScanner};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
@@ -236,7 +237,9 @@ impl<'a> Archiver<'a> {
             }
         }
         let input_bytes_total = batches.iter().map(|batch| batch.len() as u64).sum();
-        let manifest = file_manifest(path, input_bytes_total)?;
+        let dictionary_bank = train_file_dictionary_bank(self.config, &batches)?;
+        let manifest =
+            file_manifest(path, input_bytes_total)?.with_dictionary_bank(dictionary_bank);
         Ok(PreparedInput {
             source_kind: ArchiveSourceKind::File,
             manifest,
@@ -244,4 +247,26 @@ impl<'a> Archiver<'a> {
             input_bytes_total,
         })
     }
+}
+
+fn train_file_dictionary_bank(
+    config: &ArchivePipelineConfig,
+    batches: &[crate::Batch],
+) -> Result<ArchiveDictionaryBank> {
+    if config.skip_compression
+        || config.compression_algo != crate::CompressionAlgo::Zstd
+        || config.performance.dictionary_mode == ArchiveDictionaryMode::Off
+    {
+        return Ok(ArchiveDictionaryBank::default());
+    }
+
+    let mut trainer = DictionaryTrainer::new(config.performance.dictionary_mode);
+    for batch in batches {
+        trainer.observe(batch.data());
+    }
+
+    trainer.build(
+        config.compression_algo,
+        config.performance.compression_level,
+    )
 }

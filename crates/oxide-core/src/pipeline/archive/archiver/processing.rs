@@ -2,11 +2,11 @@ use std::time::Instant;
 
 use crate::buffer::BufferPool;
 use crate::compression::{
-    CompressionRequest, apply_compression_request_with_scratch,
-    apply_compression_request_with_scratch_into, recycle_compression_buffer,
-    supports_direct_buffer_output,
+    apply_compression_request_with_scratch, apply_compression_request_with_scratch_into,
+    recycle_compression_buffer, supports_direct_buffer_output, CompressionRequest,
 };
 use crate::core::WorkerScratchArena;
+use crate::dictionary::ArchiveDictionaryBank;
 use crate::pipeline::archive::types::ProcessingThroughputTotals;
 use crate::types::{Batch, CompressedBlock, CompressedPayload, CompressionAlgo, Result};
 
@@ -21,6 +21,7 @@ fn should_skip_full_compression_probe(source_len: usize) -> bool {
 fn is_likely_incompressible_sample(
     source: &[u8],
     plan: crate::types::ChunkEncodingPlan,
+    dictionary_bank: &ArchiveDictionaryBank,
     scratch: &mut WorkerScratchArena,
 ) -> Result<bool> {
     let sample_len = source.len().min(INCOMPRESSIBLE_PROBE_SAMPLE_LEN);
@@ -28,11 +29,16 @@ fn is_likely_incompressible_sample(
         return Ok(false);
     }
 
+    let selected_dictionary = dictionary_bank.select_for_chunk(plan.algo, &source[..sample_len]);
     let probe = apply_compression_request_with_scratch(
         CompressionRequest {
             data: &source[..sample_len],
             algo: plan.algo,
             level: plan.level,
+            dictionary_id: selected_dictionary
+                .map(|dictionary| dictionary.id)
+                .unwrap_or(0),
+            dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
         },
         scratch.compression(),
     )?;
@@ -49,6 +55,7 @@ pub fn process_batch(
     _compression: CompressionAlgo,
     skip_compression: bool,
     raw_fallback_enabled: bool,
+    dictionary_bank: &ArchiveDictionaryBank,
     processing_totals: &ProcessingThroughputTotals,
     scratch: &mut WorkerScratchArena,
 ) -> Result<CompressedBlock> {
@@ -87,16 +94,22 @@ pub fn process_batch(
         ));
     }
 
+    let selected_dictionary = dictionary_bank.select_for_chunk(plan.algo, source);
+    let dictionary_id = selected_dictionary
+        .map(|dictionary| dictionary.id)
+        .unwrap_or(0);
     let request = CompressionRequest {
         data: source,
         algo: plan.algo,
         level: plan.level,
+        dictionary_id,
+        dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
     };
 
     if raw_fallback_enabled
         && !skip_compression
         && should_skip_full_compression_probe(source_len)
-        && is_likely_incompressible_sample(source, plan, scratch)?
+        && is_likely_incompressible_sample(source, plan, dictionary_bank, scratch)?
     {
         processing_totals.record(source_len as u64, std::time::Duration::ZERO);
         return Ok(CompressedBlock::with_chunk_encoding(
@@ -127,13 +140,14 @@ pub fn process_batch(
             CompressedPayload::from(compressed)
         };
 
-        return Ok(CompressedBlock::with_chunk_encoding(
+        return Ok(CompressedBlock::with_chunk_encoding_and_dictionary(
             id,
             stream_id,
             data,
             plan,
             raw_passthrough,
             source_len as u64,
+            if raw_passthrough { 0 } else { dictionary_id },
         ));
     }
 
@@ -149,13 +163,14 @@ pub fn process_batch(
         CompressedPayload::from_vec_in_pool(compressed, pool)
     };
 
-    Ok(CompressedBlock::with_chunk_encoding(
+    Ok(CompressedBlock::with_chunk_encoding_and_dictionary(
         id,
         stream_id,
         data,
         plan,
         raw_passthrough,
         source_len as u64,
+        if raw_passthrough { 0 } else { dictionary_id },
     ))
 }
 
@@ -175,10 +190,11 @@ mod tests {
     use bytes::Bytes;
 
     use super::{
-        INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN, is_likely_incompressible_sample, process_batch,
+        is_likely_incompressible_sample, process_batch, INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN,
     };
     use crate::buffer::BufferPool;
     use crate::core::WorkerScratchArena;
+    use crate::dictionary::ArchiveDictionaryBank;
     use crate::pipeline::archive::types::ProcessingThroughputTotals;
     use crate::types::{Batch, ChunkEncodingPlan, CompressedPayload, CompressionAlgo};
 
@@ -192,12 +208,14 @@ mod tests {
         let pool = BufferPool::new(1024, 4);
         let totals = ProcessingThroughputTotals::default();
         let mut scratch = WorkerScratchArena::new();
+        let dictionary_bank = ArchiveDictionaryBank::default();
         let block = process_batch(
             batch,
             &pool,
             CompressionAlgo::Lz4,
             true,
             false,
+            &dictionary_bank,
             &totals,
             &mut scratch,
         )
@@ -222,12 +240,14 @@ mod tests {
         let pool = BufferPool::new(1024, 4);
         let totals = ProcessingThroughputTotals::default();
         let mut scratch = WorkerScratchArena::new();
+        let dictionary_bank = ArchiveDictionaryBank::default();
         let block = process_batch(
             batch,
             &pool,
             CompressionAlgo::Lz4,
             false,
             true,
+            &dictionary_bank,
             &totals,
             &mut scratch,
         )
@@ -254,8 +274,9 @@ mod tests {
             .collect::<Vec<_>>();
         let plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4);
         let mut scratch = WorkerScratchArena::new();
+        let dictionary_bank = ArchiveDictionaryBank::default();
 
-        let probe = is_likely_incompressible_sample(&sample, plan, &mut scratch)
+        let probe = is_likely_incompressible_sample(&sample, plan, &dictionary_bank, &mut scratch)
             .expect("probe should succeed");
 
         assert!(probe);
@@ -266,8 +287,9 @@ mod tests {
         let sample = vec![b'a'; INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN];
         let plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4);
         let mut scratch = WorkerScratchArena::new();
+        let dictionary_bank = ArchiveDictionaryBank::default();
 
-        let probe = is_likely_incompressible_sample(&sample, plan, &mut scratch)
+        let probe = is_likely_incompressible_sample(&sample, plan, &dictionary_bank, &mut scratch)
             .expect("probe should succeed");
 
         assert!(!probe);

@@ -34,7 +34,9 @@ impl LzmaScratch {
 pub(crate) struct ZstdScratch {
     compressor: Option<zstd::bulk::Compressor<'static>>,
     compressor_level: Option<i32>,
+    compressor_dictionary_id: u8,
     decompressor: Option<zstd::bulk::Decompressor<'static>>,
+    decompressor_dictionary_id: u8,
     output: Vec<u8>,
 }
 
@@ -43,7 +45,9 @@ impl Default for ZstdScratch {
         Self {
             compressor: None,
             compressor_level: None,
+            compressor_dictionary_id: 0,
             decompressor: None,
+            decompressor_dictionary_id: 0,
             output: Vec::new(),
         }
     }
@@ -54,7 +58,12 @@ impl fmt::Debug for ZstdScratch {
         f.debug_struct("ZstdScratch")
             .field("compressor_initialized", &self.compressor.is_some())
             .field("compressor_level", &self.compressor_level)
+            .field("compressor_dictionary_id", &self.compressor_dictionary_id)
             .field("decompressor_initialized", &self.decompressor.is_some())
+            .field(
+                "decompressor_dictionary_id",
+                &self.decompressor_dictionary_id,
+            )
             .field("output_capacity", &self.output.capacity())
             .finish()
     }
@@ -64,24 +73,33 @@ impl ZstdScratch {
     pub(crate) fn compressor(
         &mut self,
         level: i32,
+        dictionary_id: u8,
+        dictionary: Option<&[u8]>,
     ) -> Result<&mut zstd::bulk::Compressor<'static>> {
         if self.compressor.is_none() {
-            let compressor = zstd::bulk::Compressor::new(level).map_err(|err| {
-                OxideError::CompressionError(format!("zstd compressor init failed: {err}"))
-            })?;
+            let compressor =
+                zstd::bulk::Compressor::with_dictionary(level, dictionary.unwrap_or(&[])).map_err(
+                    |err| {
+                        OxideError::CompressionError(format!("zstd compressor init failed: {err}"))
+                    },
+                )?;
             self.compressor = Some(compressor);
             self.compressor_level = Some(level);
-        } else if self.compressor_level != Some(level) {
+            self.compressor_dictionary_id = dictionary_id;
+        } else if self.compressor_level != Some(level)
+            || self.compressor_dictionary_id != dictionary_id
+        {
             self.compressor
                 .as_mut()
                 .expect("checked is_some above")
-                .set_compression_level(level)
+                .set_dictionary(level, dictionary.unwrap_or(&[]))
                 .map_err(|err| {
                     OxideError::CompressionError(format!(
                         "zstd compressor reconfigure failed: {err}"
                     ))
                 })?;
             self.compressor_level = Some(level);
+            self.compressor_dictionary_id = dictionary_id;
         }
 
         Ok(self
@@ -90,12 +108,29 @@ impl ZstdScratch {
             .expect("compressor initialized before return"))
     }
 
-    pub(crate) fn decompressor(&mut self) -> Result<&mut zstd::bulk::Decompressor<'static>> {
+    pub(crate) fn decompressor(
+        &mut self,
+        dictionary_id: u8,
+        dictionary: Option<&[u8]>,
+    ) -> Result<&mut zstd::bulk::Decompressor<'static>> {
         if self.decompressor.is_none() {
-            let decompressor = zstd::bulk::Decompressor::new().map_err(|err| {
-                OxideError::DecompressionError(format!("zstd decompressor init failed: {err}"))
-            })?;
+            let decompressor = zstd::bulk::Decompressor::with_dictionary(dictionary.unwrap_or(&[]))
+                .map_err(|err| {
+                    OxideError::DecompressionError(format!("zstd decompressor init failed: {err}"))
+                })?;
             self.decompressor = Some(decompressor);
+            self.decompressor_dictionary_id = dictionary_id;
+        } else if self.decompressor_dictionary_id != dictionary_id {
+            self.decompressor
+                .as_mut()
+                .expect("checked is_some above")
+                .set_dictionary(dictionary.unwrap_or(&[]))
+                .map_err(|err| {
+                    OxideError::DecompressionError(format!(
+                        "zstd decompressor reconfigure failed: {err}"
+                    ))
+                })?;
+            self.decompressor_dictionary_id = dictionary_id;
         }
 
         Ok(self

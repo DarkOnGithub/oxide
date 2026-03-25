@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::WorkerPool;
+use crate::dictionary::{ArchiveDictionaryBank, ArchiveDictionaryMode, DictionaryTrainer};
 use crate::format::{ArchiveBlockWriter, ArchiveManifest, ReorderBuffer};
 use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
@@ -52,7 +53,9 @@ where
 
     let block_count =
         directory::estimate_directory_block_count(&discovery, &file_force_raw_storage, block_size)?;
-    let manifest = directory::manifest_from_discovery(&discovery)?;
+    let dictionary_bank = train_directory_dictionary_bank(config, &discovery)?;
+    let manifest = directory::manifest_from_discovery(&discovery)?
+        .with_dictionary_bank(dictionary_bank.clone());
     let input_bytes_total = discovery.input_bytes_total;
     let manifest_bytes = manifest.encode()?.len();
     let total_blocks = usize::try_from(block_count)
@@ -70,10 +73,12 @@ where
         Arc::clone(&config.buffer_pool),
         config.compression_algo,
     );
+    let dictionary_bank = Arc::new(dictionary_bank);
     let processing_totals = Arc::new(ProcessingThroughputTotals::default());
     let raw_fallback_enabled = config.performance.raw_fallback_enabled;
     let skip_compression = config.skip_compression;
     let worker_processing_totals = Arc::clone(&processing_totals);
+    let worker_dictionary_bank = Arc::clone(&dictionary_bank);
     let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
         process_batch(
             batch,
@@ -81,6 +86,7 @@ where
             compression,
             skip_compression,
             raw_fallback_enabled,
+            worker_dictionary_bank.as_ref(),
             worker_processing_totals.as_ref(),
             scratch,
         )
@@ -844,6 +850,38 @@ fn fail_directory_queueing(
         *retired_count += pending_results.clear();
     }
     first_error.get_or_insert(error);
+}
+
+fn train_directory_dictionary_bank(
+    config: &ArchivePipelineConfig,
+    discovery: &directory::DirectoryDiscovery,
+) -> Result<ArchiveDictionaryBank> {
+    if config.skip_compression
+        || config.compression_algo != crate::CompressionAlgo::Zstd
+        || config.performance.dictionary_mode == ArchiveDictionaryMode::Off
+    {
+        return Ok(ArchiveDictionaryBank::default());
+    }
+
+    let mut trainer = DictionaryTrainer::new(config.performance.dictionary_mode);
+    for file in &discovery.files {
+        let mut handle = match fs::File::open(&file.full_path) {
+            Ok(handle) => handle,
+            Err(_) => continue,
+        };
+
+        let mut sample = vec![0u8; 16 * 1024];
+        let read = match handle.read(sample.as_mut_slice()) {
+            Ok(read) => read,
+            Err(_) => continue,
+        };
+        trainer.observe(&sample[..read]);
+    }
+
+    trainer.build(
+        config.compression_algo,
+        config.performance.compression_level,
+    )
 }
 
 #[cfg(test)]

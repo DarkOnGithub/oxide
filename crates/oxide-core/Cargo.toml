@@ -29,7 +29,7 @@ anyhow = "1.0"
 # Logging/tracing
 tracing = "0.1"
 jwalk = "0.8"
-zstd = "0.13"
+zstd = { version = "0.13", features = ["zdict_builder"] }
 liblzma = { version = "0.4", features = ["static"] }
 regex = "1.11"
 libc = "0.2"

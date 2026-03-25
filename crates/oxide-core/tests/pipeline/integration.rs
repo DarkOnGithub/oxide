@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oxide_core::{
-    ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig, ArchiveProgressEvent, ArchiveReader,
-    BufferPool, CompressionAlgo, ExtractProgressEvent, ReportValue, RunTelemetryOptions,
-    TelemetryEvent, TelemetrySink, CHUNK_TABLE_HEADER_SIZE, FOOTER_SIZE,
+    ArchiveDictionaryMode, ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig,
+    ArchiveProgressEvent, ArchiveReader, BufferPool, CompressionAlgo, ExtractProgressEvent,
+    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, CHUNK_TABLE_HEADER_SIZE,
+    FOOTER_SIZE,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -87,6 +88,17 @@ fn build_pipeline(
     compression: CompressionAlgo,
 ) -> ArchivePipeline {
     let config = ArchivePipelineConfig::new(block_size, workers, pool, compression);
+    ArchivePipeline::new(config)
+}
+
+fn build_dictionary_pipeline(
+    block_size: usize,
+    workers: usize,
+    pool: Arc<BufferPool>,
+) -> ArchivePipeline {
+    let mut config = ArchivePipelineConfig::new(block_size, workers, pool, CompressionAlgo::Zstd);
+    config.performance.compression_level = Some(9);
+    config.performance.dictionary_mode = ArchiveDictionaryMode::Auto;
     ArchivePipeline::new(config)
 }
 
@@ -268,7 +280,7 @@ fn pipeline_forces_raw_storage_for_known_compressed_extensions(
         let (header, payload) = block?;
         let compression = header.compression_meta()?;
         assert!(compression.raw_passthrough);
-        assert_eq!(header.reserved, 0);
+        assert_eq!(header.dictionary_id, 0);
         assert_eq!(payload.len(), header.raw_len as usize);
         raw_blocks += 1;
     }
@@ -307,7 +319,7 @@ fn pipeline_forces_raw_storage_for_known_extensions() -> Result<(), Box<dyn std:
     for block in reader.iter_blocks() {
         let (header, _payload) = block?;
         assert!(header.compression_meta()?.raw_passthrough);
-        assert_eq!(header.reserved, 0);
+        assert_eq!(header.dictionary_id, 0);
     }
 
     let (restored, _report) =
@@ -402,8 +414,8 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn pipeline_records_fast_mode_chunk_headers_are_reserved() -> Result<(), Box<dyn std::error::Error>>
-{
+fn pipeline_records_fast_mode_chunk_headers_have_no_dictionary_ids(
+) -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -421,7 +433,7 @@ fn pipeline_records_fast_mode_chunk_headers_are_reserved() -> Result<(), Box<dyn
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, payload) = reader.read_block(0)?;
 
-    assert_eq!(header.reserved, 0);
+    assert_eq!(header.dictionary_id, 0);
     assert_eq!(header.compression()?, CompressionAlgo::Lz4);
     assert_eq!(payload.len(), header.encoded_len as usize);
 
@@ -429,7 +441,7 @@ fn pipeline_records_fast_mode_chunk_headers_are_reserved() -> Result<(), Box<dyn
 }
 
 #[test]
-fn pipeline_records_balanced_mode_chunk_headers_are_reserved(
+fn pipeline_records_balanced_mode_chunk_headers_have_no_dictionary_ids(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
@@ -454,13 +466,13 @@ fn pipeline_records_balanced_mode_chunk_headers_are_reserved(
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, _payload) = reader.read_block(0)?;
 
-    assert_eq!(header.reserved, 0);
+    assert_eq!(header.dictionary_id, 0);
     Ok(())
 }
 
 #[test]
-fn pipeline_records_ultra_mode_chunk_headers_are_reserved() -> Result<(), Box<dyn std::error::Error>>
-{
+fn pipeline_records_ultra_mode_chunk_headers_have_no_dictionary_ids(
+) -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -484,7 +496,7 @@ fn pipeline_records_ultra_mode_chunk_headers_are_reserved() -> Result<(), Box<dy
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, _payload) = reader.read_block(0)?;
 
-    assert_eq!(header.reserved, 0);
+    assert_eq!(header.dictionary_id, 0);
     Ok(())
 }
 
@@ -679,8 +691,8 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn directory_archive_fast_mode_chunk_headers_are_reserved() -> Result<(), Box<dyn std::error::Error>>
-{
+fn directory_archive_fast_mode_chunk_headers_have_no_dictionary_ids(
+) -> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(
         &source,
@@ -708,7 +720,7 @@ fn directory_archive_fast_mode_chunk_headers_are_reserved() -> Result<(), Box<dy
 
     for block in reader.iter_blocks() {
         let (header, _payload) = block?;
-        assert_eq!(header.reserved, 0);
+        assert_eq!(header.dictionary_id, 0);
     }
 
     Ok(())
@@ -1130,6 +1142,40 @@ fn archive_reader_exposes_file_manifest() -> Result<(), Box<dyn std::error::Erro
         data.len() as u64,
         0,
     );
+    Ok(())
+}
+
+#[test]
+fn zstd_dictionary_mode_embeds_dictionary_bank_and_round_trips(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(256 * 1024);
+    let file = write_fixture(&data)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_dictionary_pipeline(16 * 1024, 2, buffer_pool);
+
+    let archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let mut reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+
+    assert!(!reader.manifest().dictionary_bank().is_empty());
+    let mut saw_dictionary_id = false;
+    for index in 0..reader.block_count() {
+        let (descriptor, _payload) = reader.read_block(index)?;
+        saw_dictionary_id |= descriptor.dictionary_id != 0;
+    }
+    assert!(saw_dictionary_id);
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, data);
+
     Ok(())
 }
 

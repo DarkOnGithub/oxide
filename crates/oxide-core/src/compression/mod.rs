@@ -13,6 +13,8 @@ pub struct CompressionRequest<'a> {
     pub data: &'a [u8],
     pub algo: CompressionAlgo,
     pub level: Option<i32>,
+    pub dictionary_id: u8,
+    pub dictionary: Option<&'a [u8]>,
 }
 
 impl<'a> CompressionRequest<'a> {
@@ -21,6 +23,8 @@ impl<'a> CompressionRequest<'a> {
             data,
             algo,
             level: None,
+            dictionary_id: 0,
+            dictionary: None,
         }
     }
 }
@@ -31,6 +35,8 @@ pub struct DecompressionRequest<'a> {
     pub data: &'a [u8],
     pub algo: CompressionAlgo,
     pub raw_len: Option<usize>,
+    pub dictionary_id: u8,
+    pub dictionary: Option<&'a [u8]>,
 }
 
 impl<'a> DecompressionRequest<'a> {
@@ -39,6 +45,8 @@ impl<'a> DecompressionRequest<'a> {
             data,
             algo,
             raw_len: None,
+            dictionary_id: 0,
+            dictionary: None,
         }
     }
 
@@ -71,9 +79,13 @@ pub(crate) fn apply_compression_request_with_scratch(
         CompressionAlgo::Lzma => {
             lzma::apply_with_scratch(request.data, request.level, scratch.lzma())
         }
-        CompressionAlgo::Zstd => {
-            zstd::apply_with_scratch(request.data, request.level, scratch.zstd())
-        }
+        CompressionAlgo::Zstd => zstd::apply_with_scratch(
+            request.data,
+            request.level,
+            request.dictionary_id,
+            request.dictionary,
+            scratch.zstd(),
+        ),
     }
 }
 
@@ -85,9 +97,14 @@ pub(crate) fn apply_compression_request_with_scratch_into(
     match request.algo {
         CompressionAlgo::Lz4 => lz4::apply_into_vec(request.data, scratch.lz4(), output),
         CompressionAlgo::Lzma => lzma::apply_into_vec(request.data, request.level, output),
-        CompressionAlgo::Zstd => {
-            zstd::apply_into_vec(request.data, request.level, scratch.zstd(), output)
-        }
+        CompressionAlgo::Zstd => zstd::apply_into_vec(
+            request.data,
+            request.level,
+            request.dictionary_id,
+            request.dictionary,
+            scratch.zstd(),
+            output,
+        ),
     }
 }
 
@@ -120,9 +137,13 @@ pub(crate) fn reverse_compression_request_with_scratch(
     match request.algo {
         CompressionAlgo::Lz4 => lz4::reverse_with_scratch(request.data, scratch.lz4()),
         CompressionAlgo::Lzma => lzma::reverse_with_scratch(request.data, scratch.lzma()),
-        CompressionAlgo::Zstd => {
-            zstd::reverse_with_scratch(request.data, request.raw_len, scratch.zstd())
-        }
+        CompressionAlgo::Zstd => zstd::reverse_with_scratch(
+            request.data,
+            request.raw_len,
+            request.dictionary_id,
+            request.dictionary,
+            scratch.zstd(),
+        ),
     }
 }
 
@@ -134,8 +155,13 @@ pub(crate) fn reverse_compression_request_with_scratch_into(
     match request.algo {
         CompressionAlgo::Lz4 => lz4::reverse_into_vec(request.data, output),
         CompressionAlgo::Lzma => lzma::reverse_into_vec(request.data, output),
-        CompressionAlgo::Zstd => {
-            zstd::reverse_into_vec(request.data, request.raw_len, scratch.zstd(), output)
-        }
+        CompressionAlgo::Zstd => zstd::reverse_into_vec(
+            request.data,
+            request.raw_len,
+            request.dictionary_id,
+            request.dictionary,
+            scratch.zstd(),
+            output,
+        ),
     }
 }
