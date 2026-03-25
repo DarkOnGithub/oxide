@@ -35,6 +35,7 @@ pub(crate) struct ZstdScratch {
     compressor: Option<zstd::bulk::Compressor<'static>>,
     compressor_level: Option<i32>,
     decompressor: Option<zstd::bulk::Decompressor<'static>>,
+    output: Vec<u8>,
 }
 
 impl Default for ZstdScratch {
@@ -43,6 +44,7 @@ impl Default for ZstdScratch {
             compressor: None,
             compressor_level: None,
             decompressor: None,
+            output: Vec::new(),
         }
     }
 }
@@ -53,6 +55,7 @@ impl fmt::Debug for ZstdScratch {
             .field("compressor_initialized", &self.compressor.is_some())
             .field("compressor_level", &self.compressor_level)
             .field("decompressor_initialized", &self.decompressor.is_some())
+            .field("output_capacity", &self.output.capacity())
             .finish()
     }
 }
@@ -102,7 +105,16 @@ impl ZstdScratch {
     }
 
     pub(crate) fn allocated_bytes(&self) -> usize {
-        0
+        self.output.capacity()
+    }
+
+    pub(crate) fn take_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.output)
+    }
+
+    pub(crate) fn recycle_output(&mut self, mut output: Vec<u8>) {
+        output.clear();
+        self.output = output;
     }
 }
 

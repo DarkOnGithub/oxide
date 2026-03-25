@@ -29,10 +29,33 @@ pub(crate) fn apply_with_scratch(
     level: Option<i32>,
     scratch: &mut ZstdScratch,
 ) -> Result<Vec<u8>> {
+    let mut output = scratch.take_output();
+    apply_into_vec(data, level, scratch, &mut output)?;
+    Ok(output)
+}
+
+pub(crate) fn apply_into_vec(
+    data: &[u8],
+    level: Option<i32>,
+    scratch: &mut ZstdScratch,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    output.clear();
+    let required_capacity = zstd::zstd_safe::compress_bound(data.len());
+    if output.capacity() < required_capacity {
+        output.reserve(required_capacity - output.capacity());
+    }
+
     scratch
         .compressor(resolve_level(level)?)?
-        .compress(data)
-        .map_err(|err| OxideError::CompressionError(format!("zstd encode failed: {err}")))
+        .compress_to_buffer(data, output)
+        .map_err(|err| OxideError::CompressionError(format!("zstd encode failed: {err}")))?;
+
+    Ok(())
+}
+
+pub(crate) fn recycle_output(output: Vec<u8>, scratch: &mut ZstdScratch) {
+    scratch.recycle_output(output);
 }
 
 pub fn reverse(data: &[u8], raw_len: Option<usize>) -> Result<Vec<u8>> {
@@ -45,17 +68,49 @@ pub(crate) fn reverse_with_scratch(
     raw_len: Option<usize>,
     scratch: &mut ZstdScratch,
 ) -> Result<Vec<u8>> {
-    let result = match raw_len {
-        Some(raw_len) => scratch.decompressor()?.decompress(data, raw_len),
-        None => zstd::stream::decode_all(Cursor::new(data)),
-    };
+    let mut output = scratch.take_output();
+    reverse_into_vec(data, raw_len, scratch, &mut output)?;
+    Ok(output)
+}
 
-    result.map_err(|err| OxideError::DecompressionError(format!("zstd decode failed: {err}")))
+pub(crate) fn reverse_into_vec(
+    data: &[u8],
+    raw_len: Option<usize>,
+    scratch: &mut ZstdScratch,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    output.clear();
+
+    match raw_len {
+        Some(raw_len) => {
+            if output.capacity() < raw_len {
+                output.reserve(raw_len - output.capacity());
+            }
+
+            scratch
+                .decompressor()?
+                .decompress_to_buffer(data, output)
+                .map_err(|err| {
+                    OxideError::DecompressionError(format!("zstd decode failed: {err}"))
+                })?;
+            Ok(())
+        }
+        None => {
+            let decoded = zstd::stream::decode_all(Cursor::new(data)).map_err(|err| {
+                OxideError::DecompressionError(format!("zstd decode failed: {err}"))
+            })?;
+            output.extend_from_slice(&decoded);
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_with_scratch, resolve_level, reverse_with_scratch, ZSTD_DEFAULT_LEVEL};
+    use super::{
+        ZSTD_DEFAULT_LEVEL, apply_into_vec, apply_with_scratch, resolve_level, reverse_into_vec,
+        reverse_with_scratch,
+    };
     use crate::compression::scratch::ZstdScratch;
 
     #[test]
@@ -85,5 +140,25 @@ mod tests {
 
         assert_eq!(balanced_decoded, payload);
         assert_eq!(ultra_decoded, payload);
+    }
+
+    #[test]
+    fn direct_buffer_round_trip_reuses_output_vec() {
+        let payload = b"banana bandana banana";
+        let mut scratch = ZstdScratch::default();
+
+        let mut compressed = Vec::with_capacity(64);
+        let compressed_ptr = compressed.as_ptr();
+        apply_into_vec(payload, Some(3), &mut scratch, &mut compressed)
+            .expect("zstd compression should succeed");
+        assert_eq!(compressed.as_ptr(), compressed_ptr);
+
+        let mut decoded = Vec::with_capacity(payload.len());
+        let decoded_ptr = decoded.as_ptr();
+        reverse_into_vec(&compressed, Some(payload.len()), &mut scratch, &mut decoded)
+            .expect("zstd decompression should succeed");
+
+        assert_eq!(decoded.as_ptr(), decoded_ptr);
+        assert_eq!(decoded, payload);
     }
 }

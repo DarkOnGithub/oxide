@@ -20,6 +20,7 @@ const MAX_OFFSET: usize = u16::MAX as usize;
 pub(crate) struct Lz4Scratch {
     table: Vec<u32>,
     history: Vec<u8>,
+    output: Vec<u8>,
 }
 
 impl Lz4Scratch {
@@ -31,7 +32,18 @@ impl Lz4Scratch {
     }
 
     pub(crate) fn allocated_bytes(&self) -> usize {
-        self.table.capacity().saturating_mul(size_of::<u32>()) + self.history.capacity()
+        self.table.capacity().saturating_mul(size_of::<u32>())
+            + self.history.capacity()
+            + self.output.capacity()
+    }
+
+    pub(crate) fn take_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.output)
+    }
+
+    pub(crate) fn recycle_output(&mut self, mut output: Vec<u8>) {
+        output.clear();
+        self.output = output;
     }
 }
 
@@ -55,17 +67,58 @@ pub(crate) fn apply_with_scratch(data: &[u8], scratch: &mut Lz4Scratch) -> Resul
         ));
     }
 
-    let mut output = Vec::with_capacity(4 + max_compressed_size(data.len()));
-    output.extend_from_slice(&(data.len() as u32).to_le_bytes());
-
-    let table = &mut scratch.table;
-    compress_block(data, 0, &mut output, table, DEFAULT_TUNING);
+    let mut output = scratch.take_output();
+    apply_into_vec_with_table(data, &mut output, &mut scratch.table)?;
 
     Ok(output)
 }
 
+pub(crate) fn apply_into_vec(
+    data: &[u8],
+    scratch: &mut Lz4Scratch,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    apply_into_vec_with_table(data, output, &mut scratch.table)
+}
+
+fn apply_into_vec_with_table(
+    data: &[u8],
+    output: &mut Vec<u8>,
+    table: &mut Vec<u32>,
+) -> Result<()> {
+    if data.len() > u32::MAX as usize {
+        return Err(OxideError::CompressionError(
+            "lz4 input exceeds 32-bit size prefix".to_string(),
+        ));
+    }
+
+    output.clear();
+    let required_capacity = 4 + max_compressed_size(data.len());
+    if output.capacity() < required_capacity {
+        output.reserve(required_capacity - output.capacity());
+    }
+    output.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    compress_block(data, 0, output, table, DEFAULT_TUNING);
+    Ok(())
+}
+
+pub(crate) fn recycle_output(output: Vec<u8>, scratch: &mut Lz4Scratch) {
+    scratch.recycle_output(output);
+}
+
 /// Decompresses data using the LZ4 algorithm.
 pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
+    let mut scratch = Lz4Scratch::default();
+    reverse_with_scratch(data, &mut scratch)
+}
+
+pub(crate) fn reverse_with_scratch(data: &[u8], scratch: &mut Lz4Scratch) -> Result<Vec<u8>> {
+    let mut output = scratch.take_output();
+    reverse_into_vec(data, &mut output)?;
+    Ok(output)
+}
+
+pub(crate) fn reverse_into_vec(data: &[u8], output: &mut Vec<u8>) -> Result<()> {
     if data.len() < 4 {
         return Err(OxideError::DecompressionError(
             "lz4 decode failed: missing 4-byte size prefix".to_string(),
@@ -73,7 +126,7 @@ pub fn reverse(data: &[u8]) -> Result<Vec<u8>> {
     }
 
     let expected_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    decode::decompress_block(&data[4..], expected_size)
+    decode::decompress_block_into(&data[4..], expected_size, output)
         .map_err(|err| OxideError::DecompressionError(format!("lz4 decode failed: {err}")))
 }
 
@@ -350,4 +403,43 @@ unsafe fn load_u32(ptr: *const u8) -> u32 {
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn load_usize(ptr: *const u8) -> usize {
     ptr::read_unaligned(ptr as *const usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Lz4Scratch, apply_into_vec, apply_with_scratch, recycle_output, reverse_into_vec};
+
+    #[test]
+    fn direct_buffer_round_trip_reuses_output_vec() {
+        let payload = b"banana bandana banana";
+        let mut scratch = Lz4Scratch::default();
+        let mut compressed = Vec::with_capacity(64);
+        let original_ptr = compressed.as_ptr();
+
+        apply_into_vec(payload, &mut scratch, &mut compressed)
+            .expect("lz4 compression should succeed");
+
+        assert_eq!(compressed.as_ptr(), original_ptr);
+
+        let mut decoded = Vec::with_capacity(payload.len());
+        let decoded_ptr = decoded.as_ptr();
+        reverse_into_vec(&compressed, &mut decoded).expect("lz4 decompression should succeed");
+
+        assert_eq!(decoded.as_ptr(), decoded_ptr);
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn scratch_output_can_be_recycled_for_reuse() {
+        let payload = b"banana bandana banana";
+        let mut scratch = Lz4Scratch::default();
+
+        let compressed =
+            apply_with_scratch(payload, &mut scratch).expect("lz4 compression should succeed");
+        recycle_output(compressed.clone(), &mut scratch);
+        let decoded = super::reverse_with_scratch(&compressed, &mut scratch)
+            .expect("lz4 decompression should succeed");
+
+        assert_eq!(decoded, payload);
+    }
 }
