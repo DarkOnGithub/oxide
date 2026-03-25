@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use oxide_core::{ArchiveProgressEvent, TelemetryEvent, TelemetrySink};
 
 use crate::ui::{
-    format_bytes, format_duration, format_live_rate, tagged_message, terminal_width, StreamTarget,
-    Tone,
+    StreamTarget, Tone, format_bytes, format_duration, format_live_rate, tagged_message,
+    terminal_width,
 };
 
 pub struct ArchiveCliSink<'a> {

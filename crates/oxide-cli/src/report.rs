@@ -9,8 +9,8 @@ use oxide_core::{
 };
 
 use crate::ui::{
-    format_bytes, format_bytes_f64, format_duration, format_duration_compact, format_rate, paint,
-    progress_bar, StreamTarget, Tone,
+    StreamTarget, Tone, format_bytes, format_bytes_f64, format_duration, format_duration_compact,
+    format_rate, paint, progress_bar,
 };
 
 const CHART_WIDTH: usize = 28;
