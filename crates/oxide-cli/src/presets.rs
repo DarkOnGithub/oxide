@@ -3,11 +3,11 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use oxide_core::CompressionAlgo;
+use oxide_core::{ArchiveDictionaryMode, CompressionAlgo};
 use serde::Deserialize;
 
+use crate::cli::{parse_size, CompressionArg};
 use crate::AppResult;
-use crate::cli::{CompressionArg, parse_size};
 
 const DEFAULT_PRESETS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/presets.json");
 
@@ -17,6 +17,7 @@ pub struct ResolvedArchiveSettings {
     pub profile_source: String,
     pub compression: CompressionAlgo,
     pub skip_compression: bool,
+    pub dictionary_mode: ArchiveDictionaryMode,
     pub compression_level: Option<i32>,
     pub block_size: usize,
     pub workers: usize,
@@ -36,6 +37,7 @@ pub struct ResolvedArchiveSettings {
 pub struct ArchiveOverrides {
     pub compression: Option<CompressionAlgo>,
     pub skip_compression: bool,
+    pub dictionary_mode: Option<ArchiveDictionaryMode>,
     pub compression_level: Option<i32>,
     pub block_size: Option<usize>,
     pub workers: Option<usize>,
@@ -106,6 +108,7 @@ struct ArchivePresetRegistry {
 #[serde(default, deny_unknown_fields)]
 struct ArchivePresetConfig {
     compression: Option<CompressionConfig>,
+    dictionary_mode: Option<String>,
     block_size: Option<SizeValue>,
     workers: Option<usize>,
     pool_capacity: Option<SizeValue>,
@@ -136,6 +139,7 @@ impl ArchivePresetConfig {
                 current.merge_from(&incoming);
             },
         );
+        merge_option(&mut self.dictionary_mode, other.dictionary_mode.clone());
         merge_option(&mut self.block_size, other.block_size.clone());
         merge_option(&mut self.workers, other.workers);
         merge_option(&mut self.pool_capacity, other.pool_capacity.clone());
@@ -175,6 +179,13 @@ impl ArchivePresetConfig {
             profile_source: source_label.to_string(),
             compression: compression.algo,
             skip_compression: overrides.skip_compression,
+            dictionary_mode: overrides.dictionary_mode.unwrap_or(
+                self.dictionary_mode
+                    .as_deref()
+                    .map(parse_dictionary_mode)
+                    .transpose()?
+                    .unwrap_or(ArchiveDictionaryMode::Off),
+            ),
             compression_level: compression.level,
             block_size: resolve_usize(overrides.block_size, self.block_size, "block_size")?,
             workers: resolve_number(overrides.workers, self.workers, "workers")?,
@@ -229,6 +240,16 @@ impl ArchivePresetConfig {
                 "result_wait_ms",
             )?,
         })
+    }
+}
+
+fn parse_dictionary_mode(value: &str) -> Result<ArchiveDictionaryMode, io::Error> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" => Ok(ArchiveDictionaryMode::Off),
+        "auto" => Ok(ArchiveDictionaryMode::Auto),
+        other => Err(invalid_input(format!(
+            "unknown dictionary_mode '{other}': expected off or auto"
+        ))),
     }
 }
 
@@ -369,7 +390,7 @@ mod tests {
 
     use oxide_core::CompressionAlgo;
 
-    use super::{ArchiveOverrides, DEFAULT_PRESETS_PATH, PresetFile};
+    use super::{ArchiveOverrides, PresetFile, DEFAULT_PRESETS_PATH};
 
     fn parse_fixture(json: &str) -> PresetFile {
         serde_json::from_str(json).expect("fixture should parse")
