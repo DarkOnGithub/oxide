@@ -15,6 +15,7 @@ pub mod buffer;
 pub mod checksum;
 pub mod compression;
 pub mod core;
+pub mod dictionary;
 pub mod error;
 pub mod format;
 pub mod io;
@@ -29,6 +30,7 @@ pub use core::{
     PoolRuntimeSnapshot, WorkStealingQueue, WorkStealingWorker, WorkerPool, WorkerPoolHandle,
     WorkerRuntimeSnapshot, WorkerScratchArena,
 };
+pub use dictionary::{ArchiveDictionary, ArchiveDictionaryBank, ArchiveDictionaryMode, DictionaryClass, DictionaryTrainer};
 pub use error::OxideError;
 pub use format::{
     ARCHIVE_METADATA_SIZE, ArchiveBlockWriter, ArchiveManifest, ArchiveMetadata, ArchiveReader,

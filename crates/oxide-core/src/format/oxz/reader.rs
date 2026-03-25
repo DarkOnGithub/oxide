@@ -42,7 +42,11 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let chunk_descriptors = Self::read_chunk_table(&mut reader, global_header)?;
         let chunk_table_elapsed_us = duration_to_us(chunk_table_started.elapsed());
 
-        Self::validate_chunk_layout(&chunk_descriptors, global_header)?;
+        Self::validate_chunk_layout(
+            &chunk_descriptors,
+            global_header,
+            manifest.dictionary_bank(),
+        )?;
 
         reader.seek(SeekFrom::Start(global_header.footer_offset))?;
         let footer = Footer::read(&mut reader)?;
@@ -206,7 +210,11 @@ impl<R: Read + Seek> ArchiveReader<R> {
         decode_chunk_table(&bytes, header.payload_offset, header.block_count)
     }
 
-    fn validate_chunk_layout(descriptors: &[ChunkDescriptor], header: GlobalHeader) -> Result<()> {
+    fn validate_chunk_layout(
+        descriptors: &[ChunkDescriptor],
+        header: GlobalHeader,
+        dictionary_bank: &crate::ArchiveDictionaryBank,
+    ) -> Result<()> {
         let expected_payload_end = descriptors
             .last()
             .map(ChunkDescriptor::payload_end)
@@ -217,6 +225,19 @@ impl<R: Read + Seek> ArchiveReader<R> {
             return Err(OxideError::InvalidFormat(
                 "manifest offset does not match chunk payload layout",
             ));
+        }
+
+        for descriptor in descriptors {
+            let compression_meta = descriptor.compression_meta()?;
+            if compression_meta.dictionary_id != 0
+                && dictionary_bank
+                    .dictionary(compression_meta.dictionary_id, compression_meta.algo)
+                    .is_none()
+            {
+                return Err(OxideError::InvalidFormat(
+                    "chunk descriptor references unknown archive dictionary",
+                ));
+            }
         }
 
         Ok(())

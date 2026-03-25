@@ -193,7 +193,7 @@ pub struct ChunkDescriptor {
     pub raw_len: u32,
     pub checksum: u32,
     pub compression_flags: u8,
-    pub reserved: u8,
+    pub dictionary_id: u8,
 }
 
 impl ChunkDescriptor {
@@ -226,7 +226,11 @@ impl ChunkDescriptor {
             raw_len,
             checksum,
             compression_flags: compression_meta.to_flags(),
-            reserved: 0,
+            dictionary_id: if compression_meta.raw_passthrough {
+                0
+            } else {
+                compression_meta.dictionary_id
+            },
         }
     }
 
@@ -261,7 +265,8 @@ impl ChunkDescriptor {
     }
 
     pub fn compression_meta(&self) -> Result<CompressionMeta> {
-        CompressionMeta::from_flags(self.compression_flags)
+        Ok(CompressionMeta::from_flags(self.compression_flags)?
+            .with_dictionary_id(self.dictionary_id))
     }
 
     pub fn payload_end(&self) -> Result<u64> {
@@ -276,7 +281,7 @@ impl ChunkDescriptor {
         bytes[4..8].copy_from_slice(&self.raw_len.to_le_bytes());
         bytes[8..12].copy_from_slice(&self.checksum.to_le_bytes());
         bytes[12] = self.compression_flags;
-        bytes[13] = self.reserved;
+        bytes[13] = self.dictionary_id;
         bytes
     }
 
@@ -287,7 +292,7 @@ impl ChunkDescriptor {
             raw_len: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
             checksum: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
             compression_flags: bytes[12],
-            reserved: bytes[13],
+            dictionary_id: bytes[13],
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -295,10 +300,15 @@ impl ChunkDescriptor {
 
     fn validate(&self) -> Result<()> {
         self.payload_end()?;
-        self.compression_meta()?;
-        if self.reserved != 0 {
+        let compression_meta = self.compression_meta()?;
+        if compression_meta.raw_passthrough && self.dictionary_id != 0 {
             return Err(OxideError::InvalidFormat(
-                "invalid chunk descriptor reserved bits",
+                "raw chunk descriptors must not reference archive dictionaries",
+            ));
+        }
+        if compression_meta.algo != CompressionAlgo::Zstd && self.dictionary_id != 0 {
+            return Err(OxideError::InvalidFormat(
+                "only zstd chunk descriptors may reference archive dictionaries",
             ));
         }
         Ok(())

@@ -11,6 +11,7 @@ use crossbeam_channel::{Receiver, TryRecvError, bounded};
 
 use crate::buffer::{BufferPool, PooledBuffer};
 use crate::compression::CompressionScratchArena;
+use crate::dictionary::ArchiveDictionaryBank;
 use crate::core::WorkerRuntimeSnapshot;
 use crate::format::{ArchiveReader, ChunkDescriptor, GlobalHeader};
 use crate::telemetry::{ReportValue, RunTelemetryOptions, TelemetrySink};
@@ -579,12 +580,14 @@ impl Extractor {
             reorder_pending_limit,
             block_capacity,
         );
+        let dictionary_bank = Arc::new(archive.manifest().dictionary_bank().clone());
 
         for worker_id in 0..worker_count {
             let local_task_rx = task_rx.clone();
             let local_result_tx = result_tx.clone();
             let local_runtime = Arc::clone(&runtime_state);
             let local_buffer_pool = Arc::clone(&self.buffer_pool);
+            let local_dictionary_bank = Arc::clone(&dictionary_bank);
             let handle = thread::spawn(move || -> DecodeWorkerOutcome {
                 let started = Instant::now();
                 let mut tasks_completed = 0usize;
@@ -599,6 +602,7 @@ impl Extractor {
                         task.block_data,
                         &mut scratch,
                         &local_buffer_pool,
+                        local_dictionary_bank.as_ref(),
                     );
                     let busy_elapsed = decode_started.elapsed();
                     busy += busy_elapsed;
@@ -1138,6 +1142,7 @@ fn join_ordered_writer<W>(
 
 pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Result<Vec<u8>> {
     let mut scratch = CompressionScratchArena::new();
+    let dictionary_bank = ArchiveDictionaryBank::default();
     let compression_meta = header.compression_meta()?;
     let decoded = if compression_meta.raw_passthrough {
         block_data
@@ -1148,6 +1153,11 @@ pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Res
                 data: &block_data,
                 algo: compression_meta.algo,
                 raw_len: Some(header.raw_len as usize),
+                dictionary_id: compression_meta.dictionary_id,
+                dictionary: dictionary_bank.dictionary_bytes(
+                    compression_meta.dictionary_id,
+                    compression_meta.algo,
+                ),
             },
             &mut scratch,
             &mut decoded,
@@ -1159,6 +1169,11 @@ pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Res
                 data: &block_data,
                 algo: compression_meta.algo,
                 raw_len: Some(header.raw_len as usize),
+                dictionary_id: compression_meta.dictionary_id,
+                dictionary: dictionary_bank.dictionary_bytes(
+                    compression_meta.dictionary_id,
+                    compression_meta.algo,
+                ),
             },
             &mut scratch,
         )?
@@ -1176,6 +1191,7 @@ fn decode_block_payload_with_scratch(
     block_data: PooledBuffer,
     scratch: &mut CompressionScratchArena,
     pool: &BufferPool,
+    dictionary_bank: &ArchiveDictionaryBank,
 ) -> Result<DecodedBlock> {
     let compression_meta = header.compression_meta()?;
     let decoded = if compression_meta.raw_passthrough {
@@ -1187,6 +1203,11 @@ fn decode_block_payload_with_scratch(
                 data: block_data.as_slice(),
                 algo: compression_meta.algo,
                 raw_len: Some(header.raw_len as usize),
+                dictionary_id: compression_meta.dictionary_id,
+                dictionary: dictionary_bank.dictionary_bytes(
+                    compression_meta.dictionary_id,
+                    compression_meta.algo,
+                ),
             },
             scratch,
             decoded.as_mut_vec(),
@@ -1199,6 +1220,11 @@ fn decode_block_payload_with_scratch(
                     data: block_data.as_slice(),
                     algo: compression_meta.algo,
                     raw_len: Some(header.raw_len as usize),
+                    dictionary_id: compression_meta.dictionary_id,
+                    dictionary: dictionary_bank.dictionary_bytes(
+                        compression_meta.dictionary_id,
+                        compression_meta.algo,
+                    ),
                 },
                 scratch,
             )?,

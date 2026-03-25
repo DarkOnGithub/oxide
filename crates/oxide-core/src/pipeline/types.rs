@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::buffer::BufferPool;
+use crate::dictionary::ArchiveDictionaryMode;
 use crate::types::CompressionAlgo;
 
 /// Indicates whether the archive source is a single file or a directory.
@@ -224,6 +225,8 @@ pub enum StatValue {
 pub struct PipelinePerformanceOptions {
     /// Enables per-block raw passthrough when compression does not reduce size.
     pub raw_fallback_enabled: bool,
+    /// Optional archive-level dictionary training and selection mode.
+    pub dictionary_mode: ArchiveDictionaryMode,
     /// Optional explicit codec-specific compression level used only during encoding.
     pub compression_level: Option<i32>,
     /// Maximum in-flight block payload bytes pending worker completion.
@@ -246,6 +249,7 @@ impl Default for PipelinePerformanceOptions {
     fn default() -> Self {
         Self {
             raw_fallback_enabled: true,
+            dictionary_mode: ArchiveDictionaryMode::Off,
             compression_level: None,
             max_inflight_bytes: 512 * 1024 * 1024,
             max_inflight_blocks_per_worker: 256,

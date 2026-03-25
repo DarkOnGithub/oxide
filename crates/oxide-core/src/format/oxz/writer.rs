@@ -130,6 +130,7 @@ impl<W: Write> ArchiveWriter<W> {
             data: block.data.clone(),
             compression: block.compression,
             raw_passthrough: block.raw_passthrough,
+            dictionary_id: block.dictionary_id,
             original_len: block.original_len,
             crc32: block.crc32,
         };
@@ -337,6 +338,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             data: block.data.clone(),
             compression: block.compression,
             raw_passthrough: block.raw_passthrough,
+            dictionary_id: block.dictionary_id,
             original_len: block.original_len,
             crc32: block.crc32,
         };

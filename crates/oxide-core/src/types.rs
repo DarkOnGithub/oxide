@@ -311,6 +311,8 @@ pub struct CompressionMeta {
     pub algo: CompressionAlgo,
     /// Whether the data is stored in raw format (e.g., if compression failed to reduce size).
     pub raw_passthrough: bool,
+    /// Optional archive dictionary id used by the codec for this block.
+    pub dictionary_id: u8,
 }
 
 impl CompressionMeta {
@@ -319,7 +321,14 @@ impl CompressionMeta {
         Self {
             algo,
             raw_passthrough,
+            dictionary_id: 0,
         }
+    }
+
+    /// Attaches an archive dictionary id to the compression metadata.
+    pub fn with_dictionary_id(mut self, dictionary_id: u8) -> Self {
+        self.dictionary_id = dictionary_id;
+        self
     }
 
     /// Encodes compression metadata into OXZ compression flags.
@@ -348,6 +357,7 @@ impl CompressionMeta {
         Ok(Self {
             algo,
             raw_passthrough,
+            dictionary_id: 0,
         })
     }
 }
@@ -368,6 +378,8 @@ pub struct CompressedBlock {
     pub compression: CompressionAlgo,
     /// Whether the data is stored raw.
     pub raw_passthrough: bool,
+    /// Archive dictionary id used for this block, if any.
+    pub dictionary_id: u8,
     /// Original uncompressed length.
     pub original_len: u64,
     /// CRC32C checksum of the compressed data.
@@ -405,6 +417,11 @@ impl CompressedBlock {
             data,
             compression: compression_meta.algo,
             raw_passthrough: compression_meta.raw_passthrough,
+            dictionary_id: if compression_meta.raw_passthrough {
+                0
+            } else {
+                compression_meta.dictionary_id
+            },
             original_len,
         }
     }
@@ -418,6 +435,27 @@ impl CompressedBlock {
         raw_passthrough: bool,
         original_len: u64,
     ) -> Self {
+        Self::with_chunk_encoding_and_dictionary(
+            id,
+            stream_id,
+            data,
+            encoding_plan,
+            raw_passthrough,
+            original_len,
+            0,
+        )
+    }
+
+    /// Creates a new compressed block using an explicit planner encoding plan and dictionary id.
+    pub fn with_chunk_encoding_and_dictionary(
+        id: usize,
+        stream_id: u32,
+        data: impl Into<CompressedPayload>,
+        encoding_plan: ChunkEncodingPlan,
+        raw_passthrough: bool,
+        original_len: u64,
+        dictionary_id: u8,
+    ) -> Self {
         let data = data.into();
         Self {
             id,
@@ -426,6 +464,7 @@ impl CompressedBlock {
             data,
             compression: encoding_plan.algo,
             raw_passthrough,
+            dictionary_id: if raw_passthrough { 0 } else { dictionary_id },
             original_len,
         }
     }
@@ -435,6 +474,7 @@ impl CompressedBlock {
         CompressionMeta {
             algo: self.compression,
             raw_passthrough: self.raw_passthrough,
+            dictionary_id: self.dictionary_id,
         }
     }
 

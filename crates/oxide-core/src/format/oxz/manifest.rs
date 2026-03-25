@@ -1,4 +1,10 @@
-use crate::{ArchiveEntryKind, ArchiveListingEntry, ArchiveTimestamp, OxideError, Result};
+use crate::{
+    ArchiveDictionary, ArchiveDictionaryBank, ArchiveEntryKind, ArchiveListingEntry,
+    ArchiveTimestamp, CompressionAlgo, DictionaryClass, OxideError, Result,
+};
+
+const MANIFEST_MAGIC: [u8; 4] = *b"OXM2";
+const MANIFEST_VERSION: u8 = 1;
 
 const ENTRY_FLAG_DIRECTORY: u8 = 1 << 0;
 const ENTRY_FLAG_MODE_PRESENT: u8 = 1 << 1;
@@ -10,22 +16,57 @@ const ENTRY_FLAG_RESERVED_MASK: u8 = 0b1100_0000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ArchiveManifest {
+    dictionary_bank: ArchiveDictionaryBank,
     entries: Vec<ArchiveListingEntry>,
 }
 
 impl ArchiveManifest {
     pub fn new(entries: Vec<ArchiveListingEntry>) -> Self {
-        Self { entries }
+        Self {
+            dictionary_bank: ArchiveDictionaryBank::default(),
+            entries,
+        }
+    }
+
+    pub fn with_dictionary_bank(mut self, dictionary_bank: ArchiveDictionaryBank) -> Self {
+        self.dictionary_bank = dictionary_bank;
+        self
     }
 
     pub fn entries(&self) -> &[ArchiveListingEntry] {
         &self.entries
     }
 
+    pub fn dictionary_bank(&self) -> &ArchiveDictionaryBank {
+        &self.dictionary_bank
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>> {
         validate_entries(&self.entries)?;
+        self.dictionary_bank.validate()?;
 
         let mut out = Vec::new();
+        out.extend_from_slice(&MANIFEST_MAGIC);
+        out.push(MANIFEST_VERSION);
+        encode_varint(
+            &mut out,
+            u64::try_from(self.dictionary_bank.dictionaries().len())
+                .map_err(|_| OxideError::InvalidFormat("manifest dictionary count overflow"))?,
+        );
+
+        for dictionary in self.dictionary_bank.dictionaries() {
+            out.push(dictionary.id);
+            out.push(dictionary.algo.to_flags());
+            out.push(dictionary.class.id());
+            encode_varint(
+                &mut out,
+                u64::try_from(dictionary.bytes.len()).map_err(|_| {
+                    OxideError::InvalidFormat("manifest dictionary length overflow")
+                })?,
+            );
+            out.extend_from_slice(&dictionary.bytes);
+        }
+
         encode_varint(
             &mut out,
             u64::try_from(self.entries.len())
@@ -110,6 +151,64 @@ impl ArchiveManifest {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut cursor = 0usize;
+        if bytes.len() < MANIFEST_MAGIC.len() + 1 {
+            return Err(OxideError::InvalidFormat("archive manifest is truncated"));
+        }
+        if bytes[..MANIFEST_MAGIC.len()] != MANIFEST_MAGIC {
+            return Err(OxideError::InvalidFormat("invalid archive manifest magic"));
+        }
+        cursor += MANIFEST_MAGIC.len();
+        let version = bytes[cursor];
+        cursor += 1;
+        if version != MANIFEST_VERSION {
+            return Err(OxideError::InvalidFormat(
+                "unsupported archive manifest version",
+            ));
+        }
+
+        let dictionary_count = decode_varint(bytes, &mut cursor)?;
+        let dictionary_count = usize::try_from(dictionary_count).map_err(|_| {
+            OxideError::InvalidFormat("manifest dictionary count exceeds usize range")
+        })?;
+        let mut dictionaries = Vec::with_capacity(dictionary_count);
+        for _ in 0..dictionary_count {
+            if cursor + 3 > bytes.len() {
+                return Err(OxideError::InvalidFormat(
+                    "truncated archive dictionary header",
+                ));
+            }
+
+            let id = bytes[cursor];
+            let algo = CompressionAlgo::from_flags(bytes[cursor + 1])?;
+            let class = DictionaryClass::from_id(bytes[cursor + 2])?;
+            cursor += 3;
+
+            let dictionary_len = decode_varint(bytes, &mut cursor)?;
+            let dictionary_len = usize::try_from(dictionary_len).map_err(|_| {
+                OxideError::InvalidFormat("manifest dictionary length exceeds usize range")
+            })?;
+            let dictionary_end =
+                cursor
+                    .checked_add(dictionary_len)
+                    .ok_or(OxideError::InvalidFormat(
+                        "manifest dictionary range overflow",
+                    ))?;
+            if dictionary_end > bytes.len() {
+                return Err(OxideError::InvalidFormat(
+                    "truncated archive dictionary bytes",
+                ));
+            }
+
+            dictionaries.push(ArchiveDictionary {
+                id,
+                algo,
+                class,
+                bytes: bytes[cursor..dictionary_end].to_vec(),
+            });
+            cursor = dictionary_end;
+        }
+        let dictionary_bank = ArchiveDictionaryBank::new(dictionaries)?;
+
         let entry_count = decode_varint(bytes, &mut cursor)?;
         let entry_count = usize::try_from(entry_count)
             .map_err(|_| OxideError::InvalidFormat("manifest entry count exceeds usize range"))?;
@@ -265,7 +364,10 @@ impl ArchiveManifest {
         }
 
         validate_entries(&entries)?;
-        Ok(Self { entries })
+        Ok(Self {
+            dictionary_bank,
+            entries,
+        })
     }
 }
 

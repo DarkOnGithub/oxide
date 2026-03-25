@@ -51,10 +51,12 @@ where
         Arc::clone(&config.buffer_pool),
         config.compression_algo,
     );
+    let dictionary_bank = Arc::new(manifest.dictionary_bank().clone());
     let processing_totals = Arc::new(ProcessingThroughputTotals::default());
     let raw_fallback_enabled = config.performance.raw_fallback_enabled;
     let skip_compression = config.skip_compression;
     let worker_processing_totals = Arc::clone(&processing_totals);
+    let worker_dictionary_bank = Arc::clone(&dictionary_bank);
     let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
         process_batch(
             batch,
@@ -62,6 +64,7 @@ where
             compression,
             skip_compression,
             raw_fallback_enabled,
+            worker_dictionary_bank.as_ref(),
             worker_processing_totals.as_ref(),
             scratch,
         )
