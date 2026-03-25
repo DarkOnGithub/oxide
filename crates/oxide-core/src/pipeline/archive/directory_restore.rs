@@ -14,12 +14,41 @@ use crate::types::Result;
 use super::super::directory;
 use super::reorder_writer::OrderedChunkWriter;
 
+pub(crate) const OUTPUT_BUFFER_CAPACITY: usize = 128 * 1024;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DirectoryRestoreStats {
     pub(crate) directory_decode: Duration,
+    pub(crate) ordered_write_time: Duration,
     pub(crate) output_write: Duration,
+    pub(crate) output_create: Duration,
+    pub(crate) output_data: Duration,
+    pub(crate) output_flush: Duration,
+    pub(crate) output_metadata: Duration,
     pub(crate) output_bytes_total: u64,
     pub(crate) entry_count: u64,
+}
+
+impl DirectoryRestoreStats {
+    fn record_output_create(&mut self, elapsed: Duration) {
+        self.output_write += elapsed;
+        self.output_create += elapsed;
+    }
+
+    fn record_output_data(&mut self, elapsed: Duration) {
+        self.output_write += elapsed;
+        self.output_data += elapsed;
+    }
+
+    fn record_output_flush(&mut self, elapsed: Duration) {
+        self.output_write += elapsed;
+        self.output_flush += elapsed;
+    }
+
+    fn record_output_metadata(&mut self, elapsed: Duration) {
+        self.output_write += elapsed;
+        self.output_metadata += elapsed;
+    }
 }
 
 #[derive(Debug)]
@@ -151,7 +180,7 @@ impl DirectoryRestoreWriter {
                     let output_started = Instant::now();
                     let out_path = directory::join_safe(&self.root, &entry.path)?;
                     fs::create_dir_all(&out_path)?;
-                    self.stats.output_write += output_started.elapsed();
+                    self.stats.record_output_create(output_started.elapsed());
                     self.pending_directories.push(PendingDirectory {
                         path: out_path,
                         entry,
@@ -164,18 +193,19 @@ impl DirectoryRestoreWriter {
                         fs::create_dir_all(parent)?;
                     }
                     let file = fs::File::create(&out_path)?;
-                    self.stats.output_write += output_started.elapsed();
+                    self.stats.record_output_create(output_started.elapsed());
 
                     if entry.size == 0 {
                         let metadata_started = Instant::now();
                         apply_entry_metadata(&out_path, &entry)?;
-                        self.stats.output_write += metadata_started.elapsed();
+                        self.stats
+                            .record_output_metadata(metadata_started.elapsed());
                         continue;
                     }
 
                     self.pending_file = Some(PendingFile {
                         remaining: entry.size,
-                        writer: BufWriter::new(file),
+                        writer: BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file),
                         path: out_path,
                         entry,
                     });
@@ -190,7 +220,7 @@ impl DirectoryRestoreWriter {
         while let Some(directory) = self.pending_directories.pop() {
             let started = Instant::now();
             apply_entry_metadata(&directory.path, &directory.entry)?;
-            self.stats.output_write += started.elapsed();
+            self.stats.record_output_metadata(started.elapsed());
         }
         Ok(())
     }
@@ -217,6 +247,7 @@ impl FilteredDirectoryRestoreWriter {
 
 impl OrderedChunkWriter for DirectoryRestoreWriter {
     fn write_chunk(&mut self, mut bytes: &[u8]) -> Result<()> {
+        let ordered_write_started = Instant::now();
         let decode_started = Instant::now();
         self.advance_entries()?;
         self.stats.directory_decode += decode_started.elapsed();
@@ -230,7 +261,7 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
                 let take = bytes.len().min(pending.remaining as usize);
                 let output_started = Instant::now();
                 pending.writer.write_all(&bytes[..take])?;
-                self.stats.output_write += output_started.elapsed();
+                self.stats.record_output_data(output_started.elapsed());
                 self.stats.output_bytes_total =
                     self.stats.output_bytes_total.saturating_add(take as u64);
                 pending.remaining -= take as u64;
@@ -243,18 +274,21 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
                 if let Some(pending) = self.pending_file.as_mut() {
                     pending.writer.flush()?;
                 }
-                self.stats.output_write += output_started.elapsed();
+                self.stats.record_output_flush(output_started.elapsed());
                 let pending = self.pending_file.take().ok_or(OxideError::InvalidFormat(
                     "directory restore missing pending file after write completion",
                 ))?;
                 let metadata_started = Instant::now();
                 apply_entry_metadata(&pending.path, &pending.entry)?;
-                self.stats.output_write += metadata_started.elapsed();
+                self.stats
+                    .record_output_metadata(metadata_started.elapsed());
                 let decode_started = Instant::now();
                 self.advance_entries()?;
                 self.stats.directory_decode += decode_started.elapsed();
             }
         }
+
+        self.stats.ordered_write_time += ordered_write_started.elapsed();
 
         Ok(())
     }

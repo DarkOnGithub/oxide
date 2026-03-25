@@ -495,6 +495,28 @@ pub fn build_extract_report(
         "output_write".to_string(),
         stage_timings.output_write.as_micros().min(u64::MAX as u128) as u64,
     );
+    main_thread.stage_us.insert(
+        "output_create".to_string(),
+        stage_timings
+            .output_create
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
+        "output_data".to_string(),
+        stage_timings.output_data.as_micros().min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
+        "output_flush".to_string(),
+        stage_timings.output_flush.as_micros().min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
+        "output_metadata".to_string(),
+        stage_timings
+            .output_metadata
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
 
     ExtractReport::new(
         source_kind,

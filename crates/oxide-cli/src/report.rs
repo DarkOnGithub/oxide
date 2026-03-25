@@ -351,6 +351,10 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
                     ("merge", "merge"),
                     ("directory_decode", "directory decode"),
                     ("output_write", "output write"),
+                    ("output_create", "output create"),
+                    ("output_data", "output data"),
+                    ("output_flush", "output flush"),
+                    ("output_metadata", "output metadata"),
                 ],
             ),
         );
