@@ -454,10 +454,15 @@ mod tests {
 
         assert_eq!(balanced.compression, CompressionAlgo::Zstd);
         assert_eq!(balanced.compression_level, Some(6));
+        assert_eq!(balanced.block_size, 2 * 1024 * 1024);
         assert_eq!(ultra.compression, CompressionAlgo::Lzma);
         assert_eq!(ultra.compression_level, Some(9));
+        assert_eq!(ultra.block_size, 4 * 1024 * 1024);
+        assert_eq!(ultra.pool_capacity, 4 * 1024 * 1024);
         assert_eq!(extreme.compression, CompressionAlgo::Lzma);
         assert_eq!(extreme.compression_level, Some(9));
+        assert_eq!(extreme.block_size, 8 * 1024 * 1024);
+        assert_eq!(extreme.pool_capacity, 8 * 1024 * 1024);
     }
 
     #[test]
