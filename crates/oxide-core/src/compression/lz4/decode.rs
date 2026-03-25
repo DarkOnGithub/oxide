@@ -1,8 +1,8 @@
 use core::fmt;
 use core::ptr;
 
-use super::MIN_MATCH;
 use super::copy::{self, CopyKernel};
+use super::MIN_MATCH;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DecodeError {

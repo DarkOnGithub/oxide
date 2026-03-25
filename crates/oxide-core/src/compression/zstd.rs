@@ -43,7 +43,7 @@ pub(crate) fn apply_into_vec(
     output.clear();
     let required_capacity = zstd::zstd_safe::compress_bound(data.len());
     if output.capacity() < required_capacity {
-        output.reserve(required_capacity - output.capacity());
+        output.reserve(required_capacity - output.len());
     }
 
     scratch
@@ -84,7 +84,7 @@ pub(crate) fn reverse_into_vec(
     match raw_len {
         Some(raw_len) => {
             if output.capacity() < raw_len {
-                output.reserve(raw_len - output.capacity());
+                output.reserve(raw_len - output.len());
             }
 
             scratch
@@ -108,8 +108,8 @@ pub(crate) fn reverse_into_vec(
 #[cfg(test)]
 mod tests {
     use super::{
-        ZSTD_DEFAULT_LEVEL, apply_into_vec, apply_with_scratch, resolve_level, reverse_into_vec,
-        reverse_with_scratch,
+        apply_into_vec, apply_with_scratch, resolve_level, reverse_into_vec, reverse_with_scratch,
+        ZSTD_DEFAULT_LEVEL,
     };
     use crate::compression::scratch::ZstdScratch;
 
@@ -159,6 +159,22 @@ mod tests {
             .expect("zstd decompression should succeed");
 
         assert_eq!(decoded.as_ptr(), decoded_ptr);
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn direct_buffer_round_trip_grows_undersized_vecs() {
+        let payload: Vec<u8> = (0..16_384).map(|idx| ((idx * 73) % 251) as u8).collect();
+        let mut scratch = ZstdScratch::default();
+
+        let mut compressed = Vec::with_capacity(512);
+        apply_into_vec(&payload, Some(3), &mut scratch, &mut compressed)
+            .expect("zstd compression should grow undersized output");
+
+        let mut decoded = Vec::with_capacity(1024);
+        reverse_into_vec(&compressed, Some(payload.len()), &mut scratch, &mut decoded)
+            .expect("zstd decompression should grow undersized output");
+
         assert_eq!(decoded, payload);
     }
 }

@@ -95,7 +95,7 @@ fn apply_into_vec_with_table(
     output.clear();
     let required_capacity = 4 + max_compressed_size(data.len());
     if output.capacity() < required_capacity {
-        output.reserve(required_capacity - output.capacity());
+        output.reserve(required_capacity - output.len());
     }
     output.extend_from_slice(&(data.len() as u32).to_le_bytes());
     compress_block(data, 0, output, table, DEFAULT_TUNING);
@@ -407,7 +407,7 @@ unsafe fn load_usize(ptr: *const u8) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lz4Scratch, apply_into_vec, apply_with_scratch, recycle_output, reverse_into_vec};
+    use super::{apply_into_vec, apply_with_scratch, recycle_output, reverse_into_vec, Lz4Scratch};
 
     #[test]
     fn direct_buffer_round_trip_reuses_output_vec() {
@@ -439,6 +439,22 @@ mod tests {
         recycle_output(compressed.clone(), &mut scratch);
         let decoded = super::reverse_with_scratch(&compressed, &mut scratch)
             .expect("lz4 decompression should succeed");
+
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn apply_into_vec_grows_undersized_output_vec() {
+        let payload: Vec<u8> = (0..16_384).map(|idx| ((idx * 73) % 251) as u8).collect();
+        let mut scratch = Lz4Scratch::default();
+        let mut compressed = Vec::with_capacity(512);
+
+        apply_into_vec(&payload, &mut scratch, &mut compressed)
+            .expect("lz4 compression should grow undersized output");
+
+        let mut decoded = Vec::with_capacity(1024);
+        reverse_into_vec(&compressed, &mut decoded)
+            .expect("lz4 decompression should succeed after growth");
 
         assert_eq!(decoded, payload);
     }
