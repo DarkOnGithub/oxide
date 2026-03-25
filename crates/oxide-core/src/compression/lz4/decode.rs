@@ -1,8 +1,8 @@
 use core::fmt;
 use core::ptr;
 
-use super::copy::{self, CopyKernel};
 use super::MIN_MATCH;
+use super::copy::{self, CopyKernel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DecodeError {
@@ -101,15 +101,35 @@ pub(super) fn decompress_block(
     input: &[u8],
     expected_size: usize,
 ) -> core::result::Result<Vec<u8>, DecodeError> {
+    let mut output = Vec::new();
+    decompress_block_into(input, expected_size, &mut output)?;
+    Ok(output)
+}
+
+pub(super) fn decompress_block_into(
+    input: &[u8],
+    expected_size: usize,
+    output: &mut Vec<u8>,
+) -> core::result::Result<(), DecodeError> {
     if input.is_empty() {
         return Err(DecodeError::ExpectedAnotherByte);
     }
 
-    let mut output = vec![0u8; expected_size];
-    let mut decoder = BlockDecoder::new(input, output.as_mut_slice());
-    decoder.decode()?;
-    decoder.ensure_output_complete()?;
-    Ok(output)
+    output.clear();
+    output.resize(expected_size, 0);
+
+    let result = {
+        let mut decoder = BlockDecoder::new(input, output.as_mut_slice());
+        decoder
+            .decode()
+            .and_then(|()| decoder.ensure_output_complete())
+    };
+
+    if result.is_err() {
+        output.clear();
+    }
+
+    result
 }
 
 struct BlockDecoder<'a> {

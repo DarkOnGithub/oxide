@@ -1,4 +1,4 @@
-use crossbeam_channel::{bounded, select, Receiver, RecvTimeoutError, TryRecvError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, bounded, select};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::WorkerPool;
-use crate::format::{ArchiveBlockWriter, ArchiveManifest, ReorderBuffer, FOOTER_SIZE};
+use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE, ReorderBuffer};
 use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};

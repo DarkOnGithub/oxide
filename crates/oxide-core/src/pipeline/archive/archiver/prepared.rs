@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::core::{WorkerPool, WorkerPoolHandle};
-use crate::format::{ArchiveBlockWriter, ArchiveManifest, ReorderBuffer, FOOTER_SIZE};
+use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE, ReorderBuffer};
 use crate::pipeline::directory;
 use crate::pipeline::types::ArchivePipelineConfig;
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
