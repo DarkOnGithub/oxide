@@ -89,6 +89,8 @@ pub enum BatchData {
 pub enum CompressedPayload {
     /// Owned heap allocation.
     Owned(Vec<u8>),
+    /// Shared immutable bytes reused without copying.
+    Bytes(Bytes),
     /// Buffer borrowed from the buffer pool.
     Pooled(PooledBuffer),
     /// Memory-mapped file region reused without copying.
@@ -215,6 +217,7 @@ impl Clone for CompressedPayload {
     fn clone(&self) -> Self {
         match self {
             Self::Owned(data) => Self::Owned(data.clone()),
+            Self::Bytes(data) => Self::Bytes(data.clone()),
             Self::Pooled(data) => Self::Owned(data.as_slice().to_vec()),
             Self::Mapped { map, start, end } => Self::Mapped {
                 map: Arc::clone(map),
@@ -230,6 +233,7 @@ impl CompressedPayload {
     pub fn len(&self) -> usize {
         match self {
             Self::Owned(data) => data.len(),
+            Self::Bytes(data) => data.len(),
             Self::Pooled(data) => data.len(),
             Self::Mapped { start, end, .. } => end - start,
         }
@@ -244,6 +248,7 @@ impl CompressedPayload {
     pub fn as_slice(&self) -> &[u8] {
         match self {
             Self::Owned(data) => data.as_slice(),
+            Self::Bytes(data) => data.as_ref(),
             Self::Pooled(data) => data.as_slice(),
             Self::Mapped { map, start, end } => &map[*start..*end],
         }
@@ -265,8 +270,9 @@ impl CompressedPayload {
 
     /// Converts batch input data into a stored payload, reusing mmap regions when possible.
     pub fn from_batch_data_in_pool(data: BatchData, pool: &BufferPool) -> Self {
+        let _ = pool;
         match data {
-            BatchData::Owned(data) => Self::copy_from_slice_in_pool(data.as_ref(), pool),
+            BatchData::Owned(data) => Self::Bytes(data),
             BatchData::Mapped { map, start, end } => Self::Mapped { map, start, end },
         }
     }
@@ -275,6 +281,12 @@ impl CompressedPayload {
 impl From<Vec<u8>> for CompressedPayload {
     fn from(data: Vec<u8>) -> Self {
         Self::Owned(data)
+    }
+}
+
+impl From<Bytes> for CompressedPayload {
+    fn from(data: Bytes) -> Self {
+        Self::Bytes(data)
     }
 }
 

@@ -62,11 +62,6 @@ pub fn process_batch(
     } = batch;
     let source_len = data.len();
     let source = data.as_slice();
-    let request = CompressionRequest {
-        data: source,
-        algo: plan.algo,
-        level: plan.level,
-    };
 
     if force_raw_storage {
         processing_totals.record(source_len as u64, std::time::Duration::ZERO);
@@ -79,6 +74,24 @@ pub fn process_batch(
             source_len as u64,
         ));
     }
+
+    if skip_compression {
+        processing_totals.record(source_len as u64, std::time::Duration::ZERO);
+        return Ok(CompressedBlock::with_chunk_encoding(
+            id,
+            stream_id,
+            CompressedPayload::from_batch_data_in_pool(data, pool),
+            plan,
+            true,
+            source_len as u64,
+        ));
+    }
+
+    let request = CompressionRequest {
+        data: source,
+        algo: plan.algo,
+        level: plan.level,
+    };
 
     if raw_fallback_enabled
         && !skip_compression
@@ -124,17 +137,12 @@ pub fn process_batch(
         ));
     }
 
-    let (compressed, compression_elapsed) = if skip_compression {
-        (source.to_vec(), std::time::Duration::ZERO)
-    } else {
-        let compression_started = Instant::now();
-        let compressed = apply_compression_request_with_scratch(request, scratch.compression())?;
-        (compressed, compression_started.elapsed())
-    };
+    let compression_started = Instant::now();
+    let compressed = apply_compression_request_with_scratch(request, scratch.compression())?;
+    let compression_elapsed = compression_started.elapsed();
     processing_totals.record(source_len as u64, compression_elapsed);
 
-    let raw_passthrough =
-        skip_compression || (raw_fallback_enabled && compressed.len() >= source_len);
+    let raw_passthrough = raw_fallback_enabled && compressed.len() >= source_len;
     let data = if raw_passthrough {
         CompressedPayload::from_batch_data_in_pool(data, pool)
     } else {
@@ -172,11 +180,13 @@ mod tests {
     use crate::buffer::BufferPool;
     use crate::core::WorkerScratchArena;
     use crate::pipeline::archive::types::ProcessingThroughputTotals;
-    use crate::types::{Batch, ChunkEncodingPlan, CompressionAlgo};
+    use crate::types::{Batch, ChunkEncodingPlan, CompressedPayload, CompressionAlgo};
 
     #[test]
     fn skip_compression_stores_source_bytes_raw() {
-        let mut batch = Batch::new(0, "demo.txt", Bytes::from_static(b"banana bandana banana"));
+        let source = Bytes::from_static(b"banana bandana banana");
+        let source_ptr = source.as_ptr();
+        let mut batch = Batch::new(0, "demo.txt", source);
         batch.compression_plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4);
 
         let pool = BufferPool::new(1024, 4);
@@ -195,11 +205,17 @@ mod tests {
 
         assert!(block.raw_passthrough);
         assert_eq!(block.data.as_slice(), b"banana bandana banana");
+        match block.data {
+            CompressedPayload::Bytes(bytes) => assert_eq!(bytes.as_ptr(), source_ptr),
+            other => panic!("expected bytes payload, got {other:?}"),
+        }
     }
 
     #[test]
     fn force_raw_storage_bypasses_compression() {
-        let mut batch = Batch::new(0, "photo.jpg", Bytes::from_static(b"banana bandana banana"));
+        let source = Bytes::from_static(b"banana bandana banana");
+        let source_ptr = source.as_ptr();
+        let mut batch = Batch::new(0, "photo.jpg", source);
         batch.compression_plan = ChunkEncodingPlan::new(CompressionAlgo::Lz4);
         batch.force_raw_storage = true;
 
@@ -219,6 +235,10 @@ mod tests {
 
         assert!(block.raw_passthrough);
         assert_eq!(block.data.as_slice(), b"banana bandana banana");
+        match block.data {
+            CompressedPayload::Bytes(bytes) => assert_eq!(bytes.as_ptr(), source_ptr),
+            other => panic!("expected bytes payload, got {other:?}"),
+        }
     }
 
     #[test]
