@@ -16,7 +16,8 @@
       "producer_threads": 2,
       "directory_mmap_threshold": "8M",
       "writer_queue_blocks": 1024,
-      "result_wait_ms": 1
+      "result_wait_ms": 1,
+      "dictionary_mode": "auto"
     },
     "presets": {
       "fast": {
@@ -33,7 +34,8 @@
         "producer_threads": 3,
         "result_wait_ms": 1,
         "directory_mmap_threshold": "8M",
-        "writer_queue_blocks": 1024
+        "writer_queue_blocks": 1024,
+        "dictionary_mode": "auto"
       },
       "balanced": {
         "compression": {
@@ -50,7 +52,43 @@
         "inflight_blocks_per_worker": 32,
         "producer_threads": 2,
         "writer_queue_blocks": 512,
-        "result_wait_ms": 2
+        "result_wait_ms": 2,
+        "dictionary_mode": "auto"
+      },
+      "balanced-dict": {
+        "compression": {
+          "compressor": "zstd",
+          "level": 9
+        },
+        "block_size": "2M",
+        "pool_capacity": "2M",
+        "pool_buffers": 512,
+        "stream_read_buffer": "32M",
+        "directory_mmap_threshold": "8M",
+        "inflight_bytes": "1536M",
+        "inflight_blocks_per_worker": 24,
+        "producer_threads": 2,
+        "writer_queue_blocks": 384,
+        "result_wait_ms": 2,
+        "dictionary_mode": "auto"
+      },
+      "ratio": {
+        "compression": {
+          "compressor": "zstd",
+          "level": 12
+        },
+        "block_size": "4M",
+        "workers": 0,
+        "pool_capacity": "4M",
+        "pool_buffers": 256,
+        "stream_read_buffer": "16M",
+        "directory_mmap_threshold": "16M",
+        "inflight_bytes": "1G",
+        "inflight_blocks_per_worker": 12,
+        "producer_threads": 1,
+        "writer_queue_blocks": 128,
+        "result_wait_ms": 4,
+        "dictionary_mode": "auto"
       },
       "ultra": {
         "compression": {
@@ -67,7 +105,8 @@
         "producer_threads": 1,
         "directory_mmap_threshold": "16M",
         "writer_queue_blocks": 128,
-        "result_wait_ms": 4
+        "result_wait_ms": 4,
+        "dictionary_mode": "auto"
       },
       "extreme": {
         "compression": {
@@ -84,7 +123,8 @@
         "producer_threads": 1,
         "directory_mmap_threshold": "16M",
         "writer_queue_blocks": 96,
-        "result_wait_ms": 6
+        "result_wait_ms": 6,
+        "dictionary_mode": "auto"
       }
     }
   }

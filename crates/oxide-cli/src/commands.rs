@@ -8,18 +8,18 @@ use oxide_core::{
     PipelinePerformanceOptions, RunTelemetryOptions,
 };
 
-use crate::AppResult;
 use crate::cli::{
-    ArchiveArgs, ExtractArgs, TreeArgs, default_extract_output_path, default_output_path,
+    default_extract_output_path, default_output_path, ArchiveArgs, ExtractArgs, TreeArgs,
 };
-use crate::presets::{ArchiveOverrides, ResolvedArchiveSettings, resolve_archive_settings};
+use crate::presets::{resolve_archive_settings, ArchiveOverrides, ResolvedArchiveSettings};
 use crate::progress::{ArchiveCliSink, ExtractCliSink, LiveRateStats};
 use crate::report::{
-    ArchiveReportSummary, ExtractReportSummary, print_archive_report_summary,
-    print_extract_report_summary,
+    print_archive_report_summary, print_extract_report_summary, ArchiveReportSummary,
+    ExtractReportSummary,
 };
 use crate::tree::print_archive_tree;
-use crate::ui::{StreamTarget, Tone, tagged_message};
+use crate::ui::{tagged_message, StreamTarget, Tone};
+use crate::AppResult;
 
 pub fn archive(args: ArchiveArgs) -> AppResult {
     let ArchiveArgs {
@@ -50,6 +50,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         ArchiveOverrides {
             compression: compression.map(Into::into),
             skip_compression,
+            dictionary_mode: None,
             compression_level,
             block_size,
             workers,
@@ -203,6 +204,7 @@ fn build_archive_pipeline(
 ) -> ArchivePipeline {
     let mut performance = PipelinePerformanceOptions::default();
     performance.compression_level = settings.compression_level;
+    performance.dictionary_mode = settings.dictionary_mode;
     performance.max_inflight_bytes = settings.inflight_bytes.max(1);
     performance.max_inflight_blocks_per_worker = settings.inflight_blocks_per_worker.max(1);
     performance.directory_stream_read_buffer_size = settings.stream_read_buffer.max(1);
