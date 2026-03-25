@@ -57,9 +57,9 @@
           "compressor": "lzma",
           "level": 9
         },
-        "block_size": "8M",
+        "block_size": "4M",
         "workers": 0,
-        "pool_capacity": "8M",
+        "pool_capacity": "4M",
         "pool_buffers": 128,
         "stream_read_buffer": "16M",
         "inflight_bytes": "1G",
@@ -74,9 +74,9 @@
           "compressor": "lzma",
           "level": 9
         },
-        "block_size": "16M",
+        "block_size": "8M",
         "workers": 0,
-        "pool_capacity": "16M",
+        "pool_capacity": "8M",
         "pool_buffers": 128,
         "stream_read_buffer": "16M",
         "inflight_bytes": "1536M",
