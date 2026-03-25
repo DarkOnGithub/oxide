@@ -231,7 +231,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{default_extract_output_path, default_output_path, parse_size, Cli, Commands};
+    use super::{Cli, Commands, default_extract_output_path, default_output_path, parse_size};
 
     #[test]
     fn parse_size_supports_binary_suffixes() {
