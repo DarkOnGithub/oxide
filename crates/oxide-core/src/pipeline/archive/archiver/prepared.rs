@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::core::{WorkerPool, WorkerPoolHandle};
-use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE, ReorderBuffer};
+use crate::format::{ArchiveBlockWriter, ArchiveManifest, ReorderBuffer};
 use crate::pipeline::directory;
 use crate::pipeline::types::ArchivePipelineConfig;
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetryEvent, TelemetrySink};
@@ -71,7 +71,8 @@ where
     archive_writer
         .write_global_header_with_flags(block_count, directory::source_kind_flags(source_kind))?;
     let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
-    let mut pending_write = ReorderBuffer::<CompressedBlock>::with_limit(max_inflight_blocks);
+    let reorder_limit = total_blocks.max(1);
+    let mut pending_write = ReorderBuffer::<CompressedBlock>::with_limit(reorder_limit);
     let mut written_count = 0usize;
 
     let started_at = Instant::now();
@@ -202,7 +203,8 @@ where
     let footer_started = Instant::now();
     let writer = archive_writer.write_footer()?;
     stage_timings.writer += footer_started.elapsed();
-    output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
+    output_bytes_written =
+        output_bytes_written.saturating_add(container_trailer_bytes(block_count, manifest_bytes));
     let processing_snapshot = processing_totals.snapshot();
     let extensions = build_stats_extensions(
         input_bytes_total,
@@ -216,7 +218,7 @@ where
         config.performance.max_inflight_bytes,
         config.performance.max_inflight_blocks_per_worker,
         max_inflight_blocks,
-        max_inflight_blocks,
+        reorder_limit,
         pending_write_peak,
         0,
         stage_timings,

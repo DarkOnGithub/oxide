@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, bounded, select};
+use crossbeam_channel::{bounded, select, Receiver, RecvTimeoutError, TryRecvError};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::WorkerPool;
-use crate::format::{ArchiveBlockWriter, ArchiveManifest, FOOTER_SIZE, ReorderBuffer};
+use crate::format::{ArchiveBlockWriter, ArchiveManifest, ReorderBuffer};
 use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
@@ -91,7 +91,7 @@ where
         .writer_result_queue_blocks
         .max(1)
         .min(max_inflight_blocks.max(1));
-    let writer_reorder_limit = 0usize;
+    let writer_reorder_limit = total_blocks.max(1);
     let (writer_tx, writer_rx) = bounded::<CompressedBlock>(writer_queue_capacity);
     let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes(
         block_count,
@@ -125,7 +125,8 @@ where
             let footer_started = Instant::now();
             let writer = archive_writer.write_footer()?;
             writer_time += footer_started.elapsed();
-            output_bytes_written = output_bytes_written.saturating_add(FOOTER_SIZE as u64);
+            output_bytes_written = output_bytes_written
+                .saturating_add(container_trailer_bytes(block_count, manifest_bytes));
             writer_output_bytes_shared.store(output_bytes_written, AtomicOrdering::Release);
 
             Ok(DirectoryWriterOutcome {
@@ -160,7 +161,7 @@ where
     let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
     let mut raw_passthrough_blocks = 0u64;
     let mut writer_queue_peak = 0usize;
-    let mut pending_results = ReorderBuffer::<CompressedBlock>::with_limit(max_inflight_blocks);
+    let mut pending_results = ReorderBuffer::<CompressedBlock>::with_limit(total_blocks.max(1));
 
     let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
     let producer_root = discovery.root.clone();

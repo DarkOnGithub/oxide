@@ -12,7 +12,7 @@ use crossbeam_channel::{Receiver, TryRecvError, bounded};
 use crate::buffer::{BufferPool, PooledBuffer};
 use crate::compression::CompressionScratchArena;
 use crate::core::WorkerRuntimeSnapshot;
-use crate::format::{ArchiveMetadata, ArchiveReader, ChunkDescriptor, GlobalHeader};
+use crate::format::{ArchiveReader, ChunkDescriptor, GlobalHeader};
 use crate::telemetry::{ReportValue, RunTelemetryOptions, TelemetrySink};
 use crate::types::Result;
 
@@ -319,10 +319,8 @@ impl Extractor {
         let position = reader.stream_position()?;
         reader.seek(SeekFrom::Start(0))?;
         let header = GlobalHeader::read(reader)?;
-        reader.seek(SeekFrom::Start(header.metadata_offset))?;
-        let metadata = ArchiveMetadata::read(reader)?;
         reader.seek(SeekFrom::Start(position))?;
-        Ok(metadata.source_kind)
+        Ok(header.source_kind())
     }
 
     pub fn read_archive_payload_with_metrics<R: Read + Seek>(
@@ -624,8 +622,10 @@ impl Extractor {
         drop(result_tx);
 
         let archive_bytes_total = archive.global_header().footer_offset + crate::FOOTER_SIZE as u64;
-        let mut archive_bytes_completed =
-            archive.global_header().payload_offset + crate::FOOTER_SIZE as u64;
+        let mut archive_bytes_completed = archive.global_header().payload_offset
+            + u64::from(archive.global_header().entry_table_len)
+            + u64::from(archive.global_header().chunk_table_len)
+            + crate::FOOTER_SIZE as u64;
         let mut submitted = 0usize;
         let mut received = 0usize;
         let mut first_error: Option<crate::OxideError> = None;

@@ -1,8 +1,12 @@
 use crate::{ArchiveEntryKind, ArchiveListingEntry, ArchiveTimestamp, OxideError, Result};
 
-pub const ARCHIVE_MANIFEST_MAGIC: [u8; 4] = *b"OXMF";
-pub const ARCHIVE_MANIFEST_VERSION: u16 = 1;
-const ARCHIVE_MANIFEST_HEADER_SIZE: usize = 12;
+const ENTRY_FLAG_DIRECTORY: u8 = 1 << 0;
+const ENTRY_FLAG_MODE_PRESENT: u8 = 1 << 1;
+const ENTRY_FLAG_UID_PRESENT: u8 = 1 << 2;
+const ENTRY_FLAG_GID_PRESENT: u8 = 1 << 3;
+const ENTRY_FLAG_MTIME_SECONDS_PRESENT: u8 = 1 << 4;
+const ENTRY_FLAG_MTIME_NANOS_PRESENT: u8 = 1 << 5;
+const ENTRY_FLAG_RESERVED_MASK: u8 = 0b1100_0000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ArchiveManifest {
@@ -20,146 +24,217 @@ impl ArchiveManifest {
 
     pub fn encode(&self) -> Result<Vec<u8>> {
         validate_entries(&self.entries)?;
-        let entry_count = u32::try_from(self.entries.len())
-            .map_err(|_| OxideError::InvalidFormat("manifest entry count overflow"))?;
-        let mut out = Vec::with_capacity(ARCHIVE_MANIFEST_HEADER_SIZE);
-        out.extend_from_slice(&ARCHIVE_MANIFEST_MAGIC);
-        out.extend_from_slice(&ARCHIVE_MANIFEST_VERSION.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&entry_count.to_le_bytes());
+
+        let mut out = Vec::new();
+        encode_varint(
+            &mut out,
+            u64::try_from(self.entries.len())
+                .map_err(|_| OxideError::InvalidFormat("manifest entry count overflow"))?,
+        );
+
+        let mut previous_path = Vec::new();
+        let mut previous_mode = 0u32;
+        let mut previous_uid = 0u32;
+        let mut previous_gid = 0u32;
+        let mut previous_mtime_seconds = 0i64;
+        let mut previous_mtime_nanoseconds = 0u32;
 
         for entry in &self.entries {
-            out.push(entry.kind.to_flags());
-            encode_path(&mut out, &entry.path)?;
-            out.extend_from_slice(&entry.size.to_le_bytes());
-            out.extend_from_slice(&entry.mode.to_le_bytes());
-            out.extend_from_slice(&entry.mtime.seconds.to_le_bytes());
-            out.extend_from_slice(&entry.mtime.nanoseconds.to_le_bytes());
-            out.extend_from_slice(&entry.uid.to_le_bytes());
-            out.extend_from_slice(&entry.gid.to_le_bytes());
-            out.extend_from_slice(&entry.content_offset.to_le_bytes());
+            let mut flags = match entry.kind {
+                ArchiveEntryKind::Directory => ENTRY_FLAG_DIRECTORY,
+                ArchiveEntryKind::File => 0,
+            };
+
+            if entry.mode != previous_mode {
+                flags |= ENTRY_FLAG_MODE_PRESENT;
+            }
+            if entry.uid != previous_uid {
+                flags |= ENTRY_FLAG_UID_PRESENT;
+            }
+            if entry.gid != previous_gid {
+                flags |= ENTRY_FLAG_GID_PRESENT;
+            }
+            if entry.mtime.seconds != previous_mtime_seconds {
+                flags |= ENTRY_FLAG_MTIME_SECONDS_PRESENT;
+            }
+            if entry.mtime.nanoseconds != previous_mtime_nanoseconds {
+                flags |= ENTRY_FLAG_MTIME_NANOS_PRESENT;
+            }
+
+            out.push(flags);
+
+            let path_bytes = entry.path.as_bytes();
+            let prefix_len = common_prefix_len(&previous_path, path_bytes);
+            let suffix = &path_bytes[prefix_len..];
+            encode_varint(&mut out, prefix_len as u64);
+            encode_varint(
+                &mut out,
+                u64::try_from(suffix.len())
+                    .map_err(|_| OxideError::InvalidFormat("manifest path length overflow"))?,
+            );
+            out.extend_from_slice(suffix);
+
+            if matches!(entry.kind, ArchiveEntryKind::File) {
+                encode_varint(&mut out, entry.size);
+            }
+            if flags & ENTRY_FLAG_MODE_PRESENT != 0 {
+                encode_varint(&mut out, entry.mode as u64);
+            }
+            if flags & ENTRY_FLAG_UID_PRESENT != 0 {
+                encode_varint(&mut out, entry.uid as u64);
+            }
+            if flags & ENTRY_FLAG_GID_PRESENT != 0 {
+                encode_varint(&mut out, entry.gid as u64);
+            }
+            if flags & ENTRY_FLAG_MTIME_SECONDS_PRESENT != 0 {
+                encode_varint(
+                    &mut out,
+                    zigzag_encode_i64(entry.mtime.seconds - previous_mtime_seconds),
+                );
+            }
+            if flags & ENTRY_FLAG_MTIME_NANOS_PRESENT != 0 {
+                encode_varint(&mut out, entry.mtime.nanoseconds as u64);
+            }
+
+            previous_path.clear();
+            previous_path.extend_from_slice(path_bytes);
+            previous_mode = entry.mode;
+            previous_uid = entry.uid;
+            previous_gid = entry.gid;
+            previous_mtime_seconds = entry.mtime.seconds;
+            previous_mtime_nanoseconds = entry.mtime.nanoseconds;
         }
 
         Ok(out)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < ARCHIVE_MANIFEST_HEADER_SIZE {
-            return Err(OxideError::InvalidFormat("archive manifest is too short"));
-        }
-        if bytes[..4] != ARCHIVE_MANIFEST_MAGIC {
-            return Err(OxideError::InvalidFormat("invalid archive manifest magic"));
-        }
+        let mut cursor = 0usize;
+        let entry_count = decode_varint(bytes, &mut cursor)?;
+        let entry_count = usize::try_from(entry_count)
+            .map_err(|_| OxideError::InvalidFormat("manifest entry count exceeds usize range"))?;
 
-        let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-        if version != ARCHIVE_MANIFEST_VERSION {
-            return Err(OxideError::InvalidFormat(
-                "unsupported archive manifest version",
-            ));
-        }
-
-        let reserved = u16::from_le_bytes([bytes[6], bytes[7]]);
-        if reserved != 0 {
-            return Err(OxideError::InvalidFormat(
-                "invalid archive manifest reserved bits",
-            ));
-        }
-
-        let entry_count = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-        let mut cursor = ARCHIVE_MANIFEST_HEADER_SIZE;
-        let mut entries = Vec::with_capacity(entry_count as usize);
+        let mut entries = Vec::with_capacity(entry_count);
+        let mut previous_path = Vec::new();
+        let mut previous_mode = 0u32;
+        let mut previous_uid = 0u32;
+        let mut previous_gid = 0u32;
+        let mut previous_mtime_seconds = 0i64;
+        let mut previous_mtime_nanoseconds = 0u32;
+        let mut content_offset = 0u64;
 
         for _ in 0..entry_count {
             if cursor >= bytes.len() {
                 return Err(OxideError::InvalidFormat(
-                    "truncated archive manifest entry kind",
+                    "truncated archive manifest entry flags",
                 ));
             }
 
             let flags = bytes[cursor];
-            let kind = ArchiveEntryKind::from_flags(flags).ok_or(OxideError::InvalidFormat(
-                "invalid archive manifest entry flags",
-            ))?;
             cursor += 1;
+            if flags & ENTRY_FLAG_RESERVED_MASK != 0 {
+                return Err(OxideError::InvalidFormat(
+                    "invalid archive manifest entry flags",
+                ));
+            }
 
-            let path = decode_path(bytes, &mut cursor)?;
-            if cursor + 32 > bytes.len() {
+            let prefix_len = decode_varint(bytes, &mut cursor)?;
+            let prefix_len = usize::try_from(prefix_len)
+                .map_err(|_| OxideError::InvalidFormat("manifest prefix length overflow"))?;
+            if prefix_len > previous_path.len() {
                 return Err(OxideError::InvalidFormat(
-                    "truncated archive manifest entry metadata",
+                    "manifest path prefix exceeds previous path length",
                 ));
             }
-            let size = u64::from_le_bytes([
-                bytes[cursor],
-                bytes[cursor + 1],
-                bytes[cursor + 2],
-                bytes[cursor + 3],
-                bytes[cursor + 4],
-                bytes[cursor + 5],
-                bytes[cursor + 6],
-                bytes[cursor + 7],
-            ]);
-            cursor += 8;
-            let mode = u32::from_le_bytes([
-                bytes[cursor],
-                bytes[cursor + 1],
-                bytes[cursor + 2],
-                bytes[cursor + 3],
-            ]);
-            cursor += 4;
-            let mtime_seconds = i64::from_le_bytes([
-                bytes[cursor],
-                bytes[cursor + 1],
-                bytes[cursor + 2],
-                bytes[cursor + 3],
-                bytes[cursor + 4],
-                bytes[cursor + 5],
-                bytes[cursor + 6],
-                bytes[cursor + 7],
-            ]);
-            cursor += 8;
-            let mtime_nanoseconds = u32::from_le_bytes([
-                bytes[cursor],
-                bytes[cursor + 1],
-                bytes[cursor + 2],
-                bytes[cursor + 3],
-            ]);
-            cursor += 4;
-            if mtime_nanoseconds >= 1_000_000_000 {
-                return Err(OxideError::InvalidFormat(
-                    "archive manifest mtime nanoseconds out of range",
-                ));
-            }
-            let uid = u32::from_le_bytes([
-                bytes[cursor],
-                bytes[cursor + 1],
-                bytes[cursor + 2],
-                bytes[cursor + 3],
-            ]);
-            cursor += 4;
-            let gid = u32::from_le_bytes([
-                bytes[cursor],
-                bytes[cursor + 1],
-                bytes[cursor + 2],
-                bytes[cursor + 3],
-            ]);
-            cursor += 4;
-            let content_offset = u64::from_le_bytes([
-                bytes[cursor],
-                bytes[cursor + 1],
-                bytes[cursor + 2],
-                bytes[cursor + 3],
-                bytes[cursor + 4],
-                bytes[cursor + 5],
-                bytes[cursor + 6],
-                bytes[cursor + 7],
-            ]);
-            cursor += 8;
 
-            if matches!(kind, ArchiveEntryKind::Directory) && (size != 0 || content_offset != 0) {
+            let suffix_len = decode_varint(bytes, &mut cursor)?;
+            let suffix_len = usize::try_from(suffix_len)
+                .map_err(|_| OxideError::InvalidFormat("manifest suffix length overflow"))?;
+            let suffix_end = cursor
+                .checked_add(suffix_len)
+                .ok_or(OxideError::InvalidFormat("manifest path range overflow"))?;
+            if suffix_end > bytes.len() {
                 return Err(OxideError::InvalidFormat(
-                    "directory manifest entries must not carry content ranges",
+                    "truncated archive manifest path data",
                 ));
             }
+
+            let mut path_bytes = previous_path[..prefix_len].to_vec();
+            path_bytes.extend_from_slice(&bytes[cursor..suffix_end]);
+            cursor = suffix_end;
+
+            let path = String::from_utf8(path_bytes.clone())
+                .map_err(|_| OxideError::InvalidFormat("archive manifest path is not utf8"))?;
+
+            let kind = if flags & ENTRY_FLAG_DIRECTORY != 0 {
+                ArchiveEntryKind::Directory
+            } else {
+                ArchiveEntryKind::File
+            };
+            let size = if matches!(kind, ArchiveEntryKind::File) {
+                decode_varint(bytes, &mut cursor)?
+            } else {
+                0
+            };
+
+            let mode = if flags & ENTRY_FLAG_MODE_PRESENT != 0 {
+                let value = decode_varint(bytes, &mut cursor)?;
+                u32::try_from(value)
+                    .map_err(|_| OxideError::InvalidFormat("manifest mode exceeds u32 range"))?
+            } else {
+                previous_mode
+            };
+
+            let uid = if flags & ENTRY_FLAG_UID_PRESENT != 0 {
+                let value = decode_varint(bytes, &mut cursor)?;
+                u32::try_from(value)
+                    .map_err(|_| OxideError::InvalidFormat("manifest uid exceeds u32 range"))?
+            } else {
+                previous_uid
+            };
+
+            let gid = if flags & ENTRY_FLAG_GID_PRESENT != 0 {
+                let value = decode_varint(bytes, &mut cursor)?;
+                u32::try_from(value)
+                    .map_err(|_| OxideError::InvalidFormat("manifest gid exceeds u32 range"))?
+            } else {
+                previous_gid
+            };
+
+            let mtime_seconds = if flags & ENTRY_FLAG_MTIME_SECONDS_PRESENT != 0 {
+                let delta = zigzag_decode_i64(decode_varint(bytes, &mut cursor)?);
+                previous_mtime_seconds
+                    .checked_add(delta)
+                    .ok_or(OxideError::InvalidFormat("manifest mtime seconds overflow"))?
+            } else {
+                previous_mtime_seconds
+            };
+
+            let mtime_nanoseconds = if flags & ENTRY_FLAG_MTIME_NANOS_PRESENT != 0 {
+                let value = decode_varint(bytes, &mut cursor)?;
+                let value = u32::try_from(value).map_err(|_| {
+                    OxideError::InvalidFormat("manifest mtime nanoseconds exceeds u32 range")
+                })?;
+                if value >= 1_000_000_000 {
+                    return Err(OxideError::InvalidFormat(
+                        "archive manifest mtime nanoseconds out of range",
+                    ));
+                }
+                value
+            } else {
+                previous_mtime_nanoseconds
+            };
+
+            let entry_content_offset = match kind {
+                ArchiveEntryKind::Directory => 0,
+                ArchiveEntryKind::File => {
+                    let offset = content_offset;
+                    content_offset = content_offset
+                        .checked_add(size)
+                        .ok_or(OxideError::InvalidFormat("manifest content range overflow"))?;
+                    offset
+                }
+            };
 
             entries.push(ArchiveListingEntry {
                 path,
@@ -172,8 +247,15 @@ impl ArchiveManifest {
                 },
                 uid,
                 gid,
-                content_offset,
+                content_offset: entry_content_offset,
             });
+
+            previous_path = path_bytes;
+            previous_mode = mode;
+            previous_uid = uid;
+            previous_gid = gid;
+            previous_mtime_seconds = mtime_seconds;
+            previous_mtime_nanoseconds = mtime_nanoseconds;
         }
 
         if cursor != bytes.len() {
@@ -183,7 +265,6 @@ impl ArchiveManifest {
         }
 
         validate_entries(&entries)?;
-
         Ok(Self { entries })
     }
 }
@@ -214,6 +295,52 @@ fn validate_entries(entries: &[ArchiveListingEntry]) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
+    left.iter()
+        .zip(right.iter())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+fn encode_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn decode_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64> {
+    let mut shift = 0u32;
+    let mut value = 0u64;
+
+    loop {
+        if *cursor >= bytes.len() {
+            return Err(OxideError::InvalidFormat("truncated manifest varint"));
+        }
+        if shift >= 64 {
+            return Err(OxideError::InvalidFormat("manifest varint overflow"));
+        }
+
+        let byte = bytes[*cursor];
+        *cursor += 1;
+
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+    }
+}
+
+fn zigzag_encode_i64(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
+}
+
+fn zigzag_decode_i64(value: u64) -> i64 {
+    ((value >> 1) as i64) ^ (-((value & 1) as i64))
 }
 
 #[cfg(test)]
@@ -255,44 +382,4 @@ mod tests {
         assert_eq!(decoded.entries()[0].kind, ArchiveEntryKind::Directory);
         assert_eq!(decoded.entries()[1].content_offset, 0);
     }
-}
-
-fn encode_path(out: &mut Vec<u8>, path: &str) -> Result<()> {
-    let bytes = path.as_bytes();
-    let len = u32::try_from(bytes.len())
-        .map_err(|_| OxideError::InvalidFormat("path length overflow"))?;
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(bytes);
-    Ok(())
-}
-
-fn decode_path(bytes: &[u8], cursor: &mut usize) -> Result<String> {
-    if *cursor + 4 > bytes.len() {
-        return Err(OxideError::InvalidFormat(
-            "truncated archive manifest path length",
-        ));
-    }
-
-    let len = u32::from_le_bytes([
-        bytes[*cursor],
-        bytes[*cursor + 1],
-        bytes[*cursor + 2],
-        bytes[*cursor + 3],
-    ]) as usize;
-    *cursor += 4;
-
-    let end = cursor.checked_add(len).ok_or(OxideError::InvalidFormat(
-        "archive manifest path offset overflow",
-    ))?;
-    if end > bytes.len() {
-        return Err(OxideError::InvalidFormat(
-            "truncated archive manifest path data",
-        ));
-    }
-
-    let path = std::str::from_utf8(&bytes[*cursor..end])
-        .map_err(|_| OxideError::InvalidFormat("archive manifest path is not utf8"))?
-        .to_string();
-    *cursor = end;
-    Ok(path)
 }

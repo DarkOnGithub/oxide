@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::format::ArchiveManifest;
 use crate::format::{
-    ARCHIVE_METADATA_SIZE, CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE, GLOBAL_HEADER_SIZE,
+    CHUNK_DESCRIPTOR_SIZE, CHUNK_TABLE_HEADER_SIZE, FOOTER_SIZE, GLOBAL_HEADER_SIZE,
 };
 use crate::pipeline::types::PipelinePerformanceOptions;
 use crate::types::Result;
@@ -16,11 +16,16 @@ pub const MAX_INFLIGHT_BLOCKS: usize = 4096;
 
 #[inline]
 pub fn container_prefix_bytes(block_count: u32, manifest_bytes: usize) -> u64 {
+    let _ = (block_count, manifest_bytes);
     GLOBAL_HEADER_SIZE as u64
-        + ARCHIVE_METADATA_SIZE as u64
-        + manifest_bytes as u64
+}
+
+#[inline]
+pub fn container_trailer_bytes(block_count: u32, manifest_bytes: usize) -> u64 {
+    manifest_bytes as u64
         + CHUNK_TABLE_HEADER_SIZE as u64
         + block_count as u64 * CHUNK_DESCRIPTOR_SIZE as u64
+        + FOOTER_SIZE as u64
 }
 
 pub fn max_inflight_blocks(
