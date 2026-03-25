@@ -1,4 +1,4 @@
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Seek, Write};
 use std::time::Instant;
 
 use crate::checksum::compute_checksum;
@@ -7,24 +7,9 @@ use crate::types::duration_to_us;
 use crate::{ArchiveSourceKind, CompressedBlock, OxideError, Result};
 
 use super::{
-    ARCHIVE_METADATA_SIZE, ArchiveManifest, ArchiveMetadata, CHUNK_DESCRIPTOR_SIZE,
-    CHUNK_TABLE_HEADER_SIZE, DEFAULT_REORDER_PENDING_LIMIT, Footer, GLOBAL_HEADER_SIZE,
-    GlobalHeader, ReorderBuffer, encode_chunk_table,
+    encode_chunk_table, ArchiveManifest, ChunkDescriptor, Footer, GlobalHeader, ReorderBuffer,
+    DEFAULT_REORDER_PENDING_LIMIT, GLOBAL_HEADER_SIZE,
 };
-
-#[derive(Debug)]
-struct PendingChunk {
-    descriptor: super::ChunkDescriptor,
-    data: crate::CompressedPayload,
-}
-
-#[derive(Debug)]
-struct FinalizedLayout {
-    header_bytes: [u8; GLOBAL_HEADER_SIZE],
-    metadata_bytes: [u8; ARCHIVE_METADATA_SIZE],
-    entry_table_bytes: Vec<u8>,
-    chunk_table_bytes: Vec<u8>,
-}
 
 pub trait ArchiveBlockWriter {
     type InnerWriter;
@@ -40,8 +25,6 @@ pub trait ArchiveBlockWriter {
     fn write_footer(self) -> Result<Self::InnerWriter>;
 }
 
-/// Writes OXZ archives by staging chunk descriptors and payloads, then
-/// emitting the fixed-layout v1 container at finalization.
 #[derive(Debug)]
 pub struct ArchiveWriter<W: Write> {
     writer: W,
@@ -51,14 +34,10 @@ pub struct ArchiveWriter<W: Write> {
     expected_block_count: Option<u32>,
     blocks_written: u32,
     reorder: ReorderBuffer<CompressedBlock>,
-    payload_offset: u64,
     next_payload_offset: u64,
-    pending_chunks: Vec<PendingChunk>,
+    pending_descriptors: Vec<ChunkDescriptor>,
 }
 
-/// Writes OXZ archives directly to a seekable destination by reserving the
-/// container prefix up front, streaming payload bytes in block order, then
-/// backfilling the header and metadata during finalization.
 #[derive(Debug)]
 pub struct SeekableArchiveWriter<W: Write + Seek> {
     writer: W,
@@ -68,9 +47,8 @@ pub struct SeekableArchiveWriter<W: Write + Seek> {
     expected_block_count: Option<u32>,
     blocks_written: u32,
     reorder: ReorderBuffer<CompressedBlock>,
-    pending_descriptors: Vec<super::ChunkDescriptor>,
-    payload_offset: u64,
     next_payload_offset: u64,
+    pending_descriptors: Vec<ChunkDescriptor>,
 }
 
 impl<W: Write> ArchiveWriter<W> {
@@ -95,9 +73,8 @@ impl<W: Write> ArchiveWriter<W> {
             expected_block_count: None,
             blocks_written: 0,
             reorder: ReorderBuffer::with_limit(max_pending),
-            payload_offset: 0,
-            next_payload_offset: 0,
-            pending_chunks: Vec::new(),
+            next_payload_offset: GLOBAL_HEADER_SIZE as u64,
+            pending_descriptors: Vec::new(),
         }
     }
 
@@ -115,15 +92,23 @@ impl<W: Write> ArchiveWriter<W> {
         }
 
         let source_kind = archive_source_kind_from_flags(flags)?;
-        let entry_table_bytes = self.manifest.encode()?;
-        let payload_offset = payload_offset_bytes(block_count, entry_table_bytes.len())?;
-
-        self.entry_table_bytes = entry_table_bytes;
+        self.entry_table_bytes = self.manifest.encode()?;
         self.source_kind = Some(source_kind);
         self.expected_block_count = Some(block_count);
-        self.payload_offset = payload_offset;
-        self.next_payload_offset = payload_offset;
-        self.pending_chunks.reserve(block_count as usize);
+        self.pending_descriptors.reserve(block_count as usize);
+        self.next_payload_offset = GLOBAL_HEADER_SIZE as u64;
+
+        let header = GlobalHeader::new(source_kind, block_count, 0, 0, 0, 0, 0);
+        let started = Instant::now();
+        header.write(&mut self.writer)?;
+        profile::event(
+            tags::PROFILE_OXZ,
+            &[tags::TAG_OXZ],
+            "write_header",
+            "ok",
+            duration_to_us(started.elapsed()),
+            "oxz header written successfully",
+        );
         Ok(())
     }
 
@@ -139,7 +124,16 @@ impl<W: Write> ArchiveWriter<W> {
             });
         }
 
-        self.stage_block_clone(block)
+        let owned = CompressedBlock {
+            id: block.id,
+            stream_id: block.stream_id,
+            data: block.data.clone(),
+            compression: block.compression,
+            raw_passthrough: block.raw_passthrough,
+            original_len: block.original_len,
+            crc32: block.crc32,
+        };
+        self.stage_owned_block(owned)
     }
 
     pub fn write_owned_block(&mut self, block: CompressedBlock) -> Result<()> {
@@ -186,38 +180,20 @@ impl<W: Write> ArchiveWriter<W> {
         )?;
 
         let finalize_started = Instant::now();
-        let descriptors = self
-            .pending_chunks
-            .iter()
-            .map(|chunk| chunk.descriptor)
-            .collect::<Vec<_>>();
-        let layout = finalize_layout(
-            self.expected_block_count.unwrap_or(0),
+        let footer = build_footer(
             self.source_kind.unwrap_or(ArchiveSourceKind::File),
+            self.expected_block_count.unwrap_or(0),
             &self.entry_table_bytes,
-            &descriptors,
-            self.next_payload_offset,
+            &self.pending_descriptors,
         )?;
 
-        let header_write_elapsed = write_all_timed(&mut self.writer, &layout.header_bytes)?;
-        write_all_timed(&mut self.writer, &layout.metadata_bytes)?;
-        write_all_timed(&mut self.writer, &layout.entry_table_bytes)?;
-        let chunk_table_write_elapsed =
-            write_all_timed(&mut self.writer, &layout.chunk_table_bytes)?;
-
-        let pending_chunks = std::mem::take(&mut self.pending_chunks);
-        for chunk in pending_chunks {
-            self.writer.write_all(chunk.data.as_slice())?;
-        }
-
-        let footer = Footer::new(compute_checksum(&[]));
+        let chunk_table_started = Instant::now();
+        self.writer.write_all(&self.entry_table_bytes)?;
+        let chunk_table_bytes = encode_chunk_table(&self.pending_descriptors)?;
+        self.writer.write_all(&chunk_table_bytes)?;
         footer.write(&mut self.writer)?;
 
-        record_finalize_telemetry(
-            header_write_elapsed,
-            chunk_table_write_elapsed,
-            finalize_started.elapsed(),
-        );
+        record_finalize_telemetry(chunk_table_started.elapsed(), finalize_started.elapsed());
         Ok(self.writer)
     }
 
@@ -234,19 +210,6 @@ impl<W: Write> ArchiveWriter<W> {
         Ok(())
     }
 
-    fn stage_block_clone(&mut self, block: &CompressedBlock) -> Result<()> {
-        let owned = CompressedBlock {
-            id: block.id,
-            stream_id: block.stream_id,
-            data: block.data.clone(),
-            compression: block.compression,
-            raw_passthrough: block.raw_passthrough,
-            original_len: block.original_len,
-            crc32: block.crc32,
-        };
-        self.stage_owned_block(owned)
-    }
-
     fn stage_owned_block(&mut self, block: CompressedBlock) -> Result<()> {
         let start = Instant::now();
         let expected = self.expected_block_count.unwrap_or(0);
@@ -254,12 +217,10 @@ impl<W: Write> ArchiveWriter<W> {
             return Err(OxideError::InvalidFormat("archive block count exceeded"));
         }
 
-        let descriptor = super::ChunkDescriptor::from_block(&block, self.next_payload_offset)?;
+        let descriptor = ChunkDescriptor::from_block(&block, self.next_payload_offset)?;
         self.next_payload_offset = descriptor.payload_end()?;
-        self.pending_chunks.push(PendingChunk {
-            descriptor,
-            data: block.data,
-        });
+        self.writer.write_all(block.data.as_slice())?;
+        self.pending_descriptors.push(descriptor);
         self.blocks_written += 1;
 
         record_stage_telemetry(start.elapsed());
@@ -313,9 +274,8 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             expected_block_count: None,
             blocks_written: 0,
             reorder: ReorderBuffer::with_limit(max_pending),
+            next_payload_offset: GLOBAL_HEADER_SIZE as u64,
             pending_descriptors: Vec::new(),
-            payload_offset: 0,
-            next_payload_offset: 0,
         }
     }
 
@@ -339,17 +299,23 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         }
 
         let source_kind = archive_source_kind_from_flags(flags)?;
-        let entry_table_bytes = self.manifest.encode()?;
-        let payload_offset = payload_offset_bytes(block_count, entry_table_bytes.len())?;
-
-        reserve_prefix(&mut self.writer, payload_offset)?;
-
-        self.entry_table_bytes = entry_table_bytes;
+        self.entry_table_bytes = self.manifest.encode()?;
         self.source_kind = Some(source_kind);
         self.expected_block_count = Some(block_count);
-        self.payload_offset = payload_offset;
-        self.next_payload_offset = payload_offset;
         self.pending_descriptors.reserve(block_count as usize);
+        self.next_payload_offset = GLOBAL_HEADER_SIZE as u64;
+
+        let header = GlobalHeader::new(source_kind, block_count, 0, 0, 0, 0, 0);
+        let started = Instant::now();
+        header.write(&mut self.writer)?;
+        profile::event(
+            tags::PROFILE_OXZ,
+            &[tags::TAG_OXZ],
+            "write_header",
+            "ok",
+            duration_to_us(started.elapsed()),
+            "oxz header written successfully",
+        );
         Ok(())
     }
 
@@ -421,31 +387,20 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         )?;
 
         let finalize_started = Instant::now();
-        let layout = finalize_layout(
-            self.expected_block_count.unwrap_or(0),
+        let footer = build_footer(
             self.source_kind.unwrap_or(ArchiveSourceKind::File),
+            self.expected_block_count.unwrap_or(0),
             &self.entry_table_bytes,
             &self.pending_descriptors,
-            self.next_payload_offset,
         )?;
 
-        self.writer.seek(SeekFrom::Start(0))?;
-        let header_write_elapsed = write_all_timed(&mut self.writer, &layout.header_bytes)?;
-        write_all_timed(&mut self.writer, &layout.metadata_bytes)?;
-        write_all_timed(&mut self.writer, &layout.entry_table_bytes)?;
-        let chunk_table_write_elapsed =
-            write_all_timed(&mut self.writer, &layout.chunk_table_bytes)?;
-        self.writer
-            .seek(SeekFrom::Start(self.next_payload_offset))?;
-
-        let footer = Footer::new(compute_checksum(&[]));
+        let chunk_table_started = Instant::now();
+        self.writer.write_all(&self.entry_table_bytes)?;
+        let chunk_table_bytes = encode_chunk_table(&self.pending_descriptors)?;
+        self.writer.write_all(&chunk_table_bytes)?;
         footer.write(&mut self.writer)?;
 
-        record_finalize_telemetry(
-            header_write_elapsed,
-            chunk_table_write_elapsed,
-            finalize_started.elapsed(),
-        );
+        record_finalize_telemetry(chunk_table_started.elapsed(), finalize_started.elapsed());
         Ok(self.writer)
     }
 
@@ -469,7 +424,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             return Err(OxideError::InvalidFormat("archive block count exceeded"));
         }
 
-        let descriptor = super::ChunkDescriptor::from_block(&block, self.next_payload_offset)?;
+        let descriptor = ChunkDescriptor::from_block(&block, self.next_payload_offset)?;
         self.next_payload_offset = descriptor.payload_end()?;
         self.writer.write_all(block.data.as_slice())?;
         self.pending_descriptors.push(descriptor);
@@ -525,89 +480,58 @@ fn validate_completion(
     Ok(())
 }
 
-fn payload_offset_bytes(block_count: u32, entry_table_len: usize) -> Result<u64> {
-    let chunk_table_len =
-        CHUNK_TABLE_HEADER_SIZE as u64 + u64::from(block_count) * CHUNK_DESCRIPTOR_SIZE as u64;
-    (GLOBAL_HEADER_SIZE as u64)
-        .checked_add(ARCHIVE_METADATA_SIZE as u64)
-        .and_then(|offset| offset.checked_add(entry_table_len as u64))
-        .and_then(|offset| offset.checked_add(chunk_table_len))
-        .ok_or(OxideError::InvalidFormat("payload offset overflow"))
-}
-
-fn reserve_prefix<W: Write>(writer: &mut W, bytes: u64) -> Result<()> {
-    let zeros = [0u8; 8192];
-    let mut remaining = bytes;
-    while remaining > 0 {
-        let chunk = remaining.min(zeros.len() as u64) as usize;
-        writer.write_all(&zeros[..chunk])?;
-        remaining -= chunk as u64;
-    }
-    Ok(())
-}
-
-fn finalize_layout(
-    block_count: u32,
+fn build_footer(
     source_kind: ArchiveSourceKind,
+    block_count: u32,
     entry_table_bytes: &[u8],
-    descriptors: &[super::ChunkDescriptor],
-    footer_offset: u64,
-) -> Result<FinalizedLayout> {
+    descriptors: &[ChunkDescriptor],
+) -> Result<Footer> {
     if descriptors.len() != block_count as usize {
         return Err(OxideError::InvalidFormat(
             "chunk descriptor count does not match declared block count",
         ));
     }
 
-    let metadata_offset = GLOBAL_HEADER_SIZE as u64;
-    let entry_table_offset = metadata_offset + ARCHIVE_METADATA_SIZE as u64;
+    let payload_end = descriptors
+        .last()
+        .map(ChunkDescriptor::payload_end)
+        .transpose()?
+        .unwrap_or(GLOBAL_HEADER_SIZE as u64);
+    let entry_table_offset = payload_end;
+    let entry_table_len = u32::try_from(entry_table_bytes.len())
+        .map_err(|_| OxideError::InvalidFormat("manifest length exceeds u32 range"))?;
     let chunk_table_offset = entry_table_offset
-        .checked_add(entry_table_bytes.len() as u64)
-        .ok_or(OxideError::InvalidFormat("entry table offset overflow"))?;
-    let chunk_table_len =
-        CHUNK_TABLE_HEADER_SIZE as u64 + descriptors.len() as u64 * CHUNK_DESCRIPTOR_SIZE as u64;
-    let payload_offset = chunk_table_offset
-        .checked_add(chunk_table_len)
-        .ok_or(OxideError::InvalidFormat("chunk table offset overflow"))?;
-
-    let mut expected_payload_offset = payload_offset;
-    for descriptor in descriptors {
-        if descriptor.payload_offset != expected_payload_offset {
-            return Err(OxideError::InvalidFormat(
-                "chunk payload offsets are not contiguous",
-            ));
-        }
-        expected_payload_offset = descriptor.payload_end()?;
-    }
-    if expected_payload_offset != footer_offset {
-        return Err(OxideError::InvalidFormat(
-            "footer offset does not match chunk payload layout",
-        ));
-    }
-
-    let metadata_bytes = ArchiveMetadata::new(source_kind).to_bytes();
-    let chunk_table_bytes = encode_chunk_table(descriptors)?;
-    let header_bytes = GlobalHeader::new(
-        metadata_offset,
-        entry_table_offset,
-        chunk_table_offset,
-        payload_offset,
-        footer_offset,
+        .checked_add(entry_table_len as u64)
+        .ok_or(OxideError::InvalidFormat("manifest offset overflow"))?;
+    let chunk_table_len = u32::try_from(
+        descriptors
+            .len()
+            .checked_mul(super::CHUNK_DESCRIPTOR_SIZE)
+            .ok_or(OxideError::InvalidFormat("chunk table length overflow"))?,
     )
-    .to_bytes();
+    .map_err(|_| OxideError::InvalidFormat("chunk table length exceeds u32 range"))?;
+    let footer_offset = chunk_table_offset
+        .checked_add(chunk_table_len as u64)
+        .ok_or(OxideError::InvalidFormat("footer offset overflow"))?;
 
-    Ok(FinalizedLayout {
-        header_bytes,
-        metadata_bytes,
-        entry_table_bytes: entry_table_bytes.to_vec(),
-        chunk_table_bytes,
-    })
-}
+    let _header = GlobalHeader::new(
+        source_kind,
+        block_count,
+        entry_table_offset,
+        entry_table_len,
+        chunk_table_offset,
+        chunk_table_len,
+        footer_offset,
+    );
 
-fn write_all_timed<W: Write>(writer: &mut W, bytes: &[u8]) -> Result<std::time::Duration> {
-    let started = Instant::now();
-    writer.write_all(bytes)?;
-    Ok(started.elapsed())
+    Ok(Footer::new(
+        block_count,
+        entry_table_offset,
+        entry_table_len,
+        chunk_table_offset,
+        chunk_table_len,
+        compute_checksum(&[]),
+    ))
 }
 
 fn archive_source_kind_from_flags(flags: u32) -> Result<ArchiveSourceKind> {
@@ -633,19 +557,9 @@ fn record_stage_telemetry(elapsed: std::time::Duration) {
 }
 
 fn record_finalize_telemetry(
-    header_write_elapsed: std::time::Duration,
     chunk_table_write_elapsed: std::time::Duration,
     finalize_elapsed: std::time::Duration,
 ) {
-    let finalize_elapsed_us = duration_to_us(finalize_elapsed);
-    profile::event(
-        tags::PROFILE_OXZ,
-        &[tags::TAG_OXZ],
-        "write_header",
-        "ok",
-        duration_to_us(header_write_elapsed),
-        "oxz header written successfully",
-    );
     profile::event(
         tags::PROFILE_OXZ,
         &[tags::TAG_OXZ],
@@ -659,7 +573,7 @@ fn record_finalize_telemetry(
         &[tags::TAG_OXZ],
         "write_container",
         "ok",
-        finalize_elapsed_us,
+        duration_to_us(finalize_elapsed),
         "oxz container written successfully",
     );
 }

@@ -1,7 +1,7 @@
 use oxide_core::{
-    ARCHIVE_METADATA_SIZE, ArchiveReader, ArchiveWriter, CHUNK_DESCRIPTOR_SIZE, ChunkDescriptor,
-    CompressionAlgo, CompressionMeta, Footer, GLOBAL_HEADER_SIZE, GlobalHeader, OxideError,
-    ReorderBuffer, SeekableArchiveWriter,
+    ArchiveReader, ArchiveWriter, ChunkDescriptor, CompressionAlgo, CompressionMeta, Footer,
+    GlobalHeader, OxideError, ReorderBuffer, SeekableArchiveWriter, CHUNK_DESCRIPTOR_SIZE,
+    GLOBAL_HEADER_SIZE,
 };
 use std::io::Cursor;
 
@@ -29,13 +29,17 @@ fn compression_flags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let header = GlobalHeader::new(48, 56, 88, 120, 184);
-    let mut encoded = Vec::new();
-    header.write(&mut encoded)?;
-    assert_eq!(encoded.len(), GLOBAL_HEADER_SIZE);
+    let mut writer = ArchiveWriter::new(Vec::new());
+    writer.write_global_header(1)?;
+    writer.write_block(&block(0, b"payload", CompressionAlgo::Lz4))?;
+    let archive = writer.write_footer()?;
 
-    let decoded = GlobalHeader::read(&mut Cursor::new(encoded))?;
-    assert_eq!(decoded, header);
+    let decoded = GlobalHeader::read(&mut Cursor::new(archive))?;
+    assert_eq!(decoded.version, oxide_core::OXZ_VERSION);
+    assert_eq!(decoded.payload_offset, GLOBAL_HEADER_SIZE as u64);
+    assert_eq!(decoded.block_count, 1);
+    assert!(decoded.entry_table_offset >= decoded.payload_offset);
+    assert!(decoded.chunk_table_offset >= decoded.entry_table_offset);
     Ok(())
 }
 
@@ -47,7 +51,7 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     header.write(&mut encoded)?;
     assert_eq!(encoded.len(), CHUNK_DESCRIPTOR_SIZE);
 
-    let decoded = ChunkDescriptor::read(&mut Cursor::new(encoded))?;
+    let decoded = ChunkDescriptor::read(&mut Cursor::new(encoded), 128)?;
     assert_eq!(decoded, header);
     assert_eq!(decoded.compression()?, CompressionAlgo::Lz4);
     Ok(())
@@ -67,7 +71,7 @@ fn block_header_round_trip_preserves_raw_passthrough() -> Result<(), Box<dyn std
     header.write(&mut encoded)?;
     assert_eq!(encoded.len(), CHUNK_DESCRIPTOR_SIZE);
 
-    let decoded = ChunkDescriptor::read(&mut Cursor::new(encoded))?;
+    let decoded = ChunkDescriptor::read(&mut Cursor::new(encoded), 512)?;
     let meta = decoded.compression_meta()?;
     assert_eq!(decoded, header);
     assert_eq!(meta.algo, CompressionAlgo::Lz4);
@@ -97,7 +101,7 @@ fn compression_meta_flags_round_trip() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn footer_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let footer = Footer::new(0xDEAD_BEEF);
+    let footer = Footer::new(3, 100, 20, 120, 42, 0xDEAD_BEEF);
     let mut encoded = Vec::new();
     footer.write(&mut encoded)?;
     let decoded = Footer::read(&mut Cursor::new(encoded))?;
@@ -106,8 +110,8 @@ fn footer_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn archive_writer_and_reader_support_random_and_sequential_access()
--> Result<(), Box<dyn std::error::Error>> {
+fn archive_writer_and_reader_support_random_and_sequential_access(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(3)?;
     writer.write_block(&block(0, b"alpha", CompressionAlgo::Lz4))?;
@@ -167,8 +171,8 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn seekable_archive_writer_streams_payload_and_round_trips()
--> Result<(), Box<dyn std::error::Error>> {
+fn seekable_archive_writer_streams_payload_and_round_trips(
+) -> Result<(), Box<dyn std::error::Error>> {
     let cursor = Cursor::new(Vec::new());
     let mut writer = SeekableArchiveWriter::new(cursor);
     writer.write_global_header(3)?;
@@ -215,7 +219,7 @@ fn reader_ignores_block_crc_mismatch_on_read() -> Result<(), Box<dyn std::error:
     let mut reader = ArchiveReader::new(Cursor::new(archive))?;
     let (header, payload) = reader.read_block(0)?;
     assert_eq!(payload, b"payload");
-    assert!(header.payload_offset >= (GLOBAL_HEADER_SIZE + ARCHIVE_METADATA_SIZE) as u64);
+    assert!(header.payload_offset >= GLOBAL_HEADER_SIZE as u64);
     Ok(())
 }
 

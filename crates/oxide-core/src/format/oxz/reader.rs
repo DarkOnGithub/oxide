@@ -6,11 +6,9 @@ use crate::types::duration_to_us;
 use crate::{ArchiveSourceKind, OxideError, Result};
 
 use super::{
-    ARCHIVE_METADATA_SIZE, ArchiveManifest, ArchiveMetadata, CHUNK_TABLE_HEADER_SIZE,
-    ChunkDescriptor, FOOTER_SIZE, Footer, GlobalHeader, decode_chunk_table,
+    decode_chunk_table, ArchiveManifest, ArchiveMetadata, ChunkDescriptor, Footer, GlobalHeader,
 };
 
-/// Reads OXZ archives and provides access to individual chunk payloads.
 #[derive(Debug)]
 pub struct ArchiveReader<R: Read + Seek> {
     reader: R,
@@ -34,19 +32,8 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let global_header = GlobalHeader::read(&mut reader)?;
         let header_elapsed_us = duration_to_us(header_started.elapsed());
 
-        let file_len = reader.seek(SeekFrom::End(0))?;
-        let expected_file_len = global_header
-            .footer_offset
-            .checked_add(FOOTER_SIZE as u64)
-            .ok_or(OxideError::InvalidFormat("archive length overflow"))?;
-        if file_len != expected_file_len {
-            return Err(OxideError::InvalidFormat(
-                "archive length does not match declared footer offset",
-            ));
-        }
-
         let metadata_started = Instant::now();
-        let metadata = Self::read_metadata(&mut reader, global_header)?;
+        let metadata = ArchiveMetadata::from_header(global_header);
         let metadata_elapsed_us = duration_to_us(metadata_started.elapsed());
 
         let manifest = Self::read_manifest(&mut reader, global_header)?;
@@ -84,6 +71,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             chunk_table_elapsed_us,
             "oxz chunk table read successfully",
         );
+
         Ok(Self {
             reader,
             global_header,
@@ -173,13 +161,12 @@ impl<R: Read + Seek> ArchiveReader<R> {
             state.next_payload_offset = descriptor.payload_end()?;
         }
 
-        let elapsed_us = duration_to_us(start.elapsed());
         profile::event(
             tags::PROFILE_OXZ,
             &[tags::TAG_OXZ],
             "read_chunk",
             "ok",
-            elapsed_us,
+            duration_to_us(start.elapsed()),
             "oxz chunk read successfully",
         );
 
@@ -201,27 +188,8 @@ impl<R: Read + Seek> ArchiveReader<R> {
         Ok(())
     }
 
-    fn read_metadata(reader: &mut R, header: GlobalHeader) -> Result<ArchiveMetadata> {
-        let len = header
-            .entry_table_offset
-            .checked_sub(header.metadata_offset)
-            .ok_or(OxideError::InvalidFormat("metadata length underflow"))?;
-        if len != ARCHIVE_METADATA_SIZE as u64 {
-            return Err(OxideError::InvalidFormat(
-                "archive metadata length does not match fixed size",
-            ));
-        }
-
-        reader.seek(SeekFrom::Start(header.metadata_offset))?;
-        ArchiveMetadata::read(reader)
-    }
-
     fn read_manifest(reader: &mut R, header: GlobalHeader) -> Result<ArchiveManifest> {
-        let len = header
-            .chunk_table_offset
-            .checked_sub(header.entry_table_offset)
-            .ok_or(OxideError::InvalidFormat("entry table length underflow"))?;
-        let len = usize::try_from(len)
+        let len = usize::try_from(header.entry_table_len)
             .map_err(|_| OxideError::InvalidFormat("entry table length exceeds usize range"))?;
         let mut bytes = vec![0u8; len];
         reader.seek(SeekFrom::Start(header.entry_table_offset))?;
@@ -230,35 +198,24 @@ impl<R: Read + Seek> ArchiveReader<R> {
     }
 
     fn read_chunk_table(reader: &mut R, header: GlobalHeader) -> Result<Vec<ChunkDescriptor>> {
-        let len = header
-            .payload_offset
-            .checked_sub(header.chunk_table_offset)
-            .ok_or(OxideError::InvalidFormat("chunk table length underflow"))?;
-        let len = usize::try_from(len)
+        let len = usize::try_from(header.chunk_table_len)
             .map_err(|_| OxideError::InvalidFormat("chunk table length exceeds usize range"))?;
-        if len < CHUNK_TABLE_HEADER_SIZE {
-            return Err(OxideError::InvalidFormat("chunk table is too short"));
-        }
         let mut bytes = vec![0u8; len];
         reader.seek(SeekFrom::Start(header.chunk_table_offset))?;
         reader.read_exact(&mut bytes)?;
-        decode_chunk_table(&bytes)
+        decode_chunk_table(&bytes, header.payload_offset, header.block_count)
     }
 
     fn validate_chunk_layout(descriptors: &[ChunkDescriptor], header: GlobalHeader) -> Result<()> {
-        let mut expected_offset = header.payload_offset;
-        for descriptor in descriptors {
-            if descriptor.payload_offset != expected_offset {
-                return Err(OxideError::InvalidFormat(
-                    "chunk payload offsets are not contiguous",
-                ));
-            }
-            expected_offset = descriptor.payload_end()?;
-        }
+        let expected_payload_end = descriptors
+            .last()
+            .map(ChunkDescriptor::payload_end)
+            .transpose()?
+            .unwrap_or(header.payload_offset);
 
-        if expected_offset != header.footer_offset {
+        if expected_payload_end != header.entry_table_offset {
             return Err(OxideError::InvalidFormat(
-                "footer offset does not match chunk payload layout",
+                "manifest offset does not match chunk payload layout",
             ));
         }
 
@@ -266,7 +223,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
     }
 }
 
-/// An iterator over chunks in an OXZ archive.
 pub struct BlockIterator<'a, R: Read + Seek> {
     reader: &'a mut ArchiveReader<R>,
     next_index: u32,
