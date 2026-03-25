@@ -22,11 +22,12 @@ use super::directory_restore::{
     DirectoryExtractSelection, DirectoryRestoreWriter, FilteredDirectoryRestoreWriter,
     OUTPUT_BUFFER_CAPACITY, apply_entry_metadata,
 };
-use super::reorder_writer::{BoundedReorderWriter, OrderedChunkWriter};
+use super::reorder_writer::{BoundedReorderWriter, OrderedChunkWriter, ReorderWriterStats};
 use super::telemetry::*;
 use super::types::*;
 
 const DECODE_QUEUE_MULTIPLIER: usize = 4;
+const ORDERED_WRITE_QUEUE_MULTIPLIER: usize = 1;
 const REORDER_PENDING_MULTIPLIER: usize = 2;
 const RESULT_DRAIN_BUDGET: usize = 32;
 
@@ -162,6 +163,22 @@ impl AsRef<[u8]> for DecodedBlock {
             Self::Pooled(bytes) => bytes.as_slice(),
         }
     }
+}
+
+enum OrderedWriteTask {
+    Block { index: usize, bytes: DecodedBlock },
+    Abort,
+}
+
+struct OrderedWriterOutcome<W> {
+    writer: W,
+    stats: ReorderWriterStats,
+}
+
+enum ProcessedDecodeResult {
+    Block { index: usize, bytes: DecodedBlock },
+    NewError,
+    IgnoredAfterError,
 }
 
 #[derive(Debug)]
@@ -318,15 +335,15 @@ impl Extractor {
         let archive_started = Instant::now();
         let archive = ArchiveReader::new_for_sequential_extract(reader)?;
         let archive_read_elapsed = archive_started.elapsed();
-        let mut writer = VecChunkWriter::default();
-        let decoded = self.decode_archive_to_writer(
+        let writer = VecChunkWriter::default();
+        let (decoded, writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
             started_at,
             options,
             sink,
             None,
-            &mut writer,
+            writer,
         )?;
         let payload = writer.into_inner();
         let payload_len = payload.len() as u64;
@@ -374,15 +391,15 @@ impl Extractor {
             ));
         }
 
-        let mut writer = FileChunkWriter::create(output_path, entry)?;
-        let mut decoded = self.decode_archive_to_writer(
+        let writer = FileChunkWriter::create(output_path, entry)?;
+        let (mut decoded, mut writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
             started_at,
             options,
             sink,
             None,
-            &mut writer,
+            writer,
         )?;
         writer.flush_and_apply_metadata()?;
         apply_file_restore_stats(&mut decoded.stage_timings, writer.stats());
@@ -426,15 +443,15 @@ impl Extractor {
         }
 
         let manifest = archive.manifest().clone();
-        let mut writer = DirectoryRestoreWriter::create(output_path, manifest)?;
-        let decoded = self.decode_archive_to_writer(
+        let writer = DirectoryRestoreWriter::create(output_path, manifest)?;
+        let (decoded, mut writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
             started_at,
             options,
             sink,
             None,
-            &mut writer,
+            writer,
         )?;
 
         let restore_stats = writer.finish()?;
@@ -488,16 +505,16 @@ impl Extractor {
         let projected_ranges =
             decode_plan.project_ranges(archive.block_descriptors(), &selected_ranges);
         let manifest = selection.into_manifest();
-        let mut writer =
+        let writer =
             FilteredDirectoryRestoreWriter::create(output_path, manifest, projected_ranges)?;
-        let decoded = self.decode_archive_to_writer(
+        let (decoded, mut writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
             started_at,
             options,
             sink,
             Some(&selected_ranges),
-            &mut writer,
+            writer,
         )?;
 
         let restore_stats = writer.finish()?;
@@ -528,11 +545,11 @@ impl Extractor {
         options: &RunTelemetryOptions,
         sink: &mut dyn TelemetrySink,
         selected_ranges: Option<&[Range<u64>]>,
-        writer: &mut W,
-    ) -> Result<DecodeStreamOutcome>
+        writer: W,
+    ) -> Result<(DecodeStreamOutcome, W)>
     where
         R: Read + Seek,
-        W: OrderedChunkWriter,
+        W: OrderedChunkWriter + Send + 'static,
     {
         let mut stage_timings = ExtractStageTimings::default();
         stage_timings.archive_read += archive_read_elapsed;
@@ -545,14 +562,25 @@ impl Extractor {
         let block_capacity = decode_plan.block_count();
         let worker_count = self.num_workers.max(1);
         let queue_capacity = worker_count.saturating_mul(DECODE_QUEUE_MULTIPLIER).max(1);
+        let ordered_write_queue_capacity = worker_count
+            .saturating_mul(ORDERED_WRITE_QUEUE_MULTIPLIER)
+            .max(1);
         let reorder_pending_limit = queue_capacity
             .saturating_mul(REORDER_PENDING_MULTIPLIER)
             .max(1);
 
         let (task_tx, task_rx) = bounded::<DecodeTask>(queue_capacity);
         let (result_tx, result_rx) = bounded::<(usize, Result<DecodedBlock>)>(queue_capacity);
+        let (ordered_write_tx, ordered_write_rx) =
+            bounded::<OrderedWriteTask>(ordered_write_queue_capacity);
         let runtime_state = Arc::new(DecodeRuntimeState::new(worker_count, started_at));
         let mut worker_handles = Vec::with_capacity(worker_count);
+        let ordered_writer_handle = spawn_ordered_writer(
+            writer,
+            ordered_write_rx,
+            reorder_pending_limit,
+            block_capacity,
+        );
 
         for worker_id in 0..worker_count {
             let local_task_rx = task_rx.clone();
@@ -607,42 +635,116 @@ impl Extractor {
         let emit_every = options.progress_interval.max(Duration::from_millis(100));
         let mut decode_task_queue_peak = 0usize;
         let mut decode_result_queue_peak = 0usize;
-        let mut reorder = BoundedReorderWriter::with_limit(writer, reorder_pending_limit);
+        let mut ordered_write_queue_peak = 0usize;
+        let mut ordered_writer_disconnected = false;
+        let mut ordered_write_tx = Some(ordered_write_tx);
 
-        for block_index in 0..archive.block_count() as usize {
-            let header = archive.block_descriptor(block_index as u32)?;
-            archive_bytes_completed =
-                archive_bytes_completed.saturating_add(header.encoded_len as u64);
+        let run_result = (|| -> Result<()> {
+            for block_index in 0..archive.block_count() as usize {
+                let header = archive.block_descriptor(block_index as u32)?;
+                archive_bytes_completed =
+                    archive_bytes_completed.saturating_add(header.encoded_len as u64);
 
-            if !decode_plan.includes(block_index) {
-                emit_extract_progress_if_due(
-                    source_kind,
-                    started_at,
-                    archive_bytes_completed,
-                    decoded_bytes_completed,
-                    block_capacity as u32,
-                    received as u32,
-                    runtime_state.snapshot(),
-                    emit_every,
-                    &mut last_emit_at,
-                    false,
-                    sink,
-                );
-                continue;
-            }
+                if !decode_plan.includes(block_index) {
+                    emit_extract_progress_if_due(
+                        source_kind,
+                        started_at,
+                        archive_bytes_completed,
+                        decoded_bytes_completed,
+                        block_capacity as u32,
+                        received as u32,
+                        runtime_state.snapshot(),
+                        emit_every,
+                        &mut last_emit_at,
+                        false,
+                        sink,
+                    );
+                    continue;
+                }
 
-            while submitted.saturating_sub(received) >= queue_capacity {
-                receive_decode_result_to_writer(
-                    &result_rx,
-                    &mut stage_timings,
-                    &mut reorder,
-                    block_capacity,
-                    &mut received_indices,
-                    &runtime_state,
-                    &mut decoded_bytes_completed,
-                    &mut received,
-                    &mut first_error,
-                )?;
+                while submitted.saturating_sub(received) >= queue_capacity {
+                    receive_decode_result(
+                        &result_rx,
+                        &mut stage_timings,
+                        block_capacity,
+                        &mut received_indices,
+                        &runtime_state,
+                        &mut decoded_bytes_completed,
+                        &mut received,
+                        &mut first_error,
+                    )
+                    .and_then(|outcome| {
+                        forward_processed_decode_result(
+                            outcome,
+                            &mut ordered_write_tx,
+                            &mut ordered_write_queue_peak,
+                            &mut ordered_writer_disconnected,
+                            &mut stage_timings,
+                        )
+                    })?;
+                    decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
+                    emit_extract_progress_if_due(
+                        source_kind,
+                        started_at,
+                        archive_bytes_completed,
+                        decoded_bytes_completed,
+                        block_capacity as u32,
+                        received as u32,
+                        runtime_state.snapshot(),
+                        emit_every,
+                        &mut last_emit_at,
+                        false,
+                        sink,
+                    );
+                }
+
+                let read_started = Instant::now();
+                let mut block_data = self.buffer_pool.acquire();
+                archive.read_block_into(block_index as u32, block_data.as_mut_vec())?;
+                stage_timings.archive_read += read_started.elapsed();
+
+                let submit_started = Instant::now();
+                task_tx
+                    .send(DecodeTask {
+                        index: submitted,
+                        header,
+                        block_data,
+                    })
+                    .map_err(|_| {
+                        crate::OxideError::CompressionError(
+                            "decode queue closed before submission completed".to_string(),
+                        )
+                    })?;
+                stage_timings.decode_submit += submit_started.elapsed();
+                submitted += 1;
+                runtime_state.record_submission();
+                decode_task_queue_peak = decode_task_queue_peak.max(task_tx.len());
+
+                let mut drained = 0usize;
+                while drained < RESULT_DRAIN_BUDGET {
+                    let result = match result_rx.try_recv() {
+                        Ok(result) => result,
+                        Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+                    };
+                    let outcome = process_decode_result(
+                        result,
+                        block_capacity,
+                        &mut received_indices,
+                        &runtime_state,
+                        &mut decoded_bytes_completed,
+                        &mut received,
+                        &mut first_error,
+                    )?;
+                    forward_processed_decode_result(
+                        outcome,
+                        &mut ordered_write_tx,
+                        &mut ordered_write_queue_peak,
+                        &mut ordered_writer_disconnected,
+                        &mut stage_timings,
+                    )?;
+                    drained += 1;
+                }
+
                 decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
                 emit_extract_progress_if_due(
                     source_kind,
@@ -659,109 +761,88 @@ impl Extractor {
                 );
             }
 
-            let read_started = Instant::now();
-            let mut block_data = self.buffer_pool.acquire();
-            archive.read_block_into(block_index as u32, block_data.as_mut_vec())?;
-            stage_timings.archive_read += read_started.elapsed();
+            if let Err(error) = archive.finish_sequential_extract_validation()
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+                abort_ordered_writer(&mut ordered_write_tx);
+            }
 
-            let submit_started = Instant::now();
-            task_tx
-                .send(DecodeTask {
-                    index: submitted,
-                    header,
-                    block_data,
-                })
-                .map_err(|_| {
-                    crate::OxideError::CompressionError(
-                        "decode queue closed before submission completed".to_string(),
-                    )
-                })?;
-            stage_timings.decode_submit += submit_started.elapsed();
-            submitted += 1;
-            runtime_state.record_submission();
-            decode_task_queue_peak = decode_task_queue_peak.max(task_tx.len());
+            if submitted != block_capacity && first_error.is_none() {
+                return Err(crate::OxideError::InvalidFormat(
+                    "archive block count mismatch during decode",
+                ));
+            }
 
-            let mut drained = 0usize;
-            while drained < RESULT_DRAIN_BUDGET {
-                let result = match result_rx.try_recv() {
-                    Ok(result) => result,
-                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-                };
-                process_decode_result_to_writer(
-                    result,
+            while received < submitted {
+                receive_decode_result(
+                    &result_rx,
                     &mut stage_timings,
-                    &mut reorder,
                     block_capacity,
                     &mut received_indices,
                     &runtime_state,
                     &mut decoded_bytes_completed,
                     &mut received,
                     &mut first_error,
-                )?;
-                drained += 1;
+                )
+                .and_then(|outcome| {
+                    forward_processed_decode_result(
+                        outcome,
+                        &mut ordered_write_tx,
+                        &mut ordered_write_queue_peak,
+                        &mut ordered_writer_disconnected,
+                        &mut stage_timings,
+                    )
+                })?;
+                decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
+                emit_extract_progress_if_due(
+                    source_kind,
+                    started_at,
+                    archive_bytes_completed,
+                    decoded_bytes_completed,
+                    block_capacity as u32,
+                    received as u32,
+                    runtime_state.snapshot(),
+                    emit_every,
+                    &mut last_emit_at,
+                    false,
+                    sink,
+                );
             }
 
-            decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
-            emit_extract_progress_if_due(
-                source_kind,
-                started_at,
-                archive_bytes_completed,
-                decoded_bytes_completed,
-                block_capacity as u32,
-                received as u32,
-                runtime_state.snapshot(),
-                emit_every,
-                &mut last_emit_at,
-                false,
-                sink,
-            );
-        }
+            Ok(())
+        })();
+
         drop(task_tx);
-
-        if let Err(error) = archive.finish_sequential_extract_validation() {
-            first_error.get_or_insert(error);
+        if run_result.is_err() || first_error.is_some() {
+            abort_ordered_writer(&mut ordered_write_tx);
         }
+        drop(ordered_write_tx);
+        drop(result_rx);
 
-        if submitted != block_capacity {
-            return Err(crate::OxideError::InvalidFormat(
-                "archive block count mismatch during decode",
-            ));
-        }
+        let workers_result = join_decode_workers(worker_handles);
+        let ordered_writer_result = join_ordered_writer(ordered_writer_handle);
 
-        while received < submitted {
-            receive_decode_result_to_writer(
-                &result_rx,
-                &mut stage_timings,
-                &mut reorder,
-                block_capacity,
-                &mut received_indices,
-                &runtime_state,
-                &mut decoded_bytes_completed,
-                &mut received,
-                &mut first_error,
-            )?;
-            decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
-            emit_extract_progress_if_due(
-                source_kind,
-                started_at,
-                archive_bytes_completed,
-                decoded_bytes_completed,
-                block_capacity as u32,
-                received as u32,
-                runtime_state.snapshot(),
-                emit_every,
-                &mut last_emit_at,
-                false,
-                sink,
-            );
-        }
-
-        let workers = join_decode_workers(worker_handles)?;
         if let Some(error) = first_error {
             return Err(error);
         }
+        if let Err(error) = run_result {
+            if ordered_writer_disconnected && let Err(writer_error) = ordered_writer_result {
+                return Err(writer_error);
+            }
+            return Err(error);
+        }
+        let workers = workers_result?;
 
-        let (_writer, reorder_stats) = reorder.finish(submitted)?;
+        let OrderedWriterOutcome {
+            writer,
+            stats: reorder_stats,
+        } = ordered_writer_result?;
+
+        stage_timings.ordered_write += reorder_stats.write_elapsed;
+        stage_timings.merge += reorder_stats
+            .push_elapsed
+            .saturating_sub(reorder_stats.write_elapsed);
         if options.emit_final_progress {
             emit_extract_progress(
                 source_kind,
@@ -775,23 +856,28 @@ impl Extractor {
             );
         }
 
-        Ok(DecodeStreamOutcome {
-            flags,
-            decoded_bytes_total: decoded_bytes_completed,
-            archive_bytes_total,
-            blocks_total: submitted as u32,
-            workers,
-            stage_timings,
-            pipeline_stats: ExtractPipelineStats {
-                decode_task_queue_capacity: queue_capacity,
-                decode_task_queue_peak,
-                decode_result_queue_capacity: queue_capacity,
-                decode_result_queue_peak,
-                reorder_pending_limit,
-                reorder_pending_peak: reorder_stats.pending_blocks_peak,
-                reorder_pending_bytes_peak: reorder_stats.pending_bytes_peak,
+        Ok((
+            DecodeStreamOutcome {
+                flags,
+                decoded_bytes_total: decoded_bytes_completed,
+                archive_bytes_total,
+                blocks_total: submitted as u32,
+                workers,
+                stage_timings,
+                pipeline_stats: ExtractPipelineStats {
+                    decode_task_queue_capacity: queue_capacity,
+                    decode_task_queue_peak,
+                    decode_result_queue_capacity: queue_capacity,
+                    decode_result_queue_peak,
+                    ordered_write_queue_capacity,
+                    ordered_write_queue_peak,
+                    reorder_pending_limit,
+                    reorder_pending_peak: reorder_stats.pending_blocks_peak,
+                    reorder_pending_bytes_peak: reorder_stats.pending_bytes_peak,
+                },
             },
-        })
+            writer,
+        ))
     }
 
     pub fn restore_decoded_payload(
@@ -856,17 +942,16 @@ fn apply_directory_restore_stats(
     stage_timings.output_metadata += restore_stats.output_metadata;
 }
 
-fn receive_decode_result_to_writer<W: OrderedChunkWriter>(
+fn receive_decode_result(
     result_rx: &Receiver<(usize, Result<DecodedBlock>)>,
     stage_timings: &mut ExtractStageTimings,
-    reorder: &mut BoundedReorderWriter<W, DecodedBlock>,
     total_blocks: usize,
     received_indices: &mut [bool],
     runtime_state: &DecodeRuntimeState,
     decoded_bytes_completed: &mut u64,
     received: &mut usize,
     first_error: &mut Option<crate::OxideError>,
-) -> Result<()> {
+) -> Result<ProcessedDecodeResult> {
     let wait_started = Instant::now();
     let result = result_rx.recv().map_err(|_| {
         crate::OxideError::CompressionError(
@@ -874,10 +959,8 @@ fn receive_decode_result_to_writer<W: OrderedChunkWriter>(
         )
     })?;
     stage_timings.decode_wait += wait_started.elapsed();
-    process_decode_result_to_writer(
+    process_decode_result(
         result,
-        stage_timings,
-        reorder,
         total_blocks,
         received_indices,
         runtime_state,
@@ -887,17 +970,15 @@ fn receive_decode_result_to_writer<W: OrderedChunkWriter>(
     )
 }
 
-fn process_decode_result_to_writer<W: OrderedChunkWriter>(
+fn process_decode_result(
     (index, block): (usize, Result<DecodedBlock>),
-    stage_timings: &mut ExtractStageTimings,
-    reorder: &mut BoundedReorderWriter<W, DecodedBlock>,
     total_blocks: usize,
     received_indices: &mut [bool],
     runtime_state: &DecodeRuntimeState,
     decoded_bytes_completed: &mut u64,
     received: &mut usize,
     first_error: &mut Option<crate::OxideError>,
-) -> Result<()> {
+) -> Result<ProcessedDecodeResult> {
     if index >= total_blocks || index >= received_indices.len() {
         return Err(crate::OxideError::InvalidFormat(
             "decode result index out of bounds",
@@ -916,18 +997,64 @@ fn process_decode_result_to_writer<W: OrderedChunkWriter>(
         Ok(bytes) => {
             *decoded_bytes_completed = decoded_bytes_completed.saturating_add(bytes.len() as u64);
             if first_error.is_none() {
-                let reorder_started = Instant::now();
-                let push_stats = reorder.push(index, bytes)?;
-                let reorder_elapsed = reorder_started.elapsed();
-                stage_timings.ordered_write += push_stats.write_elapsed;
-                stage_timings.merge += reorder_elapsed.saturating_sub(push_stats.write_elapsed);
+                Ok(ProcessedDecodeResult::Block { index, bytes })
+            } else {
+                Ok(ProcessedDecodeResult::IgnoredAfterError)
             }
         }
         Err(error) => {
+            let is_new_error = first_error.is_none();
             first_error.get_or_insert(error);
+            if is_new_error {
+                Ok(ProcessedDecodeResult::NewError)
+            } else {
+                Ok(ProcessedDecodeResult::IgnoredAfterError)
+            }
         }
     }
+}
+
+fn forward_processed_decode_result(
+    outcome: ProcessedDecodeResult,
+    ordered_write_tx: &mut Option<crossbeam_channel::Sender<OrderedWriteTask>>,
+    ordered_write_queue_peak: &mut usize,
+    ordered_writer_disconnected: &mut bool,
+    stage_timings: &mut ExtractStageTimings,
+) -> Result<()> {
+    match outcome {
+        ProcessedDecodeResult::Block { index, bytes } => {
+            if let Some(tx) = ordered_write_tx.as_ref() {
+                let enqueue_started = Instant::now();
+                let send_result = tx.send(OrderedWriteTask::Block { index, bytes });
+                stage_timings.writer_enqueue_blocked += enqueue_started.elapsed();
+                match send_result {
+                    Ok(()) => {
+                        *ordered_write_queue_peak = (*ordered_write_queue_peak).max(tx.len());
+                    }
+                    Err(_) => {
+                        *ordered_writer_disconnected = true;
+                        *ordered_write_tx = None;
+                        return Err(crate::OxideError::CompressionError(
+                            "ordered write queue closed before completion".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        ProcessedDecodeResult::NewError => {
+            abort_ordered_writer(ordered_write_tx);
+        }
+        ProcessedDecodeResult::IgnoredAfterError => {}
+    }
     Ok(())
+}
+
+fn abort_ordered_writer(
+    ordered_write_tx: &mut Option<crossbeam_channel::Sender<OrderedWriteTask>>,
+) {
+    if let Some(tx) = ordered_write_tx.take() {
+        let _ = tx.send(OrderedWriteTask::Abort);
+    }
 }
 
 fn join_decode_workers(
@@ -963,6 +1090,50 @@ fn join_decode_workers(
     }
     workers.sort_by_key(|worker| worker.worker_id);
     Ok(workers)
+}
+
+fn spawn_ordered_writer<W>(
+    writer: W,
+    ordered_write_rx: Receiver<OrderedWriteTask>,
+    reorder_pending_limit: usize,
+    expected_blocks: usize,
+) -> thread::JoinHandle<Result<OrderedWriterOutcome<W>>>
+where
+    W: OrderedChunkWriter + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reorder = BoundedReorderWriter::with_limit(writer, reorder_pending_limit);
+
+        while let Ok(task) = ordered_write_rx.recv() {
+            match task {
+                OrderedWriteTask::Block { index, bytes } => {
+                    reorder.push(index, bytes)?;
+                }
+                OrderedWriteTask::Abort => {
+                    let (writer, stats) = reorder.into_parts();
+                    return Ok(OrderedWriterOutcome { writer, stats });
+                }
+            }
+        }
+
+        let (writer, stats) = reorder.finish(expected_blocks)?;
+        Ok(OrderedWriterOutcome { writer, stats })
+    })
+}
+
+fn join_ordered_writer<W>(
+    handle: thread::JoinHandle<Result<OrderedWriterOutcome<W>>>,
+) -> Result<OrderedWriterOutcome<W>> {
+    handle.join().map_err(|payload| {
+        let details = if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        crate::OxideError::CompressionError(format!("ordered writer thread panicked: {details}"))
+    })?
 }
 
 pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Result<Vec<u8>> {
