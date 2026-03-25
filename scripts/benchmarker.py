@@ -187,7 +187,7 @@ def parse_args() -> Settings:
     parser.add_argument(
         "--rebuild-oxide",
         action="store_true",
-        default=env_value("BENCHMARK_REBUILD_OXIDE", "0") == "1",
+        default=True,
         help="Rebuild oxide before benchmarking instead of using the existing binary.",
     )
     parser.add_argument(
@@ -284,6 +284,18 @@ def percent_delta(new: float, old: float) -> float:
     if old == 0:
         return 0.0
     return ((new - old) / old) * 100.0
+
+
+def format_delta_pct(delta_pct: float, baseline_name: str = "baseline") -> str:
+    if delta_pct == 0:
+        return f"0.00% vs {baseline_name}"
+    if delta_pct < 0:
+        return f"{abs(delta_pct):.2f}% faster than {baseline_name}"
+    return f"{delta_pct:.2f}% slower than {baseline_name}"
+
+
+def phase_sort_value(phase: str) -> int:
+    return {"archive": 0, "extract": 1}.get(phase, 99)
 
 
 def mean_bytes(rows: Sequence[ResultRow]) -> int:
@@ -414,8 +426,10 @@ def mode_comparisons(
 
     for mode in modes:
         baseline_tool = MODE_BASELINES[mode]
-        oxide_archive = lookup[("oxide", "archive", mode)]
-        baseline_archive = lookup[(baseline_tool, "archive", mode)]
+        oxide_archive = lookup.get(("oxide", "archive", mode))
+        baseline_archive = lookup.get((baseline_tool, "archive", mode))
+        if oxide_archive is None or baseline_archive is None:
+            continue
         oxide_extract = lookup.get(("oxide", "extract", mode))
         baseline_extract = lookup.get((baseline_tool, "extract", mode))
 
@@ -472,17 +486,17 @@ def build_takes(comparisons: Sequence[ModeComparison]) -> list[str]:
     best_ratio = min(comparisons, key=lambda item: item.oxide_archive_ratio)
 
     takes.append(
-        f"Archive gap is smallest in {best_archive.mode} ({best_archive.archive_delta_pct:+.2f}% vs baseline)."
+        f"Closest archive match: {best_archive.mode} ({format_delta_pct(best_archive.archive_delta_pct)})."
     )
     if extract_candidates:
         best_extract = min(
             extract_candidates, key=lambda item: abs(item.extract_delta_pct or 0.0)
         )
         takes.append(
-            f"Extraction gap is smallest in {best_extract.mode} ({best_extract.extract_delta_pct:+.2f}% vs baseline)."
+            f"Closest extract match: {best_extract.mode} ({format_delta_pct(best_extract.extract_delta_pct or 0.0)})."
         )
     takes.append(
-        f"Best Oxide archive ratio appears in {best_ratio.mode} ({best_ratio.oxide_archive_ratio:.3f})."
+        f"Best Oxide archive ratio: {best_ratio.mode} ({best_ratio.oxide_archive_ratio:.3f})."
     )
     return takes
 
@@ -495,6 +509,7 @@ def print_run_header(
             f"[bold]Benchmark run[/bold]\n"
             f"source: [cyan]{settings.source}[/cyan]\n"
             f"source size: [cyan]{format_bytes(source_bytes)}[/cyan]\n"
+            f"modes: [cyan]{', '.join(settings.modes)}[/cyan]\n"
             f"passes: [cyan]{settings.passes}[/cyan]  threads: [cyan]{settings.threads}[/cyan]\n"
             f"telemetry: [cyan]{telemetry_run_dir}[/cyan]"
         ),
@@ -507,37 +522,52 @@ def print_run_header(
 def print_steps_table(
     console: Console, results: Sequence[ResultRow], source_bytes: int
 ) -> None:
-    table = Table(title="Step results", box=box.SIMPLE_HEAVY)
+    table = Table(title="Per-step results", box=box.SIMPLE_HEAVY)
+    table.caption = (
+        "Smaller source delta means better compression; lower time means faster."
+    )
+    table.add_column("mode", style="bold")
+    table.add_column("pass", justify="right")
     table.add_column("tool", style="bold")
     table.add_column("phase")
-    table.add_column("mode")
-    table.add_column("pass", justify="right")
     table.add_column("seconds", justify="right")
     table.add_column("MiB/s", justify="right")
     table.add_column("output", justify="right")
-    table.add_column("ratio", justify="right")
-    table.add_column("vs source", justify="right")
+    table.add_column("source delta", justify="right")
 
-    fastest = min(results, key=lambda row: row.elapsed_ns) if results else None
-    smallest = min(results, key=lambda row: row.output_bytes) if results else None
+    sorted_results = sorted(
+        results,
+        key=lambda row: (row.mode, row.pass_num, phase_sort_value(row.phase), row.tool),
+    )
+    fastest = (
+        min(sorted_results, key=lambda row: row.elapsed_ns) if sorted_results else None
+    )
+    smallest = (
+        min(sorted_results, key=lambda row: row.output_bytes)
+        if sorted_results
+        else None
+    )
+    last_mode: str | None = None
 
-    for row in results:
-        ratio = safe_ratio(row.output_bytes, row.input_bytes)
+    for row in sorted_results:
         style = None
         if fastest is row:
             style = "green"
         elif smallest is row:
             style = "cyan"
 
+        if last_mode is not None and row.mode != last_mode:
+            table.add_section()
+        last_mode = row.mode
+
         table.add_row(
-            row.tool,
-            row.phase,
             row.mode,
             str(row.pass_num),
+            row.tool,
+            row.phase,
             f"{row.elapsed_ns / 1_000_000_000:.3f}",
             f"{row.throughput_mib_s:.2f}",
             format_bytes(row.output_bytes),
-            f"{ratio:.3f}",
             f"{percent_delta(row.output_bytes, source_bytes):+.2f}%",
             style=style,
         )
@@ -545,51 +575,58 @@ def print_steps_table(
     console.print(table)
 
 
-def print_analysis(console: Console, comparisons: Sequence[ModeComparison]) -> None:
+def print_analysis(
+    console: Console,
+    stats_rows: Sequence[ModeStats],
+    comparisons: Sequence[ModeComparison],
+) -> None:
+    lookup = stats_lookup(stats_rows)
+    table = Table(box=box.SIMPLE_HEAVY)
+    table.caption = "Delta is Oxide minus baseline: negative means Oxide is faster."
+    table.add_column("mode", style="bold")
+    table.add_column("baseline")
+    table.add_column("comparison", style="bold")
+    table.add_column("oxide avg sec", justify="right")
+    table.add_column("baseline avg sec", justify="right")
+    table.add_column("winner")
+    table.add_column("delta", justify="right")
+    table.add_column("oxide ratio", justify="right")
+    table.add_column("baseline ratio", justify="right")
+
     for comparison in comparisons:
         baseline_tool = MODE_BASELINES.get(comparison.mode, "baseline")
-        table = Table(box=box.SIMPLE_HEAVY, show_header=True)
-        table.add_column("phase", style="bold")
-        table.add_column("winner")
-        table.add_column("Δ", justify="right")
-        table.add_column("oxide ratio", justify="right")
-        table.add_column(f"{baseline_tool} ratio", justify="right")
+        archive_oxide = lookup.get(("oxide", "archive", comparison.mode))
+        archive_base = lookup.get((baseline_tool, "archive", comparison.mode))
+        extract_oxide = lookup.get(("oxide", "extract", comparison.mode))
+        extract_base = lookup.get((baseline_tool, "extract", comparison.mode))
 
-        table.add_row(
-            "archive",
-            comparison.archive_fastest_tool,
-            f"{comparison.archive_delta_pct:+.2f}%",
-            f"{comparison.oxide_archive_ratio:.3f}",
-            f"{comparison.baseline_archive_ratio:.3f}",
-        )
-
-        table.add_row(
-            "extract",
-            comparison.extract_fastest_tool or "n/a",
-            (
-                f"{comparison.extract_delta_pct:+.2f}%"
-                if comparison.extract_delta_pct is not None
-                else "n/a"
-            ),
-            (
-                f"{comparison.oxide_extract_ratio:.3f}"
-                if comparison.oxide_extract_ratio is not None
-                else "n/a"
-            ),
-            (
-                f"{comparison.baseline_extract_ratio:.3f}"
-                if comparison.baseline_extract_ratio is not None
-                else "n/a"
-            ),
-        )
-
-        console.print(
-            Panel(
-                table,
-                title=f"{comparison.mode} comparison ({baseline_tool})",
-                border_style="magenta",
+        if archive_oxide is not None and archive_base is not None:
+            table.add_row(
+                comparison.mode,
+                baseline_tool,
+                "archive",
+                f"{archive_oxide.avg_seconds:.3f}",
+                f"{archive_base.avg_seconds:.3f}",
+                comparison.archive_fastest_tool,
+                format_delta_pct(comparison.archive_delta_pct),
+                f"{archive_oxide.ratio:.3f}",
+                f"{archive_base.ratio:.3f}",
             )
-        )
+
+        if extract_oxide is not None and extract_base is not None:
+            table.add_row(
+                comparison.mode,
+                baseline_tool,
+                "extract",
+                f"{extract_oxide.avg_seconds:.3f}",
+                f"{extract_base.avg_seconds:.3f}",
+                comparison.extract_fastest_tool or "—",
+                format_delta_pct(comparison.extract_delta_pct or 0.0),
+                f"{extract_oxide.ratio:.3f}",
+                f"{extract_base.ratio:.3f}",
+            )
+
+    console.print(Panel(table, title="Mode comparisons", border_style="magenta"))
 
     takes = build_takes(comparisons)
     if takes:
@@ -599,19 +636,20 @@ def print_analysis(console: Console, comparisons: Sequence[ModeComparison]) -> N
 
 def print_averages(console: Console, stats_rows: Sequence[ModeStats]) -> None:
     table = Table(title="Averages", box=box.SIMPLE_HEAVY)
+    table.caption = "Averages are grouped by mode, then phase, then tool."
+    table.add_column("mode", style="bold")
     table.add_column("tool", style="bold")
     table.add_column("phase")
-    table.add_column("mode")
     table.add_column("avg sec", justify="right")
     table.add_column("avg MiB/s", justify="right")
     table.add_column("avg output", justify="right")
     table.add_column("ratio", justify="right")
 
-    for row in sorted(stats_rows, key=lambda item: (item.tool, item.phase, item.mode)):
+    for row in sorted(stats_rows, key=lambda item: (item.mode, item.phase, item.tool)):
         table.add_row(
+            row.mode,
             row.tool,
             row.phase,
-            row.mode,
             f"{row.avg_seconds:.3f}",
             f"{row.avg_throughput_mib_s:.2f}",
             format_bytes(row.avg_output_bytes),
@@ -656,6 +694,7 @@ def oxide_archive_command(
         config.oxide_block_size,
         "--workers",
         str(settings.threads),
+        "--telemetry-details",
     ]
 
 
@@ -668,6 +707,7 @@ def oxide_extract_command(settings: Settings, _: str, __: ModeConfig) -> list[st
         str(settings.oxide_extract_dir),
         "--workers",
         str(settings.threads),
+        "--telemetry-details",
     ]
 
 
@@ -817,7 +857,7 @@ def print_results_table(results: Sequence[ResultRow], source_bytes: int) -> None
     stats_rows = result_to_stats(results, source_bytes)
     comparisons = mode_comparisons(stats_rows, modes)
     print_steps_table(console, results, source_bytes)
-    print_analysis(console, comparisons)
+    print_analysis(console, stats_rows, comparisons)
     print_averages(console, stats_rows)
 
 
