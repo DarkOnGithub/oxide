@@ -26,31 +26,6 @@ pub enum ArchiveEntryKind {
     /// Entry is a directory.
     Directory,
 }
-
-impl ArchiveEntryKind {
-    pub(crate) const FLAG_KIND_MASK: u8 = 0b0000_0011;
-    pub(crate) const FLAG_DIRECTORY: u8 = 0;
-    pub(crate) const FLAG_FILE: u8 = 1;
-    pub(crate) const FLAG_SYMLINK: u8 = 2;
-    pub(crate) const FLAG_HARDLINK: u8 = 3;
-
-    pub(crate) fn to_flags(self) -> u8 {
-        match self {
-            Self::Directory => Self::FLAG_DIRECTORY,
-            Self::File => Self::FLAG_FILE,
-        }
-    }
-
-    pub(crate) fn from_flags(flags: u8) -> Option<Self> {
-        match flags & Self::FLAG_KIND_MASK {
-            Self::FLAG_DIRECTORY => Some(Self::Directory),
-            Self::FLAG_FILE => Some(Self::File),
-            Self::FLAG_SYMLINK | Self::FLAG_HARDLINK => None,
-            _ => None,
-        }
-    }
-}
-
 /// Cross-platform timestamp metadata stored for archive entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ArchiveTimestamp {
