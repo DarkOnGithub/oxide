@@ -169,8 +169,8 @@ MODE_CONFIGS: dict[str, ModeConfig] = {
         compression_level="6",
         block_size="1M",
     ),
-    "ultra": ModeConfig(compression="lzma", compression_level="9", block_size="4M"),
-    "extreme": ModeConfig(compression="lzma", compression_level="9", block_size="8M"),
+    "ultra": ModeConfig(compression="lzma", compression_level="7", block_size="2M"),
+    "extreme": ModeConfig(compression="lzma", compression_level="9", block_size="4M"),
 }
 
 MODE_BASELINES: dict[str, str] = {
