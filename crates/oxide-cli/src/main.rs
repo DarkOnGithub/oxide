@@ -24,10 +24,10 @@ fn run() -> AppResult {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Archive(args) => commands::archive(args)?,
-        Commands::Extract(args) => commands::extract(args)?,
-        Commands::Tree(args) => commands::tree(args)?,
-        _ => oxide_gui::print_hello(),
+        Some(Commands::Archive(args)) => commands::archive(args)?,
+        Some(Commands::Extract(args)) => commands::extract(args)?,
+        Some(Commands::Tree(args)) => commands::tree(args)?,
+        None => oxide_gui::print_hello(),
     }
 
     Ok(())
