@@ -1,4 +1,4 @@
-use crossbeam_channel::{bounded, select, Receiver, RecvTimeoutError, TryRecvError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, bounded, select};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};

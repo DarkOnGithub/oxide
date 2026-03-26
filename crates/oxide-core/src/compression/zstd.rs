@@ -123,8 +123,8 @@ pub(crate) fn reverse_into_vec(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_into_vec, apply_with_scratch, resolve_level, reverse_into_vec, reverse_with_scratch,
-        ZSTD_DEFAULT_LEVEL,
+        ZSTD_DEFAULT_LEVEL, apply_into_vec, apply_with_scratch, resolve_level, reverse_into_vec,
+        reverse_with_scratch,
     };
     use crate::compression::scratch::ZstdScratch;
 

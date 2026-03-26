@@ -30,7 +30,10 @@ pub use core::{
     PoolRuntimeSnapshot, WorkStealingQueue, WorkStealingWorker, WorkerPool, WorkerPoolHandle,
     WorkerRuntimeSnapshot, WorkerScratchArena,
 };
-pub use dictionary::{ArchiveDictionary, ArchiveDictionaryBank, ArchiveDictionaryMode, DictionaryClass, DictionaryTrainer};
+pub use dictionary::{
+    ArchiveDictionary, ArchiveDictionaryBank, ArchiveDictionaryMode, DictionaryClass,
+    DictionaryTrainer,
+};
 pub use error::OxideError;
 pub use format::{
     ARCHIVE_METADATA_SIZE, ArchiveBlockWriter, ArchiveManifest, ArchiveMetadata, ArchiveReader,

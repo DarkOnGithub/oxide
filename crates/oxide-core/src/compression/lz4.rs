@@ -407,7 +407,7 @@ unsafe fn load_usize(ptr: *const u8) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_into_vec, apply_with_scratch, recycle_output, reverse_into_vec, Lz4Scratch};
+    use super::{Lz4Scratch, apply_into_vec, apply_with_scratch, recycle_output, reverse_into_vec};
 
     #[test]
     fn direct_buffer_round_trip_reuses_output_vec() {

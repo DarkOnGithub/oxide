@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::ops::Range;
@@ -121,11 +122,19 @@ struct PendingDirectory {
 }
 
 #[derive(Debug)]
+struct PendingMetadata {
+    path: PathBuf,
+    entry: crate::ArchiveListingEntry,
+}
+
+#[derive(Debug)]
 pub(crate) struct DirectoryRestoreWriter {
     root: PathBuf,
     entries: Vec<crate::ArchiveListingEntry>,
     next_entry: usize,
     pending_file: Option<PendingFile>,
+    created_directories: HashSet<PathBuf>,
+    pending_metadata: Vec<PendingMetadata>,
     pending_directories: Vec<PendingDirectory>,
     stats: DirectoryRestoreStats,
 }
@@ -141,11 +150,15 @@ pub(crate) struct FilteredDirectoryRestoreWriter {
 impl DirectoryRestoreWriter {
     pub(crate) fn create(root: &Path, manifest: ArchiveManifest) -> Result<Self> {
         fs::create_dir_all(root)?;
+        let mut created_directories = HashSet::new();
+        created_directories.insert(root.to_path_buf());
         Ok(Self {
             root: root.to_path_buf(),
             entries: manifest.entries().to_vec(),
             next_entry: 0,
             pending_file: None,
+            created_directories,
+            pending_metadata: Vec::new(),
             pending_directories: Vec::new(),
             stats: DirectoryRestoreStats::default(),
         })
@@ -165,8 +178,36 @@ impl DirectoryRestoreWriter {
                 "directory restore ended before all entries completed",
             ));
         }
+        self.finalize_files()?;
         self.finalize_directories()?;
         Ok(self.stats)
+    }
+
+    fn ensure_directory_exists(&mut self, path: &Path) -> Result<()> {
+        if path.as_os_str().is_empty() || self.created_directories.contains(path) {
+            return Ok(());
+        }
+
+        let started = Instant::now();
+        fs::create_dir_all(path)?;
+        self.stats.record_output_create(started.elapsed());
+
+        let mut current = Some(path);
+        while let Some(directory) = current {
+            if !directory.starts_with(&self.root) {
+                break;
+            }
+            if !self.created_directories.insert(directory.to_path_buf()) {
+                break;
+            }
+            current = directory.parent();
+        }
+
+        Ok(())
+    }
+
+    fn defer_metadata(&mut self, path: PathBuf, entry: crate::ArchiveListingEntry) {
+        self.pending_metadata.push(PendingMetadata { path, entry });
     }
 
     fn advance_entries(&mut self) -> Result<()> {
@@ -177,29 +218,25 @@ impl DirectoryRestoreWriter {
 
             match entry.kind {
                 crate::ArchiveEntryKind::Directory => {
-                    let output_started = Instant::now();
                     let out_path = directory::join_safe(&self.root, &entry.path)?;
-                    fs::create_dir_all(&out_path)?;
-                    self.stats.record_output_create(output_started.elapsed());
+                    self.ensure_directory_exists(&out_path)?;
                     self.pending_directories.push(PendingDirectory {
                         path: out_path,
                         entry,
                     });
                 }
                 crate::ArchiveEntryKind::File => {
-                    let output_started = Instant::now();
                     let out_path = directory::join_safe(&self.root, &entry.path)?;
                     if let Some(parent) = out_path.parent() {
-                        fs::create_dir_all(parent)?;
+                        self.ensure_directory_exists(parent)?;
                     }
+
+                    let output_started = Instant::now();
                     let file = fs::File::create(&out_path)?;
                     self.stats.record_output_create(output_started.elapsed());
 
                     if entry.size == 0 {
-                        let metadata_started = Instant::now();
-                        apply_entry_metadata(&out_path, &entry)?;
-                        self.stats
-                            .record_output_metadata(metadata_started.elapsed());
+                        self.defer_metadata(out_path, entry);
                         continue;
                     }
 
@@ -213,6 +250,33 @@ impl DirectoryRestoreWriter {
             }
         }
 
+        Ok(())
+    }
+
+    fn finalize_pending_file(&mut self) -> Result<()> {
+        let pending = self.pending_file.take().ok_or(OxideError::InvalidFormat(
+            "directory restore missing pending file after write completion",
+        ))?;
+
+        let output_started = Instant::now();
+        let PendingFile {
+            writer,
+            path,
+            entry,
+            ..
+        } = pending;
+        let _file = writer.into_inner().map_err(|error| error.into_error())?;
+        self.stats.record_output_flush(output_started.elapsed());
+        self.defer_metadata(path, entry);
+        Ok(())
+    }
+
+    fn finalize_files(&mut self) -> Result<()> {
+        for pending in self.pending_metadata.drain(..) {
+            let started = Instant::now();
+            apply_entry_metadata(&pending.path, &pending.entry)?;
+            self.stats.record_output_metadata(started.elapsed());
+        }
         Ok(())
     }
 
@@ -270,18 +334,7 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
             };
 
             if finished_file {
-                let output_started = Instant::now();
-                if let Some(pending) = self.pending_file.as_mut() {
-                    pending.writer.flush()?;
-                }
-                self.stats.record_output_flush(output_started.elapsed());
-                let pending = self.pending_file.take().ok_or(OxideError::InvalidFormat(
-                    "directory restore missing pending file after write completion",
-                ))?;
-                let metadata_started = Instant::now();
-                apply_entry_metadata(&pending.path, &pending.entry)?;
-                self.stats
-                    .record_output_metadata(metadata_started.elapsed());
+                self.finalize_pending_file()?;
                 let decode_started = Instant::now();
                 self.advance_entries()?;
                 self.stats.directory_decode += decode_started.elapsed();

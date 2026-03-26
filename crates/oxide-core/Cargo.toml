@@ -33,6 +33,7 @@ zstd = { version = "0.13", features = ["zdict_builder"] }
 liblzma = { version = "0.4", features = ["static"] }
 regex = "1.11"
 libc = "0.2"
+crc32c = "0.6"
 
 [dev-dependencies]
 tempfile = "3.8"
