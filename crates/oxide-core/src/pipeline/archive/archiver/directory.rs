@@ -97,6 +97,7 @@ where
         .writer_result_queue_blocks
         .max(1)
         .min(max_inflight_blocks.max(1));
+    let result_drain_budget = submission_drain_budget(max_inflight_blocks, writer_queue_capacity);
     let writer_reorder_limit = total_blocks.max(1);
     let (writer_tx, writer_rx) = bounded::<CompressedBlock>(writer_queue_capacity);
     let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes(
@@ -406,7 +407,7 @@ where
 
         let drained = drain_worker_results(
             &results_rx,
-            SUBMISSION_DRAIN_BUDGET,
+            result_drain_budget,
             &writer_tx,
             &writer_failure,
             &mut pending_results,
@@ -736,6 +737,15 @@ fn can_submit_more_work(
     post_worker_backlog < writer_queue_capacity.max(1)
 }
 
+#[inline]
+fn submission_drain_budget(max_inflight_blocks: usize, writer_queue_capacity: usize) -> usize {
+    writer_queue_capacity
+        .max(SUBMISSION_DRAIN_BUDGET)
+        .min(max_inflight_blocks.max(1))
+        .min(256)
+        .max(1)
+}
+
 fn drain_worker_results(
     results_rx: &Receiver<Result<CompressedBlock>>,
     max_results: usize,
@@ -1041,5 +1051,12 @@ mod tests {
     #[test]
     fn submission_gate_stops_when_post_worker_backlog_is_full() {
         assert!(!can_submit_more_work(8, 6, 2, 8, 4));
+    }
+
+    #[test]
+    fn submission_drain_budget_scales_with_pipeline_but_stays_bounded() {
+        assert_eq!(submission_drain_budget(32, 8), 32);
+        assert_eq!(submission_drain_budget(512, 64), 128);
+        assert_eq!(submission_drain_budget(512, 512), 256);
     }
 }

@@ -28,9 +28,11 @@ use super::telemetry::*;
 use super::types::*;
 
 const DECODE_QUEUE_MULTIPLIER: usize = 4;
-const ORDERED_WRITE_QUEUE_MULTIPLIER: usize = 4;
-const REORDER_PENDING_MULTIPLIER: usize = 2;
-const RESULT_DRAIN_BUDGET: usize = 32;
+const ORDERED_WRITE_QUEUE_MULTIPLIER: usize = 8;
+const REORDER_PENDING_MULTIPLIER: usize = 3;
+const MIN_DECODE_QUEUE_CAPACITY: usize = 8;
+const MIN_ORDERED_WRITE_QUEUE_CAPACITY: usize = 16;
+const RESULT_DRAIN_BUDGET: usize = 64;
 
 #[derive(Default)]
 struct VecChunkWriter {
@@ -560,13 +562,11 @@ impl Extractor {
         };
         let block_capacity = decode_plan.block_count();
         let worker_count = self.num_workers.max(1);
-        let queue_capacity = worker_count.saturating_mul(DECODE_QUEUE_MULTIPLIER).max(1);
-        let ordered_write_queue_capacity = worker_count
-            .saturating_mul(ORDERED_WRITE_QUEUE_MULTIPLIER)
-            .max(1);
-        let reorder_pending_limit = queue_capacity
-            .saturating_mul(REORDER_PENDING_MULTIPLIER)
-            .max(1);
+        let queue_capacity = decode_queue_capacity(worker_count, block_capacity);
+        let ordered_write_queue_capacity =
+            ordered_write_queue_capacity(worker_count, queue_capacity, block_capacity);
+        let reorder_pending_limit =
+            reorder_pending_limit(ordered_write_queue_capacity, block_capacity);
 
         let (task_tx, task_rx) = bounded::<DecodeTask>(queue_capacity);
         let (result_tx, result_rx) = bounded::<(usize, Result<DecodedBlock>)>(queue_capacity);
@@ -920,6 +920,37 @@ impl Extractor {
     }
 }
 
+#[inline]
+fn decode_queue_capacity(worker_count: usize, block_capacity: usize) -> usize {
+    worker_count
+        .saturating_mul(DECODE_QUEUE_MULTIPLIER)
+        .max(MIN_DECODE_QUEUE_CAPACITY)
+        .min(block_capacity.max(1))
+        .max(1)
+}
+
+#[inline]
+fn ordered_write_queue_capacity(
+    worker_count: usize,
+    decode_queue_capacity: usize,
+    block_capacity: usize,
+) -> usize {
+    worker_count
+        .saturating_mul(ORDERED_WRITE_QUEUE_MULTIPLIER)
+        .max(MIN_ORDERED_WRITE_QUEUE_CAPACITY)
+        .max(decode_queue_capacity)
+        .min(block_capacity.max(1))
+        .max(1)
+}
+
+#[inline]
+fn reorder_pending_limit(ordered_write_queue_capacity: usize, block_capacity: usize) -> usize {
+    ordered_write_queue_capacity
+        .saturating_mul(REORDER_PENDING_MULTIPLIER)
+        .min(block_capacity.max(1))
+        .max(1)
+}
+
 fn apply_file_restore_stats(stage_timings: &mut ExtractStageTimings, stats: FileRestoreStats) {
     stage_timings.ordered_write = stage_timings
         .ordered_write
@@ -1228,4 +1259,35 @@ fn decode_block_payload_with_scratch(
         ));
     }
     Ok(decoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MIN_DECODE_QUEUE_CAPACITY, MIN_ORDERED_WRITE_QUEUE_CAPACITY, decode_queue_capacity,
+        ordered_write_queue_capacity, reorder_pending_limit,
+    };
+
+    #[test]
+    fn extract_queue_capacity_respects_minimums_and_block_count() {
+        assert_eq!(decode_queue_capacity(1, 1), 1);
+        assert_eq!(decode_queue_capacity(1, 4), 4);
+        assert_eq!(decode_queue_capacity(1, 64), MIN_DECODE_QUEUE_CAPACITY);
+    }
+
+    #[test]
+    fn ordered_write_queue_is_at_least_decode_queue_and_bounded() {
+        let decode = decode_queue_capacity(2, 64);
+        let ordered = ordered_write_queue_capacity(2, decode, 64);
+
+        assert!(ordered >= decode);
+        assert!(ordered >= MIN_ORDERED_WRITE_QUEUE_CAPACITY);
+        assert!(ordered <= 64);
+    }
+
+    #[test]
+    fn reorder_limit_is_derived_from_ordered_queue_and_capped_by_blocks() {
+        assert_eq!(reorder_pending_limit(16, 128), 48);
+        assert_eq!(reorder_pending_limit(64, 96), 96);
+    }
 }
