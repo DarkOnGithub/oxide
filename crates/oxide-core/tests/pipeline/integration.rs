@@ -259,7 +259,7 @@ fn pipeline_forces_raw_storage_for_known_compressed_extensions(
     let input = root.path().join("fixture.jpg");
     std::fs::write(&input, &data)?;
 
-    let mut config = ArchivePipelineConfig::new(
+    let config = ArchivePipelineConfig::new(
         8 * 1024,
         2,
         Arc::new(BufferPool::new(16 * 1024, 64)),
@@ -300,7 +300,7 @@ fn pipeline_forces_raw_storage_for_known_extensions() -> Result<(), Box<dyn std:
     let input = root.path().join("fixture.jpg");
     std::fs::write(&input, &data)?;
 
-    let mut config = ArchivePipelineConfig::new(
+    let config = ArchivePipelineConfig::new(
         8 * 1024,
         2,
         Arc::new(BufferPool::new(16 * 1024, 64)),
@@ -338,7 +338,7 @@ fn directory_archives_split_batches_when_raw_storage_policy_changes(
     write_directory_file(&root, "01-notes.txt", &text)?;
     write_directory_file(&root, "02-photo.jpg", &image)?;
 
-    let mut config = ArchivePipelineConfig::new(
+    let config = ArchivePipelineConfig::new(
         64 * 1024,
         2,
         Arc::new(BufferPool::new(16 * 1024, 64)),
@@ -446,7 +446,7 @@ fn pipeline_records_balanced_mode_chunk_headers_have_no_dictionary_ids(
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
-    let mut config = ArchivePipelineConfig::new(
+    let config = ArchivePipelineConfig::new(
         8 * 1024,
         2,
         Arc::new(BufferPool::new(16 * 1024, 64)),
@@ -476,7 +476,7 @@ fn pipeline_records_ultra_mode_chunk_headers_have_no_dictionary_ids(
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
-    let mut config = ArchivePipelineConfig::new(
+    let config = ArchivePipelineConfig::new(
         8 * 1024,
         2,
         Arc::new(BufferPool::new(16 * 1024, 64)),
@@ -506,7 +506,7 @@ fn file_archive_records_requested_compression_algorithm() -> Result<(), Box<dyn 
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
-    let mut config = ArchivePipelineConfig::new(
+    let config = ArchivePipelineConfig::new(
         8 * 1024,
         2,
         Arc::new(BufferPool::new(16 * 1024, 64)),
@@ -732,7 +732,7 @@ fn directory_archive_records_requested_compression_algorithm(
     let source = TempDir::new()?;
     write_directory_file(&source, "sample.txt", &build_text_fixture(64 * 1024))?;
 
-    let mut config = ArchivePipelineConfig::new(
+    let config = ArchivePipelineConfig::new(
         8 * 1024,
         2,
         Arc::new(BufferPool::new(16 * 1024, 64)),
