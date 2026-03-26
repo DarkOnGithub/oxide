@@ -73,7 +73,6 @@ class Settings:
     modes: tuple[str, ...]
     squashfs_block_size: str | None
     telemetry_dir: Path
-    worker_modes: tuple[str, ...]
     shuffle_seed: int
 
 
@@ -260,12 +259,6 @@ def parse_args() -> Settings:
         help="Optional override for mksquashfs block size; default is mode-matched.",
     )
     parser.add_argument(
-        "--worker-modes",
-        nargs="+",
-        default=["auto", "12", "14", "16"],
-        help="Worker variants to benchmark. Use 'auto' or explicit counts.",
-    )
-    parser.add_argument(
         "--shuffle-seed",
         type=int,
         default=None,
@@ -281,7 +274,6 @@ def parse_args() -> Settings:
 
     args = parser.parse_args()
 
-    worker_modes = tuple(_normalize_worker_mode(value) for value in args.worker_modes)
     shuffle_seed = (
         args.shuffle_seed
         if args.shuffle_seed is not None
@@ -303,7 +295,6 @@ def parse_args() -> Settings:
         modes=tuple(args.modes),
         squashfs_block_size=squashfs_block_size,
         telemetry_dir=Path(args.telemetry_dir),
-        worker_modes=worker_modes,
         shuffle_seed=shuffle_seed,
     )
 
@@ -330,17 +321,28 @@ def cleanup_path(path: Path) -> None:
 
 
 def apparent_size(path: Path) -> int:
+    """
+    Calculates size exactly like `du -sb`.
+    Uses lstat to avoid following symlinks and tracks inodes to avoid double-counting hard links.
+    """
     if not path.exists():
         return 0
     if path.is_file() or path.is_symlink():
-        return path.stat().st_size
+        return path.lstat().st_size
 
     total = 0
+    seen_inodes = set()
     for root, _, files in os.walk(path):
         for name in files:
             file_path = Path(root) / name
             try:
-                total += file_path.stat().st_size
+                st = file_path.lstat()
+                # Deduplicate hard links by inode
+                if st.st_nlink > 1:
+                    if st.st_ino in seen_inodes:
+                        continue
+                    seen_inodes.add(st.st_ino)
+                total += st.st_size
             except FileNotFoundError:
                 continue
     return total
@@ -348,7 +350,7 @@ def apparent_size(path: Path) -> int:
 
 def source_size(path: Path) -> int:
     if path.is_file() or path.is_symlink():
-        return path.stat().st_size
+        return path.lstat().st_size
     return apparent_size(path)
 
 
@@ -393,15 +395,6 @@ def strip_ansi(text: str) -> str:
 
 def normalize_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
-
-
-def _normalize_worker_mode(value: str) -> str:
-    value = value.strip().lower()
-    if value in {"auto", "0"}:
-        return "auto"
-    if value.isdigit() and int(value) > 0:
-        return str(int(value))
-    raise SystemExit(f"Invalid worker mode: {value}")
 
 
 def parse_duration_to_us(text: str) -> int:
@@ -756,8 +749,6 @@ def run_command_with_host_telemetry(
     if total_cpu_ns > 0:
         wall_ns = None
 
-    # Best-effort CPU% using wall-clock time from the caller.
-    # The caller can refine it if needed.
     host = HostTelemetry(
         cpu_user_ns=cpu_user_ns,
         cpu_system_ns=cpu_system_ns,
@@ -1113,7 +1104,7 @@ def print_run_header(
             f"source: [cyan]{settings.source}[/cyan]\n"
             f"source size: [cyan]{format_bytes(source_bytes)}[/cyan]\n"
             f"modes: [cyan]{', '.join(settings.modes)}[/cyan]\n"
-            f"worker modes: [cyan]{', '.join(settings.worker_modes)}[/cyan]\n"
+            f"workers: [cyan]{settings.threads}[/cyan]\n"
             f"passes: [cyan]{settings.passes}[/cyan]  threads: [cyan]{settings.threads}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
             f"shuffle seed: [cyan]{settings.shuffle_seed}[/cyan]\n"
@@ -1315,7 +1306,7 @@ def step_key(step: Step, pass_num: int) -> str:
 def oxide_archive_command(
     settings: Settings, mode: str, config: ModeConfig, workers: str
 ) -> list[str]:
-    return [
+    command = [
         str(settings.oxide_bin),
         "archive",
         str(settings.source),
@@ -1324,24 +1315,26 @@ def oxide_archive_command(
         "--preset",
         mode,
     ]
-    +(["--workers", workers] if workers != "auto" else [])
-    +["--telemetry-details"]
+    if workers != "auto":
+        command.extend(["--workers", workers])
+    command.append("--telemetry-details")
+    return command
 
 
 def oxide_extract_command(
     settings: Settings, _: str, __: ModeConfig, workers: str
 ) -> list[str]:
-    return (
-        [
-            str(settings.oxide_bin),
-            "extract",
-            str(settings.oxide_output),
-            "--output",
-            str(settings.oxide_extract_dir),
-        ]
-        + (["--workers", workers] if workers != "auto" else [])
-        + ["--telemetry-details"]
-    )
+    command = [
+        str(settings.oxide_bin),
+        "extract",
+        str(settings.oxide_output),
+        "--output",
+        str(settings.oxide_extract_dir),
+    ]
+    if workers != "auto":
+        command.extend(["--workers", workers])
+    command.append("--telemetry-details")
+    return command
 
 
 def unsquashfs_extract_command(
@@ -1391,6 +1384,8 @@ def sevenzip_archive_command(
         "-m0=LZMA2",
         f"-md={config.oxide_block_size}",
         f"-mmt={mmt}",
+        "-snl",  # Store Symbolic Links
+        "-snh",  # Store Hard Links
         str(settings.squashfs_output.with_suffix(".7z")),
         str(settings.source),
     ]
@@ -1405,6 +1400,8 @@ def sevenzip_extract_command(
         str(settings.squashfs_output.with_suffix(".7z")),
         f"-o{settings.squashfs_extract_dir}",
         "-aoa",
+        "-snl",  # Extract Symbolic Links natively
+        "-snh",  # Extract Hard Links natively
     ]
     if __workers != "auto":
         command.insert(2, f"-mmt={__workers}")
@@ -1458,61 +1455,61 @@ def baseline_steps(
 
 def build_run_units(settings: Settings) -> list[RunUnit]:
     units: list[RunUnit] = []
+    workers = str(settings.threads)
     for mode in settings.modes:
         mode_config = MODE_CONFIGS.get(mode)
         if mode_config is None:
             raise SystemExit(f"Unknown mode: {mode}")
 
-        for workers in settings.worker_modes:
-            baseline_archive_step, baseline_extract_step = baseline_steps(
-                settings, mode, mode_config, workers
-            )
+        baseline_archive_step, baseline_extract_step = baseline_steps(
+            settings, mode, mode_config, workers
+        )
+        oxide_archive_step = Step(
+            "oxide",
+            "archive",
+            workers,
+            settings.oxide_output,
+            oxide_archive_command,
+        )
+        oxide_extract_step = Step(
+            "oxide",
+            "extract",
+            workers,
+            settings.oxide_extract_dir,
+            oxide_extract_command,
+            cleanup_targets=(settings.oxide_output, settings.oxide_extract_dir),
+        )
+        if settings.skip_extract:
             oxide_archive_step = Step(
-                "oxide",
-                "archive",
-                workers,
-                settings.oxide_output,
-                oxide_archive_command,
+                oxide_archive_step.tool,
+                oxide_archive_step.phase,
+                oxide_archive_step.workers,
+                oxide_archive_step.output_path,
+                oxide_archive_step.command_builder,
+                cleanup_targets=(oxide_archive_step.output_path,),
             )
-            oxide_extract_step = Step(
-                "oxide",
-                "extract",
-                workers,
-                settings.oxide_extract_dir,
-                oxide_extract_command,
-                cleanup_targets=(settings.oxide_output, settings.oxide_extract_dir),
+            baseline_archive_step = Step(
+                baseline_archive_step.tool,
+                baseline_archive_step.phase,
+                baseline_archive_step.workers,
+                baseline_archive_step.output_path,
+                baseline_archive_step.command_builder,
+                cleanup_targets=(baseline_archive_step.output_path,),
             )
-            if settings.skip_extract:
-                oxide_archive_step = Step(
-                    oxide_archive_step.tool,
-                    oxide_archive_step.phase,
-                    oxide_archive_step.workers,
-                    oxide_archive_step.output_path,
-                    oxide_archive_step.command_builder,
-                    cleanup_targets=(oxide_archive_step.output_path,),
-                )
-                baseline_archive_step = Step(
-                    baseline_archive_step.tool,
-                    baseline_archive_step.phase,
-                    baseline_archive_step.workers,
-                    baseline_archive_step.output_path,
-                    baseline_archive_step.command_builder,
-                    cleanup_targets=(baseline_archive_step.output_path,),
-                )
-                oxide_extract_step = None
-                baseline_extract_step = None
+            oxide_extract_step = None
+            baseline_extract_step = None
 
-            units.append(
-                RunUnit(
-                    mode=mode,
-                    workers=workers,
-                    mode_config=mode_config,
-                    oxide_archive=oxide_archive_step,
-                    oxide_extract=oxide_extract_step,
-                    baseline_archive=baseline_archive_step,
-                    baseline_extract=baseline_extract_step,
-                )
+        units.append(
+            RunUnit(
+                mode=mode,
+                workers=workers,
+                mode_config=mode_config,
+                oxide_archive=oxide_archive_step,
+                oxide_extract=oxide_extract_step,
+                baseline_archive=baseline_archive_step,
+                baseline_extract=baseline_extract_step,
             )
+        )
 
     return units
 
@@ -1664,7 +1661,7 @@ def run_bench_with_telemetry(
             "skip_extract": settings.skip_extract,
             "rebuild_oxide": settings.rebuild_oxide,
             "modes": list(settings.modes),
-            "worker_modes": list(settings.worker_modes),
+            "workers": settings.threads,
             "shuffle_seed": settings.shuffle_seed,
             "squashfs_block_size": settings.squashfs_block_size,
             "host_telemetry": True,
@@ -1789,7 +1786,7 @@ def main() -> int:
                             comparison.__dict__ for comparison in comparisons
                         ],
                         "shuffle_seed": settings.shuffle_seed,
-                        "worker_modes": list(settings.worker_modes),
+                        "workers": settings.threads,
                         "host_telemetry": True,
                     }
                 )
