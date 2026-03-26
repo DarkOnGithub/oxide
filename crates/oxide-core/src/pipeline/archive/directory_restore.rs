@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufWriter, Write};
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
@@ -15,7 +17,9 @@ use crate::types::Result;
 use super::super::directory;
 use super::reorder_writer::OrderedChunkWriter;
 
-pub(crate) const OUTPUT_BUFFER_CAPACITY: usize = 128 * 1024;
+pub(crate) const OUTPUT_BUFFER_CAPACITY: usize = 1024 * 1024;
+const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
+const MAX_METADATA_WORKERS: usize = 8;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DirectoryRestoreStats {
@@ -149,19 +153,19 @@ pub(crate) struct FilteredDirectoryRestoreWriter {
 
 impl DirectoryRestoreWriter {
     pub(crate) fn create(root: &Path, manifest: ArchiveManifest) -> Result<Self> {
-        fs::create_dir_all(root)?;
-        let mut created_directories = HashSet::new();
-        created_directories.insert(root.to_path_buf());
-        Ok(Self {
+        let mut writer = Self {
             root: root.to_path_buf(),
             entries: manifest.entries().to_vec(),
             next_entry: 0,
             pending_file: None,
-            created_directories,
+            created_directories: HashSet::new(),
             pending_metadata: Vec::new(),
             pending_directories: Vec::new(),
             stats: DirectoryRestoreStats::default(),
-        })
+        };
+        writer.ensure_directory_exists(root)?;
+        writer.prepare_output_directories()?;
+        Ok(writer)
     }
 
     pub(crate) fn finish(&mut self) -> Result<DirectoryRestoreStats> {
@@ -208,6 +212,21 @@ impl DirectoryRestoreWriter {
 
     fn defer_metadata(&mut self, path: PathBuf, entry: crate::ArchiveListingEntry) {
         self.pending_metadata.push(PendingMetadata { path, entry });
+    }
+
+    fn prepare_output_directories(&mut self) -> Result<()> {
+        for entry in self.entries.clone() {
+            let out_path = directory::join_safe(&self.root, &entry.path)?;
+            match entry.kind {
+                crate::ArchiveEntryKind::Directory => self.ensure_directory_exists(&out_path)?,
+                crate::ArchiveEntryKind::File | crate::ArchiveEntryKind::Symlink => {
+                    if let Some(parent) = out_path.parent() {
+                        self.ensure_directory_exists(parent)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn advance_entries(&mut self) -> Result<()> {
@@ -284,11 +303,14 @@ impl DirectoryRestoreWriter {
     }
 
     fn finalize_files(&mut self) -> Result<()> {
-        for pending in self.pending_metadata.drain(..) {
-            let started = Instant::now();
-            apply_entry_metadata(&pending.path, &pending.entry)?;
-            self.stats.record_output_metadata(started.elapsed());
+        let pending = self.pending_metadata.drain(..).collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Ok(());
         }
+
+        let started = Instant::now();
+        apply_pending_metadata_in_parallel(&pending)?;
+        self.stats.record_output_metadata(started.elapsed());
         Ok(())
     }
 
@@ -300,6 +322,65 @@ impl DirectoryRestoreWriter {
         }
         Ok(())
     }
+}
+
+fn apply_pending_metadata_in_parallel(entries: &[PendingMetadata]) -> Result<()> {
+    if entries.len() < PARALLEL_METADATA_MIN_ITEMS {
+        for entry in entries {
+            apply_entry_metadata(&entry.path, &entry.entry)?;
+        }
+        return Ok(());
+    }
+
+    let worker_count = available_metadata_workers(entries.len());
+    if worker_count <= 1 {
+        for entry in entries {
+            apply_entry_metadata(&entry.path, &entry.entry)?;
+        }
+        return Ok(());
+    }
+
+    let chunk_size = entries.len().div_ceil(worker_count);
+    thread::scope(|scope| -> Result<()> {
+        let mut handles = Vec::new();
+        for chunk in entries.chunks(chunk_size) {
+            handles.push(scope.spawn(move || -> Result<()> {
+                for entry in chunk {
+                    apply_entry_metadata(&entry.path, &entry.entry)?;
+                }
+                Ok(())
+            }));
+        }
+
+        for handle in handles {
+            match handle.join() {
+                Ok(result) => result?,
+                Err(payload) => {
+                    let details = if let Some(message) = payload.downcast_ref::<&str>() {
+                        (*message).to_string()
+                    } else if let Some(message) = payload.downcast_ref::<String>() {
+                        message.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    };
+                    return Err(crate::OxideError::CompressionError(format!(
+                        "metadata worker thread panicked: {details}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    })
+}
+
+fn available_metadata_workers(item_count: usize) -> usize {
+    thread::available_parallelism()
+        .unwrap_or(NonZeroUsize::MIN)
+        .get()
+        .min(MAX_METADATA_WORKERS)
+        .min(item_count)
+        .max(1)
 }
 
 impl FilteredDirectoryRestoreWriter {
@@ -495,6 +576,10 @@ fn apply_owner(path: &Path, uid: u32, gid: u32) -> Result<()> {
     use std::io;
     use std::os::unix::ffi::OsStrExt;
 
+    if should_apply_owner(uid, gid) == Some(false) {
+        return Ok(());
+    }
+
     let path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| OxideError::InvalidFormat("path contains interior nul byte"))?;
     let status = unsafe { libc::chown(path.as_ptr(), uid, gid) };
@@ -520,6 +605,10 @@ fn apply_owner_nofollow(path: &Path, uid: u32, gid: u32) -> Result<()> {
     use std::io;
     use std::os::unix::ffi::OsStrExt;
 
+    if should_apply_owner(uid, gid) == Some(false) {
+        return Ok(());
+    }
+
     let path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| OxideError::InvalidFormat("path contains interior nul byte"))?;
     let status = unsafe { libc::lchown(path.as_ptr(), uid, gid) };
@@ -537,6 +626,22 @@ fn apply_owner_nofollow(path: &Path, uid: u32, gid: u32) -> Result<()> {
 #[cfg(not(unix))]
 fn apply_owner_nofollow(_: &Path, _: u32, _: u32) -> Result<()> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn should_apply_owner(uid: u32, gid: u32) -> Option<bool> {
+    let effective_uid = unsafe { libc::geteuid() };
+    let effective_gid = unsafe { libc::getegid() };
+
+    if uid == effective_uid && gid == effective_gid {
+        return Some(false);
+    }
+
+    if effective_uid != 0 && uid != effective_uid {
+        return Some(false);
+    }
+
+    Some(true)
 }
 
 #[cfg(unix)]
@@ -640,9 +745,11 @@ fn create_symlink(path: &Path, target: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::reorder_writer::OrderedChunkWriter;
     use super::DirectoryRestoreWriter;
     use crate::{ArchiveEntryKind, ArchiveListingEntry, ArchiveManifest, ArchiveTimestamp};
     use std::fs;
+    use std::io::Read;
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -673,5 +780,65 @@ mod tests {
             fs::read_link(&link_path).expect("read link"),
             Path::new("target.txt")
         );
+    }
+
+    #[test]
+    fn restore_creates_implicit_parent_directories() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let manifest = ArchiveManifest::new(vec![ArchiveListingEntry::file(
+            "nested/deeper/file.txt".to_string(),
+            4,
+            0o644,
+            ArchiveTimestamp::default(),
+            0,
+            0,
+            0,
+        )]);
+
+        let mut writer = DirectoryRestoreWriter::create(root, manifest).expect("create writer");
+        writer.write_chunk(b"test").expect("write chunk");
+        writer.finish().expect("finish restore");
+
+        let mut restored = String::new();
+        fs::File::open(root.join("nested/deeper/file.txt"))
+            .expect("open restored file")
+            .read_to_string(&mut restored)
+            .expect("read restored file");
+        assert_eq!(restored, "test");
+    }
+
+    #[test]
+    fn restore_multiple_files_completes_metadata_finalization() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let mut entries = Vec::new();
+        let mut payload = Vec::new();
+        for index in 0..8 {
+            let name = format!("dir/file-{index}.txt");
+            entries.push(ArchiveListingEntry::file(
+                name,
+                1,
+                0o644,
+                ArchiveTimestamp::default(),
+                0,
+                0,
+                index as u64,
+            ));
+            payload.push(b'a' + index as u8);
+        }
+
+        let manifest = ArchiveManifest::new(entries);
+        let mut writer = DirectoryRestoreWriter::create(root, manifest).expect("create writer");
+        writer.write_chunk(&payload).expect("write chunk");
+        writer.finish().expect("finish restore");
+
+        for index in 0..8 {
+            let path = root.join(format!("dir/file-{index}.txt"));
+            assert_eq!(
+                fs::read(&path).expect("read restored file"),
+                vec![b'a' + index as u8]
+            );
+        }
     }
 }
