@@ -13,6 +13,17 @@ use crate::telemetry::tags;
 #[cfg(feature = "profiling")]
 const PROFILE_TAG_STACK_BUFFER: [&str; 1] = [tags::TAG_BUFFER];
 
+const RECYCLED_BUFFER_CAPACITY_MULTIPLIER: usize = 2;
+const MAX_RECYCLED_BUFFER_CAPACITY: usize = 16 * 1024 * 1024;
+
+#[inline]
+fn retained_recycle_capacity(default_capacity: usize) -> usize {
+    default_capacity
+        .saturating_mul(RECYCLED_BUFFER_CAPACITY_MULTIPLIER)
+        .min(MAX_RECYCLED_BUFFER_CAPACITY.max(default_capacity))
+        .max(default_capacity.max(1))
+}
+
 /// A pool of reusable byte buffers to reduce allocation overhead.
 ///
 /// The buffer pool maintains a set of pre-allocated buffers that can be
@@ -104,6 +115,7 @@ impl BufferPool {
         }
 
         PooledBuffer::new(buffer, self.recycler.clone(), Arc::clone(&self.metrics))
+            .with_default_capacity(self.default_capacity)
     }
 
     /// Returns a snapshot of the current pool metrics.
@@ -154,6 +166,7 @@ pub struct PooledBuffer {
     buffer: Vec<u8>,
     recycler: Sender<Vec<u8>>,
     metrics: Arc<PoolMetricsInner>,
+    default_capacity: usize,
 }
 
 impl PooledBuffer {
@@ -162,7 +175,13 @@ impl PooledBuffer {
             buffer,
             recycler,
             metrics,
+            default_capacity: 0,
         }
+    }
+
+    fn with_default_capacity(mut self, default_capacity: usize) -> Self {
+        self.default_capacity = default_capacity.max(1);
+        self
     }
 
     /// Returns a slice reference to the buffer contents.
@@ -194,7 +213,12 @@ impl Drop for PooledBuffer {
     fn drop(&mut self) {
         #[cfg(feature = "profiling")]
         let started_at = Instant::now();
-        let buffer = std::mem::take(&mut self.buffer);
+        let mut buffer = std::mem::take(&mut self.buffer);
+        let retained_capacity = retained_recycle_capacity(self.default_capacity.max(1));
+        buffer.clear();
+        if buffer.capacity() > retained_capacity {
+            buffer.shrink_to(retained_capacity);
+        }
         #[cfg(feature = "profiling")]
         let capacity = buffer.capacity();
         if let Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) =
@@ -249,5 +273,32 @@ impl Drop for PooledBuffer {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BufferPool, MAX_RECYCLED_BUFFER_CAPACITY, retained_recycle_capacity};
+
+    #[test]
+    fn recycle_capacity_scales_from_default_capacity() {
+        assert_eq!(retained_recycle_capacity(1024 * 1024), 2 * 1024 * 1024);
+        assert_eq!(retained_recycle_capacity(8 * 1024 * 1024), 16 * 1024 * 1024);
+        assert_eq!(
+            retained_recycle_capacity(32 * 1024 * 1024),
+            32 * 1024 * 1024
+        );
+        assert_eq!(retained_recycle_capacity(0), 1);
+    }
+
+    #[test]
+    fn recycled_buffers_are_shrunk_before_reuse() {
+        let pool = BufferPool::new(1024 * 1024, 1);
+        let mut buffer = pool.acquire();
+        buffer.reserve(MAX_RECYCLED_BUFFER_CAPACITY * 2);
+        drop(buffer);
+
+        let recycled = pool.acquire();
+        assert!(recycled.capacity() <= retained_recycle_capacity(1024 * 1024));
     }
 }

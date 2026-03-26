@@ -3,6 +3,27 @@ use std::fmt;
 use super::lz4::Lz4Scratch;
 use crate::{OxideError, Result};
 
+const MIN_RETAINED_OUTPUT_CAPACITY: usize = 256 * 1024;
+const LZMA_MAX_RETAINED_OUTPUT_CAPACITY: usize = 8 * 1024 * 1024;
+const ZSTD_MAX_RETAINED_OUTPUT_CAPACITY: usize = 8 * 1024 * 1024;
+
+#[inline]
+fn capped_retained_capacity(capacity: usize, max_retained: usize) -> usize {
+    capacity
+        .min(max_retained)
+        .max(MIN_RETAINED_OUTPUT_CAPACITY.min(max_retained))
+}
+
+#[inline]
+fn recycle_output_with_cap(mut output: Vec<u8>, max_retained: usize) -> Vec<u8> {
+    output.clear();
+    let retained_capacity = capped_retained_capacity(output.capacity(), max_retained);
+    if output.capacity() > retained_capacity {
+        output.shrink_to(retained_capacity);
+    }
+    output
+}
+
 #[derive(Default)]
 pub(crate) struct LzmaScratch {
     output: Vec<u8>,
@@ -21,9 +42,8 @@ impl LzmaScratch {
         std::mem::take(&mut self.output)
     }
 
-    pub(crate) fn recycle_output(&mut self, mut output: Vec<u8>) {
-        output.clear();
-        self.output = output;
+    pub(crate) fn recycle_output(&mut self, output: Vec<u8>) {
+        self.output = recycle_output_with_cap(output, LZMA_MAX_RETAINED_OUTPUT_CAPACITY);
     }
 
     pub(crate) fn allocated_bytes(&self) -> usize {
@@ -147,9 +167,8 @@ impl ZstdScratch {
         std::mem::take(&mut self.output)
     }
 
-    pub(crate) fn recycle_output(&mut self, mut output: Vec<u8>) {
-        output.clear();
-        self.output = output;
+    pub(crate) fn recycle_output(&mut self, output: Vec<u8>) {
+        self.output = recycle_output_with_cap(output, ZSTD_MAX_RETAINED_OUTPUT_CAPACITY);
     }
 }
 
@@ -189,5 +208,29 @@ impl CompressionScratchArena {
 
     pub(crate) fn allocated_bytes(&self) -> usize {
         self.lz4.allocated_bytes() + self.lzma.allocated_bytes() + self.zstd.allocated_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        LZMA_MAX_RETAINED_OUTPUT_CAPACITY, LzmaScratch, ZSTD_MAX_RETAINED_OUTPUT_CAPACITY,
+        ZstdScratch,
+    };
+
+    #[test]
+    fn lzma_recycle_caps_retained_output_capacity() {
+        let mut scratch = LzmaScratch::default();
+        scratch.recycle_output(Vec::with_capacity(LZMA_MAX_RETAINED_OUTPUT_CAPACITY * 2));
+
+        assert!(scratch.allocated_bytes() <= LZMA_MAX_RETAINED_OUTPUT_CAPACITY);
+    }
+
+    #[test]
+    fn zstd_recycle_caps_retained_output_capacity() {
+        let mut scratch = ZstdScratch::default();
+        scratch.recycle_output(Vec::with_capacity(ZSTD_MAX_RETAINED_OUTPUT_CAPACITY * 2));
+
+        assert!(scratch.allocated_bytes() <= ZSTD_MAX_RETAINED_OUTPUT_CAPACITY);
     }
 }

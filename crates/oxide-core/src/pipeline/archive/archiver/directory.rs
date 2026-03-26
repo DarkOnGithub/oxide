@@ -381,7 +381,14 @@ where
     loop {
         let mut progressed = false;
 
-        while !producer_done && submitted_count.saturating_sub(retired_count) < max_inflight_blocks
+        while !producer_done
+            && can_submit_more_work(
+                submitted_count,
+                received_count,
+                retired_count,
+                max_inflight_blocks,
+                writer_queue_capacity,
+            )
         {
             match batch_rx.try_recv() {
                 Ok(batch) => {
@@ -455,8 +462,15 @@ where
                 sink,
             );
 
-            let inflight = submitted_count.saturating_sub(received_count);
-            if !producer_done && inflight < max_inflight_blocks {
+            let worker_inflight = submitted_count.saturating_sub(received_count);
+            let can_submit = can_submit_more_work(
+                submitted_count,
+                received_count,
+                retired_count,
+                max_inflight_blocks,
+                writer_queue_capacity,
+            );
+            if !producer_done && can_submit {
                 let wait_started = Instant::now();
                 select! {
                     recv(batch_rx) -> batch => {
@@ -496,7 +510,7 @@ where
                 match result {
                     Ok(result) => {
                         stage_timings.result_wait += waited;
-                        if inflight >= max_inflight_blocks {
+                        if worker_inflight >= max_inflight_blocks {
                             stage_timings.submit_wait += waited;
                         }
                         recv_worker_result(
@@ -703,6 +717,23 @@ where
         writer: writer_outcome.writer,
         report,
     })
+}
+
+#[inline]
+fn can_submit_more_work(
+    submitted_count: usize,
+    received_count: usize,
+    retired_count: usize,
+    max_inflight_blocks: usize,
+    writer_queue_capacity: usize,
+) -> bool {
+    let worker_inflight = submitted_count.saturating_sub(received_count);
+    if worker_inflight >= max_inflight_blocks {
+        return false;
+    }
+
+    let post_worker_backlog = received_count.saturating_sub(retired_count);
+    post_worker_backlog < writer_queue_capacity.max(1)
 }
 
 fn drain_worker_results(
@@ -1000,5 +1031,15 @@ mod tests {
             first_error,
             Some(crate::OxideError::CompressionError(message)) if message == "I/O error: disk full"
         ));
+    }
+
+    #[test]
+    fn submission_gate_allows_worker_refill_while_writer_catches_up() {
+        assert!(can_submit_more_work(8, 6, 4, 8, 4));
+    }
+
+    #[test]
+    fn submission_gate_stops_when_post_worker_backlog_is_full() {
+        assert!(!can_submit_more_work(8, 6, 2, 8, 4));
     }
 }

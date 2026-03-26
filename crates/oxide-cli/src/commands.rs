@@ -8,18 +8,18 @@ use oxide_core::{
     PipelinePerformanceOptions, RunTelemetryOptions,
 };
 
-use crate::AppResult;
 use crate::cli::{
-    ArchiveArgs, ExtractArgs, TreeArgs, default_extract_output_path, default_output_path,
+    default_extract_output_path, default_output_path, ArchiveArgs, ExtractArgs, TreeArgs,
 };
-use crate::presets::{ArchiveOverrides, ResolvedArchiveSettings, resolve_archive_settings};
+use crate::presets::{resolve_archive_settings, ArchiveOverrides, ResolvedArchiveSettings};
 use crate::progress::{ArchiveCliSink, ExtractCliSink, LiveRateStats};
 use crate::report::{
-    ArchiveReportSummary, ExtractReportSummary, print_archive_report_summary,
-    print_extract_report_summary,
+    print_archive_report_summary, print_extract_report_summary, ArchiveReportSummary,
+    ExtractReportSummary,
 };
 use crate::tree::print_archive_tree;
-use crate::ui::{StreamTarget, Tone, tagged_message};
+use crate::ui::{tagged_message, StreamTarget, Tone};
+use crate::AppResult;
 
 pub fn archive(args: ArchiveArgs) -> AppResult {
     let ArchiveArgs {
@@ -247,14 +247,16 @@ fn build_extract_pipeline(workers: usize) -> ArchivePipeline {
 }
 
 fn resolve_archive_workers(requested_workers: usize, producer_threads: usize) -> usize {
-    if requested_workers > 0 {
-        return requested_workers.max(1);
-    }
-
     let physical_cores = num_cpus::get_physical().max(1);
     let reserved_producers = producer_threads.min(2);
     let reserved_threads = reserved_producers.saturating_add(1);
-    physical_cores.saturating_sub(reserved_threads).max(1)
+    let available_workers = physical_cores.saturating_sub(reserved_threads).max(1);
+
+    if requested_workers > 0 {
+        return requested_workers.min(available_workers).max(1);
+    }
+
+    available_workers
 }
 
 #[cfg(test)]
@@ -263,7 +265,20 @@ mod tests {
 
     #[test]
     fn explicit_worker_count_is_preserved() {
-        assert_eq!(resolve_archive_workers(6, 8), 6);
+        let physical_cores = num_cpus::get_physical().max(1);
+        let available = physical_cores.saturating_sub(3).max(1);
+        let requested = available.min(4);
+
+        assert_eq!(resolve_archive_workers(requested, 8), requested);
+    }
+
+    #[test]
+    fn explicit_worker_count_is_capped_to_available_budget() {
+        let physical_cores = num_cpus::get_physical().max(1);
+        let expected = physical_cores.saturating_sub(3).max(1);
+
+        assert_eq!(resolve_archive_workers(physical_cores + 8, 4), expected);
+        assert_eq!(resolve_archive_workers(physical_cores + 8, 8), expected);
     }
 
     #[test]

@@ -13,10 +13,40 @@ use crate::types::{Batch, CompressedBlock, CompressedPayload, CompressionAlgo, R
 
 const INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN: usize = 32 * 1024;
 const INCOMPRESSIBLE_PROBE_SAMPLE_LEN: usize = 16 * 1024;
+const LZMA_PROBE_MIN_SOURCE_LEN: usize = 256 * 1024;
+const LZMA_EXTREME_PROBE_MIN_SOURCE_LEN: usize = 512 * 1024;
+const LZMA_PROBE_SAMPLE_LEN: usize = 8 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct CompressionProbeConfig {
+    min_source_len: usize,
+    sample_len: usize,
+}
 
 #[inline]
-fn should_skip_full_compression_probe(source_len: usize) -> bool {
-    source_len >= INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN
+fn compression_probe_config(plan: crate::types::ChunkEncodingPlan) -> CompressionProbeConfig {
+    match plan.algo {
+        CompressionAlgo::Lz4 | CompressionAlgo::Zstd => CompressionProbeConfig {
+            min_source_len: INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN,
+            sample_len: INCOMPRESSIBLE_PROBE_SAMPLE_LEN,
+        },
+        CompressionAlgo::Lzma if plan.lzma_extreme => CompressionProbeConfig {
+            min_source_len: LZMA_EXTREME_PROBE_MIN_SOURCE_LEN,
+            sample_len: LZMA_PROBE_SAMPLE_LEN,
+        },
+        CompressionAlgo::Lzma => CompressionProbeConfig {
+            min_source_len: LZMA_PROBE_MIN_SOURCE_LEN,
+            sample_len: LZMA_PROBE_SAMPLE_LEN,
+        },
+    }
+}
+
+#[inline]
+fn should_skip_full_compression_probe(
+    source_len: usize,
+    plan: crate::types::ChunkEncodingPlan,
+) -> bool {
+    source_len >= compression_probe_config(plan).min_source_len
 }
 
 fn is_likely_incompressible_sample(
@@ -25,7 +55,7 @@ fn is_likely_incompressible_sample(
     dictionary_bank: &ArchiveDictionaryBank,
     scratch: &mut WorkerScratchArena,
 ) -> Result<bool> {
-    let sample_len = source.len().min(INCOMPRESSIBLE_PROBE_SAMPLE_LEN);
+    let sample_len = source.len().min(compression_probe_config(plan).sample_len);
     if sample_len == 0 {
         return Ok(false);
     }
@@ -111,7 +141,7 @@ pub fn process_batch(
 
     if raw_fallback_enabled
         && !skip_compression
-        && should_skip_full_compression_probe(source_len)
+        && should_skip_full_compression_probe(source_len, plan)
         && is_likely_incompressible_sample(source, plan, dictionary_bank, scratch)?
     {
         processing_totals.record(source_len as u64, std::time::Duration::ZERO);
@@ -193,7 +223,9 @@ mod tests {
     use bytes::Bytes;
 
     use super::{
-        INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN, is_likely_incompressible_sample, process_batch,
+        INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN, INCOMPRESSIBLE_PROBE_SAMPLE_LEN,
+        LZMA_EXTREME_PROBE_MIN_SOURCE_LEN, LZMA_PROBE_MIN_SOURCE_LEN, compression_probe_config,
+        is_likely_incompressible_sample, process_batch, should_skip_full_compression_probe,
     };
     use crate::buffer::BufferPool;
     use crate::core::WorkerScratchArena;
@@ -296,5 +328,42 @@ mod tests {
             .expect("probe should succeed");
 
         assert!(!probe);
+    }
+
+    #[test]
+    fn lzma_probe_uses_higher_thresholds_and_smaller_samples() {
+        let regular = crate::types::ChunkEncodingPlan::new(CompressionAlgo::Lzma)
+            .with_level(Some(7))
+            .with_lzma_extreme(false);
+        let extreme = crate::types::ChunkEncodingPlan::new(CompressionAlgo::Lzma)
+            .with_level(Some(9))
+            .with_lzma_extreme(true);
+
+        let regular_config = compression_probe_config(regular);
+        let extreme_config = compression_probe_config(extreme);
+
+        assert_eq!(regular_config.min_source_len, LZMA_PROBE_MIN_SOURCE_LEN);
+        assert_eq!(
+            extreme_config.min_source_len,
+            LZMA_EXTREME_PROBE_MIN_SOURCE_LEN
+        );
+        assert!(regular_config.sample_len < INCOMPRESSIBLE_PROBE_SAMPLE_LEN);
+        assert_eq!(regular_config.sample_len, extreme_config.sample_len);
+        assert!(!should_skip_full_compression_probe(
+            LZMA_PROBE_MIN_SOURCE_LEN - 1,
+            regular
+        ));
+        assert!(should_skip_full_compression_probe(
+            LZMA_PROBE_MIN_SOURCE_LEN,
+            regular
+        ));
+        assert!(!should_skip_full_compression_probe(
+            LZMA_EXTREME_PROBE_MIN_SOURCE_LEN - 1,
+            extreme,
+        ));
+        assert!(should_skip_full_compression_probe(
+            LZMA_EXTREME_PROBE_MIN_SOURCE_LEN,
+            extreme,
+        ));
     }
 }
