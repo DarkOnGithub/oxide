@@ -39,17 +39,29 @@ pub struct ChunkEncodingPlan {
     pub algo: CompressionAlgo,
     /// Optional explicit codec-specific compression level used only by the encoder.
     pub level: Option<i32>,
+    /// Enables liblzma's extreme preset variant when using LZMA encoding.
+    pub lzma_extreme: bool,
 }
 
 impl ChunkEncodingPlan {
     /// Creates a new chunk encoding plan.
     pub const fn new(algo: CompressionAlgo) -> Self {
-        Self { algo, level: None }
+        Self {
+            algo,
+            level: None,
+            lzma_extreme: false,
+        }
     }
 
     /// Attaches an explicit codec-specific compression level override for encoding.
     pub const fn with_level(mut self, level: Option<i32>) -> Self {
         self.level = level;
+        self
+    }
+
+    /// Enables or disables liblzma's extreme preset variant for LZMA encoding.
+    pub const fn with_lzma_extreme(mut self, lzma_extreme: bool) -> Self {
+        self.lzma_extreme = lzma_extreme;
         self
     }
 

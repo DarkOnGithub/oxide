@@ -19,6 +19,7 @@ pub struct ResolvedArchiveSettings {
     pub skip_compression: bool,
     pub dictionary_mode: ArchiveDictionaryMode,
     pub compression_level: Option<i32>,
+    pub compression_extreme: bool,
     pub block_size: usize,
     pub workers: usize,
     pub pool_capacity: usize,
@@ -128,6 +129,7 @@ struct ArchivePresetConfig {
 struct CompressionConfig {
     compressor: Option<String>,
     level: Option<i32>,
+    extreme: Option<bool>,
 }
 
 impl ArchivePresetConfig {
@@ -187,6 +189,7 @@ impl ArchivePresetConfig {
                     .unwrap_or(ArchiveDictionaryMode::Off),
             ),
             compression_level: compression.level,
+            compression_extreme: compression.extreme,
             block_size: resolve_usize(overrides.block_size, self.block_size, "block_size")?,
             workers: resolve_number(overrides.workers, self.workers, "workers")?,
             pool_capacity: resolve_usize(
@@ -261,6 +264,7 @@ impl CompressionConfig {
 
         merge_option(&mut self.compressor, other.compressor.clone());
         merge_option(&mut self.level, other.level);
+        merge_option(&mut self.extreme, other.extreme);
     }
 
     fn resolve(
@@ -278,9 +282,14 @@ impl CompressionConfig {
                 .ok_or_else(|| invalid_input("archive preset compression is missing compressor"))?,
         };
         let level = override_level.or(self.level);
-        validate_compression_level(algo, level)?;
+        let extreme = self.extreme.unwrap_or(false);
+        validate_compression_settings(algo, level, extreme)?;
 
-        Ok(ResolvedCompressionSettings { algo, level })
+        Ok(ResolvedCompressionSettings {
+            algo,
+            level,
+            extreme,
+        })
     }
 }
 
@@ -288,6 +297,7 @@ impl CompressionConfig {
 struct ResolvedCompressionSettings {
     algo: CompressionAlgo,
     level: Option<i32>,
+    extreme: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -340,10 +350,17 @@ fn parse_compression_algo(value: &str) -> Result<CompressionAlgo, io::Error> {
     }
 }
 
-fn validate_compression_level(
+fn validate_compression_settings(
     compression: CompressionAlgo,
     level: Option<i32>,
+    extreme: bool,
 ) -> Result<(), io::Error> {
+    if extreme && compression != CompressionAlgo::Lzma {
+        return Err(invalid_input(
+            "compression.extreme is only supported when compression.compressor is 'lzma'",
+        ));
+    }
+
     let Some(level) = level else {
         return Ok(());
     };
@@ -475,15 +492,18 @@ mod tests {
 
         assert_eq!(balanced.compression, CompressionAlgo::Zstd);
         assert_eq!(balanced.compression_level, Some(6));
+        assert!(!balanced.compression_extreme);
         assert_eq!(balanced.block_size, 2 * 1024 * 1024);
         assert_eq!(ultra.compression, CompressionAlgo::Lzma);
-        assert_eq!(ultra.compression_level, Some(9));
-        assert_eq!(ultra.block_size, 4 * 1024 * 1024);
-        assert_eq!(ultra.pool_capacity, 4 * 1024 * 1024);
+        assert_eq!(ultra.compression_level, Some(7));
+        assert!(!ultra.compression_extreme);
+        assert_eq!(ultra.block_size, 2 * 1024 * 1024);
+        assert_eq!(ultra.pool_capacity, 2 * 1024 * 1024);
         assert_eq!(extreme.compression, CompressionAlgo::Lzma);
         assert_eq!(extreme.compression_level, Some(9));
-        assert_eq!(extreme.block_size, 8 * 1024 * 1024);
-        assert_eq!(extreme.pool_capacity, 8 * 1024 * 1024);
+        assert!(extreme.compression_extreme);
+        assert_eq!(extreme.block_size, 4 * 1024 * 1024);
+        assert_eq!(extreme.pool_capacity, 4 * 1024 * 1024);
     }
 
     #[test]
@@ -530,6 +550,7 @@ mod tests {
 
         assert_eq!(resolved.compression, CompressionAlgo::Lzma);
         assert_eq!(resolved.compression_level, Some(9));
+        assert!(!resolved.compression_extreme);
     }
 
     #[test]
@@ -576,6 +597,100 @@ mod tests {
 
         assert_eq!(resolved.compression, CompressionAlgo::Lzma);
         assert_eq!(resolved.compression_level, Some(9));
+        assert!(!resolved.compression_extreme);
+    }
+
+    #[test]
+    fn resolves_lzma_extreme_from_config() {
+        let file = parse_fixture(
+            r#"{
+              "archive": {
+                "default_preset": "extreme",
+                "defaults": {
+                  "compression": {
+                    "compressor": "lz4"
+                  },
+                  "block_size": "2M",
+                  "workers": 0,
+                  "pool_capacity": "1M",
+                  "pool_buffers": 512,
+                  "stats_interval_ms": 250,
+                  "inflight_bytes": "2G",
+                  "inflight_blocks_per_worker": 256,
+                  "stream_read_buffer": "64M",
+                  "producer_threads": 1,
+                  "directory_mmap_threshold": "8M",
+                  "writer_queue_blocks": 1024,
+                  "result_wait_ms": 1
+                },
+                "presets": {
+                  "extreme": {
+                    "compression": {
+                      "compressor": "lzma",
+                      "level": 9,
+                      "extreme": true
+                    }
+                  }
+                }
+              }
+            }"#,
+        );
+
+        let preset = file.archive.presets.get("extreme").unwrap();
+        let mut merged = file.archive.defaults.clone();
+        merged.merge_from(preset);
+        let resolved = merged
+            .resolve("extreme", "fixture", ArchiveOverrides::default())
+            .expect("settings should resolve");
+
+        assert_eq!(resolved.compression, CompressionAlgo::Lzma);
+        assert_eq!(resolved.compression_level, Some(9));
+        assert!(resolved.compression_extreme);
+    }
+
+    #[test]
+    fn rejects_extreme_for_non_lzma() {
+        let file = parse_fixture(
+            r#"{
+              "archive": {
+                "default_preset": "bad",
+                "defaults": {
+                  "compression": {
+                    "compressor": "zstd",
+                    "level": 6,
+                    "extreme": true
+                  },
+                  "block_size": "2M",
+                  "workers": 0,
+                  "pool_capacity": "1M",
+                  "pool_buffers": 512,
+                  "stats_interval_ms": 250,
+                  "inflight_bytes": "2G",
+                  "inflight_blocks_per_worker": 256,
+                  "stream_read_buffer": "64M",
+                  "producer_threads": 1,
+                  "directory_mmap_threshold": "8M",
+                  "writer_queue_blocks": 1024,
+                  "result_wait_ms": 1
+                },
+                "presets": {
+                  "bad": {}
+                }
+              }
+            }"#,
+        );
+
+        let preset = file.archive.presets.get("bad").unwrap();
+        let mut merged = file.archive.defaults.clone();
+        merged.merge_from(preset);
+
+        let error = merged
+            .resolve("bad", "fixture", ArchiveOverrides::default())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "compression.extreme is only supported when compression.compressor is 'lzma'"
+        );
     }
 
     #[test]

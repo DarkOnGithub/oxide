@@ -93,36 +93,38 @@
       "ultra": {
         "compression": {
           "compressor": "lzma",
-          "level": 9
+          "level": 7,
+          "extreme": false
         },
-        "block_size": "4M",
+        "block_size": "2M",
         "workers": 0,
-        "pool_capacity": "4M",
+        "pool_capacity": "2M",
         "pool_buffers": 128,
         "stream_read_buffer": "16M",
-        "inflight_bytes": "1G",
-        "inflight_blocks_per_worker": 12,
+        "inflight_bytes": "512M",
+        "inflight_blocks_per_worker": 8,
         "producer_threads": 1,
         "directory_mmap_threshold": "16M",
-        "writer_queue_blocks": 128,
+        "writer_queue_blocks": 96,
         "result_wait_ms": 4,
         "dictionary_mode": "auto"
       },
       "extreme": {
         "compression": {
           "compressor": "lzma",
-          "level": 9
+          "level": 9,
+          "extreme": true
         },
-        "block_size": "8M",
+        "block_size": "4M",
         "workers": 0,
-        "pool_capacity": "8M",
+        "pool_capacity": "4M",
         "pool_buffers": 128,
         "stream_read_buffer": "16M",
-        "inflight_bytes": "1536M",
-        "inflight_blocks_per_worker": 8,
+        "inflight_bytes": "768M",
+        "inflight_blocks_per_worker": 6,
         "producer_threads": 1,
         "directory_mmap_threshold": "16M",
-        "writer_queue_blocks": 96,
+        "writer_queue_blocks": 64,
         "result_wait_ms": 6,
         "dictionary_mode": "auto"
       }

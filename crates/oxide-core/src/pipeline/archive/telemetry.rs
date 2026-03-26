@@ -167,6 +167,7 @@ pub fn build_stats_extensions(
     block_size: usize,
     raw_passthrough_blocks: u64,
     compression_level: Option<i32>,
+    lzma_extreme: bool,
     max_inflight_blocks: usize,
     max_inflight_bytes: usize,
     configured_inflight_bytes: usize,
@@ -245,6 +246,9 @@ pub fn build_stats_extensions(
             "compression.level".to_string(),
             StatValue::U64(level as u64),
         );
+    }
+    if lzma_extreme {
+        extensions.insert("compression.lzma_extreme".to_string(), StatValue::U64(1));
     }
     extensions.insert(
         "pipeline.max_inflight_blocks".to_string(),

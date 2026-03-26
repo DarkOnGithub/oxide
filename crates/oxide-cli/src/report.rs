@@ -21,6 +21,7 @@ pub struct ArchiveReportSummary<'a> {
     pub profile_name: &'a str,
     pub compression: CompressionAlgo,
     pub compression_level: Option<i32>,
+    pub compression_extreme: bool,
     pub report: &'a ArchiveReport,
     pub peak_read_bps: f64,
     pub peak_write_bps: f64,
@@ -42,6 +43,7 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
         profile_name,
         compression,
         compression_level,
+        compression_extreme,
         report,
         peak_read_bps,
         peak_write_bps,
@@ -72,7 +74,7 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
                 format!(
                     "{} | {}",
                     profile_name,
-                    compression_label(compression, compression_level)
+                    compression_label(compression, compression_level, compression_extreme)
                 ),
             ),
             ("Elapsed".to_string(), format_duration(report.elapsed)),
@@ -823,16 +825,18 @@ fn thread_stage_summary(thread: &ThreadReport, order: &[(&str, &str)]) -> Option
     (!pieces.is_empty()).then(|| pieces.join(" | "))
 }
 
-fn compression_label(compression: CompressionAlgo, level: Option<i32>) -> String {
+fn compression_label(compression: CompressionAlgo, level: Option<i32>, extreme: bool) -> String {
     let name = match compression {
         CompressionAlgo::Lz4 => "lz4",
         CompressionAlgo::Lzma => "lzma",
         CompressionAlgo::Zstd => "zstd",
     };
 
-    match level {
-        Some(level) => format!("{name}/{level}"),
-        None => name.to_string(),
+    match (level, compression == CompressionAlgo::Lzma && extreme) {
+        (Some(level), true) => format!("{name}/{level}+extreme"),
+        (Some(level), false) => format!("{name}/{level}"),
+        (None, true) => format!("{name}+extreme"),
+        (None, false) => name.to_string(),
     }
 }
 

@@ -13,7 +13,7 @@ const LZMA_MIN_LEVEL: i32 = 1;
 const LZMA_MAX_LEVEL: i32 = 9;
 
 #[inline]
-fn resolve_level(level: Option<i32>) -> Result<u32> {
+fn resolve_level(level: Option<i32>, extreme: bool) -> Result<u32> {
     let level = level.unwrap_or(LZMA_DEFAULT_LEVEL);
     if !(LZMA_MIN_LEVEL..=LZMA_MAX_LEVEL).contains(&level) {
         return Err(OxideError::CompressionError(format!(
@@ -21,7 +21,7 @@ fn resolve_level(level: Option<i32>) -> Result<u32> {
         )));
     }
 
-    let level = if level == LZMA_MAX_LEVEL {
+    let level = if extreme {
         (level as u32) | PRESET_EXTREME
     } else {
         level as u32
@@ -31,22 +31,28 @@ fn resolve_level(level: Option<i32>) -> Result<u32> {
 
 pub fn apply(data: &[u8], level: Option<i32>) -> Result<Vec<u8>> {
     let mut scratch = LzmaScratch::default();
-    apply_with_scratch(data, level, &mut scratch)
+    apply_with_scratch(data, level, false, &mut scratch)
 }
 
 pub(crate) fn apply_with_scratch(
     data: &[u8],
     level: Option<i32>,
+    extreme: bool,
     scratch: &mut LzmaScratch,
 ) -> Result<Vec<u8>> {
     let mut output = scratch.take_output();
-    apply_into_vec(data, level, &mut output)?;
+    apply_into_vec(data, level, extreme, &mut output)?;
     Ok(output)
 }
 
-pub(crate) fn apply_into_vec(data: &[u8], level: Option<i32>, output: &mut Vec<u8>) -> Result<()> {
+pub(crate) fn apply_into_vec(
+    data: &[u8],
+    level: Option<i32>,
+    extreme: bool,
+    output: &mut Vec<u8>,
+) -> Result<()> {
     output.clear();
-    let mut encoder = XzEncoder::new(data, resolve_level(level)?);
+    let mut encoder = XzEncoder::new(data, resolve_level(level, extreme)?);
     encoder
         .read_to_end(output)
         .map_err(|err| OxideError::CompressionError(format!("lzma encode failed: {err}")))?;
@@ -75,4 +81,22 @@ pub(crate) fn reverse_into_vec(data: &[u8], output: &mut Vec<u8>) -> Result<()> 
         .read_to_end(output)
         .map_err(|err| OxideError::DecompressionError(format!("lzma decode failed: {err}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PRESET_EXTREME, resolve_level};
+
+    #[test]
+    fn plain_level_nine_does_not_enable_extreme() {
+        assert_eq!(resolve_level(Some(9), false).expect("resolve level"), 9);
+    }
+
+    #[test]
+    fn explicit_extreme_sets_extreme_bit() {
+        assert_eq!(
+            resolve_level(Some(9), true).expect("resolve level"),
+            9 | PRESET_EXTREME
+        );
+    }
 }
