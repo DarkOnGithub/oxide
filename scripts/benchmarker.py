@@ -69,6 +69,7 @@ class Settings:
     threads: int
     passes: int
     skip_extract: bool
+    drop_caches: bool
     rebuild_oxide: bool
     modes: tuple[str, ...]
     squashfs_block_size: str | None
@@ -243,6 +244,13 @@ def parse_args() -> Settings:
         default=env_value("BENCHMARK_SKIP_EXTRACT", "0") == "1",
     )
     parser.add_argument(
+        "--no-drop-caches",
+        dest="drop_caches",
+        action="store_false",
+        help="Do not clear OS caches between benchmark steps.",
+    )
+    parser.set_defaults(drop_caches=True)
+    parser.add_argument(
         "--rebuild-oxide",
         action="store_true",
         default=True,
@@ -291,6 +299,7 @@ def parse_args() -> Settings:
         threads=args.threads,
         passes=args.passes,
         skip_extract=args.skip_extract,
+        drop_caches=args.drop_caches,
         rebuild_oxide=args.rebuild_oxide,
         modes=tuple(args.modes),
         squashfs_block_size=squashfs_block_size,
@@ -1107,6 +1116,7 @@ def print_run_header(
             f"workers: [cyan]{settings.threads}[/cyan]\n"
             f"passes: [cyan]{settings.passes}[/cyan]  threads: [cyan]{settings.threads}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
+            f"drop caches: [cyan]{'yes' if settings.drop_caches else 'no'}[/cyan]\n"
             f"shuffle seed: [cyan]{settings.shuffle_seed}[/cyan]\n"
             f"telemetry: [cyan]{telemetry_run_dir}[/cyan]"
         ),
@@ -1692,7 +1702,8 @@ def run_bench_with_telemetry(
             rng.shuffle(tool_groups)
 
             for _tool_name, archive_step, extract_step in tool_groups:
-                drop_caches()
+                if settings.drop_caches:
+                    drop_caches()
                 console.print(
                     f"[bold]{archive_step.tool} archive[/bold] ({unit.mode}, workers={unit.workers})"
                 )
@@ -1708,7 +1719,8 @@ def run_bench_with_telemetry(
                 )
 
                 if extract_step is not None:
-                    drop_caches()
+                    if settings.drop_caches:
+                        drop_caches()
                     console.print(
                         f"[bold]{extract_step.tool} extract[/bold] ({unit.mode}, workers={unit.workers})"
                     )
