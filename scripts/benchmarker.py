@@ -67,6 +67,7 @@ class Settings:
     oxide_extract_dir: Path
     squashfs_extract_dir: Path
     threads: int
+    worker_modes: tuple[str, ...]
     passes: int
     skip_extract: bool
     drop_caches: bool
@@ -232,6 +233,15 @@ def parse_args() -> Settings:
         "--threads", type=int, default=int(env_value("BENCHMARK_THREADS", "16"))
     )
     parser.add_argument(
+        "--worker-modes",
+        nargs="+",
+        default=None,
+        help=(
+            "Oxide worker configurations to benchmark. Use 'auto' (or 0) to omit "
+            "--workers. Defaults to: auto plus the explicit --threads value."
+        ),
+    )
+    parser.add_argument(
         "--passes", type=int, default=int(env_value("BENCHMARK_PASSES", "5"))
     )
     parser.add_argument(
@@ -284,6 +294,7 @@ def parse_args() -> Settings:
         else random.randint(0, 2**31 - 1)
     )
     squashfs_block_size = args.squashfs_block_size or None
+    worker_modes = normalize_worker_modes(args.worker_modes, args.threads)
 
     return Settings(
         source=Path(args.source),
@@ -293,6 +304,7 @@ def parse_args() -> Settings:
         oxide_extract_dir=Path(args.oxide_extract_dir),
         squashfs_extract_dir=Path(args.squashfs_extract_dir),
         threads=args.threads,
+        worker_modes=worker_modes,
         passes=args.passes,
         skip_extract=args.skip_extract,
         drop_caches=args.drop_caches,
@@ -302,6 +314,38 @@ def parse_args() -> Settings:
         telemetry_dir=Path(args.telemetry_dir),
         shuffle_seed=shuffle_seed,
     )
+
+
+def normalize_worker_modes(
+    raw_modes: Sequence[str] | None, default_threads: int
+) -> tuple[str, ...]:
+    if not raw_modes:
+        raw_modes = ("auto", str(default_threads))
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_mode in raw_modes:
+        value = raw_mode.strip().lower()
+        if value in {"auto", "0"}:
+            mode = "auto"
+        else:
+            try:
+                parsed = int(value)
+            except ValueError as exc:
+                raise SystemExit(
+                    f"Invalid worker mode '{raw_mode}'. Use 'auto' or a positive integer."
+                ) from exc
+            if parsed <= 0:
+                raise SystemExit(
+                    f"Invalid worker mode '{raw_mode}'. Use 'auto' or a positive integer."
+                )
+            mode = str(parsed)
+
+        if mode not in seen:
+            seen.add(mode)
+            normalized.append(mode)
+
+    return tuple(normalized)
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -479,6 +523,10 @@ def parse_scalar_value(label: str, value: str) -> int | float | str | None:
         "inflight_per_worker",
         "inflight_worker",
         "writer_queue",
+        "decode_queue_peak",
+        "decode_result_queue_peak",
+        "ordered_write_queue_peak",
+        "writer_peak",
         "reorder_limit",
         "reorder_peak",
     }:
@@ -489,6 +537,7 @@ def parse_scalar_value(label: str, value: str) -> int | float | str | None:
     if normalized in {
         "configured_inflight",
         "max_inflight_bytes",
+        "reorder_bytes_peak",
     }:
         return parse_bytes_text(raw) or raw
     if normalized == "stages":
@@ -535,7 +584,7 @@ def parse_stage_summary(summary: str) -> dict[str, int]:
         if " " not in item:
             continue
         label, duration = item.rsplit(" ", 1)
-        stages[label.strip()] = parse_duration_to_us(duration)
+        stages[normalize_key(label)] = parse_duration_to_us(duration)
     return stages
 
 
@@ -602,8 +651,13 @@ def parse_oxide_telemetry(stdout: str) -> dict[str, object]:
             "configured_inflight",
             "max_inflight_bytes",
             "writer_queue",
+            "decode_queue_peak",
+            "decode_result_queue_peak",
+            "ordered_write_queue_peak",
+            "writer_peak",
             "reorder_limit",
             "reorder_peak",
+            "reorder_bytes_peak",
         )
         if key in runtime
     }
@@ -1103,14 +1157,15 @@ def print_run_header(
     console: Console, settings: Settings, telemetry_run_dir: Path, source_bytes: int
 ) -> None:
     squashfs_policy = settings.squashfs_block_size or "mode-matched"
+    worker_modes = ", ".join(settings.worker_modes)
     panel = Panel.fit(
         Text.from_markup(
             f"[bold]Benchmark run[/bold]\n"
             f"source: [cyan]{settings.source}[/cyan]\n"
             f"source size: [cyan]{format_bytes(source_bytes)}[/cyan]\n"
             f"modes: [cyan]{', '.join(settings.modes)}[/cyan]\n"
-            f"workers: [cyan]{settings.threads}[/cyan]\n"
-            f"passes: [cyan]{settings.passes}[/cyan]  threads: [cyan]{settings.threads}[/cyan]\n"
+            f"worker modes: [cyan]{worker_modes}[/cyan]\n"
+            f"passes: [cyan]{settings.passes}[/cyan]  baseline threads: [cyan]{settings.threads}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
             f"drop caches: [cyan]{'yes' if settings.drop_caches else 'no'}[/cyan]\n"
             f"shuffle seed: [cyan]{settings.shuffle_seed}[/cyan]\n"
@@ -1392,6 +1447,7 @@ def sevenzip_archive_command(
         f"-mmt={mmt}",
         "-snl",  # Store Symbolic Links
         "-snh",  # Store Hard Links
+        "-snld",
         str(settings.squashfs_output.with_suffix(".7z")),
         str(settings.source),
     ]
@@ -1461,63 +1517,157 @@ def baseline_steps(
 
 def build_run_units(settings: Settings) -> list[RunUnit]:
     units: list[RunUnit] = []
-    workers = str(settings.threads)
-    for mode in settings.modes:
-        mode_config = MODE_CONFIGS.get(mode)
-        if mode_config is None:
-            raise SystemExit(f"Unknown mode: {mode}")
+    for workers in settings.worker_modes:
+        for mode in settings.modes:
+            mode_config = MODE_CONFIGS.get(mode)
+            if mode_config is None:
+                raise SystemExit(f"Unknown mode: {mode}")
 
-        baseline_archive_step, baseline_extract_step = baseline_steps(
-            settings, mode, mode_config, workers
-        )
-        oxide_archive_step = Step(
-            "oxide",
-            "archive",
-            workers,
-            settings.oxide_output,
-            oxide_archive_command,
-        )
-        oxide_extract_step = Step(
-            "oxide",
-            "extract",
-            workers,
-            settings.oxide_extract_dir,
-            oxide_extract_command,
-            cleanup_targets=(settings.oxide_output, settings.oxide_extract_dir),
-        )
-        if settings.skip_extract:
+            baseline_archive_step, baseline_extract_step = baseline_steps(
+                settings, mode, mode_config, workers
+            )
             oxide_archive_step = Step(
-                oxide_archive_step.tool,
-                oxide_archive_step.phase,
-                oxide_archive_step.workers,
-                oxide_archive_step.output_path,
-                oxide_archive_step.command_builder,
-                cleanup_targets=(oxide_archive_step.output_path,),
+                "oxide",
+                "archive",
+                workers,
+                settings.oxide_output,
+                oxide_archive_command,
             )
-            baseline_archive_step = Step(
-                baseline_archive_step.tool,
-                baseline_archive_step.phase,
-                baseline_archive_step.workers,
-                baseline_archive_step.output_path,
-                baseline_archive_step.command_builder,
-                cleanup_targets=(baseline_archive_step.output_path,),
+            oxide_extract_step = Step(
+                "oxide",
+                "extract",
+                workers,
+                settings.oxide_extract_dir,
+                oxide_extract_command,
+                cleanup_targets=(settings.oxide_output, settings.oxide_extract_dir),
             )
-            oxide_extract_step = None
-            baseline_extract_step = None
+            if settings.skip_extract:
+                oxide_archive_step = Step(
+                    oxide_archive_step.tool,
+                    oxide_archive_step.phase,
+                    oxide_archive_step.workers,
+                    oxide_archive_step.output_path,
+                    oxide_archive_step.command_builder,
+                    cleanup_targets=(oxide_archive_step.output_path,),
+                )
+                baseline_archive_step = Step(
+                    baseline_archive_step.tool,
+                    baseline_archive_step.phase,
+                    baseline_archive_step.workers,
+                    baseline_archive_step.output_path,
+                    baseline_archive_step.command_builder,
+                    cleanup_targets=(baseline_archive_step.output_path,),
+                )
+                oxide_extract_step = None
+                baseline_extract_step = None
 
-        units.append(
-            RunUnit(
-                mode=mode,
-                workers=workers,
-                mode_config=mode_config,
-                oxide_archive=oxide_archive_step,
-                oxide_extract=oxide_extract_step,
-                baseline_archive=baseline_archive_step,
-                baseline_extract=baseline_extract_step,
+            units.append(
+                RunUnit(
+                    mode=mode,
+                    workers=workers,
+                    mode_config=mode_config,
+                    oxide_archive=oxide_archive_step,
+                    oxide_extract=oxide_extract_step,
+                    baseline_archive=baseline_archive_step,
+                    baseline_extract=baseline_extract_step,
+                )
             )
-        )
 
     return units
+
+
+def _numeric_summary(
+    values: Sequence[int | float], digits: int = 3
+) -> dict[str, int | float]:
+    if not values:
+        return {}
+
+    if all(isinstance(value, int) for value in values):
+        ints = [int(value) for value in values]
+        return {
+            "min": min(ints),
+            "avg": round(statistics.mean(ints)),
+            "max": max(ints),
+        }
+
+    floats = [float(value) for value in values]
+    return {
+        "min": round(min(floats), digits),
+        "avg": round(statistics.mean(floats), digits),
+        "max": round(max(floats), digits),
+    }
+
+
+def build_oxide_telemetry_summaries(
+    results: Sequence[ResultRow],
+) -> list[dict[str, object]]:
+    grouped: dict[
+        tuple[str, str, str],
+        dict[str, list[int | float]],
+    ] = {}
+
+    for row in results:
+        if row.tool != "oxide" or not row.telemetry_path:
+            continue
+
+        telemetry_path = Path(row.telemetry_path)
+        if not telemetry_path.exists():
+            continue
+
+        payload = json.loads(telemetry_path.read_text(encoding="utf-8"))
+        runtime = payload.get("runtime") or {}
+        stage_timings = payload.get("stage_timings") or {}
+        queue_peaks = payload.get("queue_peaks") or {}
+        key = (row.phase, row.mode, row.workers)
+        bucket = grouped.setdefault(key, {})
+
+        effective_cores = runtime.get("effective_cores")
+        if isinstance(effective_cores, (int, float)):
+            bucket.setdefault("effective_cores", []).append(float(effective_cores))
+
+        for stage_key in (
+            "writer_enqueue_blocked",
+            "output_create",
+            "output_metadata",
+            "output_flush",
+        ):
+            value = stage_timings.get(stage_key)
+            if isinstance(value, int):
+                bucket.setdefault(f"stage:{stage_key}", []).append(value)
+
+        for queue_key, value in queue_peaks.items():
+            if isinstance(value, int):
+                bucket.setdefault(f"queue:{queue_key}", []).append(value)
+
+    summaries: list[dict[str, object]] = []
+    for (phase, mode, workers), values in sorted(grouped.items()):
+        stage_summaries = {
+            key.split(":", 1)[1]: _numeric_summary(series)
+            for key, series in values.items()
+            if key.startswith("stage:")
+        }
+        queue_summaries = {
+            key.split(":", 1)[1]: _numeric_summary(series)
+            for key, series in values.items()
+            if key.startswith("queue:")
+        }
+
+        summary: dict[str, object] = {
+            "tool": "oxide",
+            "phase": phase,
+            "mode": mode,
+            "workers": workers,
+            "samples": len(next(iter(values.values()))) if values else 0,
+        }
+        if "effective_cores" in values:
+            summary["effective_cores"] = _numeric_summary(values["effective_cores"])
+        if stage_summaries:
+            summary["stage_timings_us"] = stage_summaries
+        if queue_summaries:
+            summary["queue_peaks"] = queue_summaries
+        summaries.append(summary)
+
+    return summaries
 
 
 def record_step(
@@ -1663,6 +1813,7 @@ def run_bench_with_telemetry(
             "oxide_output": str(settings.oxide_output),
             "squashfs_output": str(settings.squashfs_output),
             "threads": settings.threads,
+            "worker_modes": list(settings.worker_modes),
             "passes": settings.passes,
             "skip_extract": settings.skip_extract,
             "rebuild_oxide": settings.rebuild_oxide,
@@ -1793,8 +1944,12 @@ def main() -> int:
                         "comparisons": [
                             comparison.__dict__ for comparison in comparisons
                         ],
+                        "oxide_telemetry_summaries": build_oxide_telemetry_summaries(
+                            results
+                        ),
                         "shuffle_seed": settings.shuffle_seed,
                         "workers": settings.threads,
+                        "worker_modes": list(settings.worker_modes),
                         "host_telemetry": True,
                     }
                 )
