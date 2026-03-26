@@ -11,8 +11,8 @@ use crossbeam_channel::{Receiver, TryRecvError, bounded};
 
 use crate::buffer::{BufferPool, PooledBuffer};
 use crate::compression::CompressionScratchArena;
-use crate::dictionary::ArchiveDictionaryBank;
 use crate::core::WorkerRuntimeSnapshot;
+use crate::dictionary::ArchiveDictionaryBank;
 use crate::format::{ArchiveReader, ChunkDescriptor, GlobalHeader};
 use crate::telemetry::{ReportValue, RunTelemetryOptions, TelemetrySink};
 use crate::types::Result;
@@ -28,7 +28,7 @@ use super::telemetry::*;
 use super::types::*;
 
 const DECODE_QUEUE_MULTIPLIER: usize = 4;
-const ORDERED_WRITE_QUEUE_MULTIPLIER: usize = 1;
+const ORDERED_WRITE_QUEUE_MULTIPLIER: usize = 4;
 const REORDER_PENDING_MULTIPLIER: usize = 2;
 const RESULT_DRAIN_BUDGET: usize = 32;
 
@@ -1154,10 +1154,8 @@ pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Res
                 algo: compression_meta.algo,
                 raw_len: Some(header.raw_len as usize),
                 dictionary_id: compression_meta.dictionary_id,
-                dictionary: dictionary_bank.dictionary_bytes(
-                    compression_meta.dictionary_id,
-                    compression_meta.algo,
-                ),
+                dictionary: dictionary_bank
+                    .dictionary_bytes(compression_meta.dictionary_id, compression_meta.algo),
             },
             &mut scratch,
             &mut decoded,
@@ -1170,10 +1168,8 @@ pub fn decode_block_payload(header: ChunkDescriptor, block_data: Vec<u8>) -> Res
                 algo: compression_meta.algo,
                 raw_len: Some(header.raw_len as usize),
                 dictionary_id: compression_meta.dictionary_id,
-                dictionary: dictionary_bank.dictionary_bytes(
-                    compression_meta.dictionary_id,
-                    compression_meta.algo,
-                ),
+                dictionary: dictionary_bank
+                    .dictionary_bytes(compression_meta.dictionary_id, compression_meta.algo),
             },
             &mut scratch,
         )?
@@ -1204,10 +1200,8 @@ fn decode_block_payload_with_scratch(
                 algo: compression_meta.algo,
                 raw_len: Some(header.raw_len as usize),
                 dictionary_id: compression_meta.dictionary_id,
-                dictionary: dictionary_bank.dictionary_bytes(
-                    compression_meta.dictionary_id,
-                    compression_meta.algo,
-                ),
+                dictionary: dictionary_bank
+                    .dictionary_bytes(compression_meta.dictionary_id, compression_meta.algo),
             },
             scratch,
             decoded.as_mut_vec(),
@@ -1221,10 +1215,8 @@ fn decode_block_payload_with_scratch(
                     algo: compression_meta.algo,
                     raw_len: Some(header.raw_len as usize),
                     dictionary_id: compression_meta.dictionary_id,
-                    dictionary: dictionary_bank.dictionary_bytes(
-                        compression_meta.dictionary_id,
-                        compression_meta.algo,
-                    ),
+                    dictionary: dictionary_bank
+                        .dictionary_bytes(compression_meta.dictionary_id, compression_meta.algo),
                 },
                 scratch,
             )?,

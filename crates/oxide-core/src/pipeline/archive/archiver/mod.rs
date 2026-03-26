@@ -1,6 +1,6 @@
 use crate::dictionary::{ArchiveDictionaryBank, ArchiveDictionaryMode, DictionaryTrainer};
 use crate::format::{
-    should_force_raw_storage, ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter,
+    ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter, should_force_raw_storage,
 };
 use crate::io::{ChunkingPolicy, InputScanner};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};

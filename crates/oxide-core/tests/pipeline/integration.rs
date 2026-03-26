@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchiveDictionaryMode, ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig,
-    ArchiveProgressEvent, ArchiveReader, BufferPool, CompressionAlgo, ExtractProgressEvent,
-    ReportValue, RunTelemetryOptions, TelemetryEvent, TelemetrySink, CHUNK_TABLE_HEADER_SIZE,
-    FOOTER_SIZE,
+    ArchiveProgressEvent, ArchiveReader, BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo,
+    ExtractProgressEvent, FOOTER_SIZE, ReportValue, RunTelemetryOptions, TelemetryEvent,
+    TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -206,8 +206,8 @@ fn pipeline_seekable_archive_path_roundtrips_file_output() -> Result<(), Box<dyn
 }
 
 #[test]
-fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_incompressible_fixture(256 * 1024);
     let file = write_fixture(&data)?;
 
@@ -252,8 +252,8 @@ fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller(
 }
 
 #[test]
-fn pipeline_forces_raw_storage_for_known_compressed_extensions(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_forces_raw_storage_for_known_compressed_extensions()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let root = tempfile::tempdir()?;
     let input = root.path().join("fixture.jpg");
@@ -329,8 +329,8 @@ fn pipeline_forces_raw_storage_for_known_extensions() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn directory_archives_split_batches_when_raw_storage_policy_changes(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn directory_archives_split_batches_when_raw_storage_policy_changes()
+-> Result<(), Box<dyn std::error::Error>> {
     let root = tempfile::tempdir()?;
     let text = build_text_fixture(8 * 1024);
     let mut image = build_text_fixture(8 * 1024);
@@ -414,8 +414,8 @@ fn pipeline_writes_blocks_in_strict_id_order() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn pipeline_records_fast_mode_chunk_headers_have_no_dictionary_ids(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_records_fast_mode_chunk_headers_have_no_dictionary_ids()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -441,8 +441,8 @@ fn pipeline_records_fast_mode_chunk_headers_have_no_dictionary_ids(
 }
 
 #[test]
-fn pipeline_records_balanced_mode_chunk_headers_have_no_dictionary_ids(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_records_balanced_mode_chunk_headers_have_no_dictionary_ids()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -471,8 +471,8 @@ fn pipeline_records_balanced_mode_chunk_headers_have_no_dictionary_ids(
 }
 
 #[test]
-fn pipeline_records_ultra_mode_chunk_headers_have_no_dictionary_ids(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn pipeline_records_ultra_mode_chunk_headers_have_no_dictionary_ids()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(64 * 1024);
     let file = write_fixture(&data)?;
 
@@ -691,8 +691,8 @@ fn archive_sets_directory_source_flag() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn directory_archive_fast_mode_chunk_headers_have_no_dictionary_ids(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn directory_archive_fast_mode_chunk_headers_have_no_dictionary_ids()
+-> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(
         &source,
@@ -727,8 +727,8 @@ fn directory_archive_fast_mode_chunk_headers_have_no_dictionary_ids(
 }
 
 #[test]
-fn directory_archive_records_requested_compression_algorithm(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn directory_archive_records_requested_compression_algorithm()
+-> Result<(), Box<dyn std::error::Error>> {
     let source = TempDir::new()?;
     write_directory_file(&source, "sample.txt", &build_text_fixture(64 * 1024))?;
 
@@ -969,8 +969,8 @@ fn extract_path_filtered_handles_skipped_prefix_blocks() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn extract_path_filtered_with_regex_restores_matching_paths(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn extract_path_filtered_with_regex_restores_matching_paths()
+-> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     write_directory_file(&source, "assets/logo.png", b"png")?;
     write_directory_file(&source, "docs/readme.txt", b"txt")?;
@@ -1036,9 +1036,11 @@ fn extract_path_filtered_rejects_file_archives() -> Result<(), Box<dyn std::erro
         )
         .expect_err("file archives should reject path filters");
 
-    assert!(error
-        .to_string()
-        .contains("path or regex filters require a directory archive"));
+    assert!(
+        error
+            .to_string()
+            .contains("path or regex filters require a directory archive")
+    );
     Ok(())
 }
 
@@ -1070,9 +1072,11 @@ fn extract_path_filtered_errors_when_no_paths_match() -> Result<(), Box<dyn std:
         )
         .expect_err("missing filters should fail");
 
-    assert!(error
-        .to_string()
-        .contains("path filters did not match any archive entries"));
+    assert!(
+        error
+            .to_string()
+            .contains("path filters did not match any archive entries")
+    );
     Ok(())
 }
 
@@ -1146,8 +1150,8 @@ fn archive_reader_exposes_file_manifest() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
-fn zstd_dictionary_mode_embeds_dictionary_bank_and_round_trips(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn zstd_dictionary_mode_embeds_dictionary_bank_and_round_trips()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(256 * 1024);
     let file = write_fixture(&data)?;
 
@@ -1255,6 +1259,51 @@ fn extract_directory_archive_preserves_entry_metadata() -> Result<(), Box<dyn st
     assert_unix_metadata_matches(
         &source.path().join("nested/data.bin"),
         &restored.join("nested/data.bin"),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn extract_directory_archive_preserves_empty_file_metadata()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = tempfile::tempdir()?;
+    std::fs::create_dir_all(source.path().join("nested"))?;
+    write_directory_file(&source, "nested/empty.bin", b"")?;
+    std::fs::set_permissions(
+        source.path().join("nested/empty.bin"),
+        std::fs::Permissions::from_mode(0o640),
+    )?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let restored_root = tempfile::tempdir()?;
+    let restored = restored_root.path().join("out");
+    pipeline.extract_path(
+        Cursor::new(archive),
+        &restored,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(
+        std::fs::read(restored.join("nested/empty.bin"))?,
+        Vec::<u8>::new()
+    );
+    assert_unix_metadata_matches(
+        &source.path().join("nested/empty.bin"),
+        &restored.join("nested/empty.bin"),
     )?;
     Ok(())
 }
@@ -1438,10 +1487,11 @@ fn directory_progress_reports_stable_block_total() -> Result<(), Box<dyn std::er
 
     let expected_total = sink.snapshots[0].blocks_total;
     assert!(expected_total > 0);
-    assert!(sink
-        .snapshots
-        .iter()
-        .all(|snapshot| snapshot.blocks_total == expected_total));
+    assert!(
+        sink.snapshots
+            .iter()
+            .all(|snapshot| snapshot.blocks_total == expected_total)
+    );
 
     let final_snapshot = sink.snapshots.last().expect("missing final snapshot");
     assert_eq!(final_snapshot.blocks_completed, final_snapshot.blocks_total);
@@ -1496,8 +1546,8 @@ fn extract_progress_reports_runtime_worker_snapshots() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn extract_archive_handles_queue_pressure_without_deadlock(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn extract_archive_handles_queue_pressure_without_deadlock()
+-> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(192 * 1024);
     let file = write_fixture(&data)?;
 

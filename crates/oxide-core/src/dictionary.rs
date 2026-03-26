@@ -36,7 +36,9 @@ impl DictionaryClass {
             1 => Ok(Self::Text),
             2 => Ok(Self::StructuredText),
             3 => Ok(Self::Binary),
-            _ => Err(OxideError::InvalidFormat("invalid archive dictionary class id")),
+            _ => Err(OxideError::InvalidFormat(
+                "invalid archive dictionary class id",
+            )),
         }
     }
 }
@@ -84,7 +86,11 @@ impl ArchiveDictionaryBank {
             .map(|dictionary| dictionary.bytes.as_slice())
     }
 
-    pub fn select_for_chunk(&self, algo: CompressionAlgo, source: &[u8]) -> Option<&ArchiveDictionary> {
+    pub fn select_for_chunk(
+        &self,
+        algo: CompressionAlgo,
+        source: &[u8],
+    ) -> Option<&ArchiveDictionary> {
         if algo != CompressionAlgo::Zstd || source.is_empty() {
             return None;
         }
@@ -163,7 +169,11 @@ impl DictionaryTrainer {
         samples.push(clipped);
     }
 
-    pub fn build(self, algo: CompressionAlgo, _level: Option<i32>) -> Result<ArchiveDictionaryBank> {
+    pub fn build(
+        self,
+        algo: CompressionAlgo,
+        _level: Option<i32>,
+    ) -> Result<ArchiveDictionaryBank> {
         if self.mode == ArchiveDictionaryMode::Off || algo != CompressionAlgo::Zstd {
             return Ok(ArchiveDictionaryBank::default());
         }
@@ -216,7 +226,10 @@ pub fn classify_sample(sample: &[u8]) -> DictionaryClass {
             }
             0x20..=0x7e => {
                 printable += 1;
-                if matches!(byte, b'{' | b'}' | b'[' | b']' | b':' | b',' | b'<' | b'>' | b'/' | b'=' | b'"') {
+                if matches!(
+                    byte,
+                    b'{' | b'}' | b'[' | b']' | b':' | b',' | b'<' | b'>' | b'/' | b'=' | b'"'
+                ) {
                     structured += 1;
                 }
             }
@@ -251,8 +264,14 @@ mod tests {
 
     #[test]
     fn classifier_detects_text_and_binary() {
-        assert_eq!(classify_sample(b"hello world\nhello world\n"), DictionaryClass::StructuredText);
-        assert_eq!(classify_sample(&[0, 159, 200, 1, 2, 3, 4]), DictionaryClass::Binary);
+        assert_eq!(
+            classify_sample(b"hello world\nhello world\n"),
+            DictionaryClass::StructuredText
+        );
+        assert_eq!(
+            classify_sample(&[0, 159, 200, 1, 2, 3, 4]),
+            DictionaryClass::Binary
+        );
     }
 
     #[test]
@@ -267,6 +286,9 @@ mod tests {
             .expect("dictionary bank should build");
 
         assert!(!bank.is_empty());
-        assert!(bank.dictionary(DictionaryClass::StructuredText.id(), CompressionAlgo::Zstd).is_some());
+        assert!(
+            bank.dictionary(DictionaryClass::StructuredText.id(), CompressionAlgo::Zstd)
+                .is_some()
+        );
     }
 }

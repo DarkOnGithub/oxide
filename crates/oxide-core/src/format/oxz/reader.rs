@@ -6,7 +6,7 @@ use crate::types::duration_to_us;
 use crate::{ArchiveSourceKind, OxideError, Result};
 
 use super::{
-    decode_chunk_table, ArchiveManifest, ArchiveMetadata, ChunkDescriptor, Footer, GlobalHeader,
+    ArchiveManifest, ArchiveMetadata, ChunkDescriptor, Footer, GlobalHeader, decode_chunk_table,
 };
 
 #[derive(Debug)]
