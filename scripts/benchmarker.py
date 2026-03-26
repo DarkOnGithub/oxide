@@ -55,7 +55,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 class ModeConfig:
     compression: str
     compression_level: str | None
-    oxide_block_size: str = "1M"
+    block_size: str = "1M"
 
 
 @dataclass(frozen=True)
@@ -162,18 +162,14 @@ class HostTelemetry:
 
 
 MODE_CONFIGS: dict[str, ModeConfig] = {
-    "fast": ModeConfig(
-        compression="lz4", compression_level=None, oxide_block_size="1M"
-    ),
+    "fast": ModeConfig(compression="lz4", compression_level=None, block_size="1M"),
     "balanced": ModeConfig(
-        compression="zstd", compression_level="6", oxide_block_size="2M"
+        compression="zstd",
+        compression_level="6",
+        block_size="1M",
     ),
-    "ultra": ModeConfig(
-        compression="lzma", compression_level="9", oxide_block_size="4M"
-    ),
-    "extreme": ModeConfig(
-        compression="lzma", compression_level="9", oxide_block_size="8M"
-    ),
+    "ultra": ModeConfig(compression="lzma", compression_level="9", block_size="4M"),
+    "extreme": ModeConfig(compression="lzma", compression_level="9", block_size="8M"),
 }
 
 MODE_BASELINES: dict[str, str] = {
@@ -1364,7 +1360,7 @@ def unsquashfs_extract_command(
 def mksquashfs_command(
     settings: Settings, mode: str, config: ModeConfig, workers: str
 ) -> list[str]:
-    block_size = settings.squashfs_block_size or config.oxide_block_size
+    block_size = settings.squashfs_block_size or config.block_size
     command = [
         resolve_tool("mksquashfs"),
         str(settings.source),
@@ -1392,7 +1388,7 @@ def sevenzip_archive_command(
         "-mx=9",
         "-ms=on",
         "-m0=LZMA2",
-        f"-md={config.oxide_block_size}",
+        f"-md={config.block_size}",
         f"-mmt={mmt}",
         "-snl",  # Store Symbolic Links
         "-snh",  # Store Hard Links
