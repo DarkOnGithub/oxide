@@ -58,6 +58,7 @@ pub fn file_manifest(path: &Path, size: u64) -> Result<ArchiveManifest> {
         name.to_string(),
         crate::ArchiveEntryKind::File,
         size,
+        None,
         &metadata,
         0,
     )?;

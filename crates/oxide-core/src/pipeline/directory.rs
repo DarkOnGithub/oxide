@@ -31,11 +31,18 @@ pub(super) struct DirectoryFileSpec {
     pub(super) size: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct DirectorySymlinkSpec {
+    pub(super) entry: DirectorySpec,
+    pub(super) target: String,
+}
+
 /// Result of a directory discovery operation.
 #[derive(Debug, Clone)]
 pub(super) struct DirectoryDiscovery {
     pub(super) root: PathBuf,
     pub(super) directories: Vec<DirectorySpec>,
+    pub(super) symlinks: Vec<DirectorySymlinkSpec>,
     pub(super) files: Vec<DirectoryFileSpec>,
     pub(super) input_bytes_total: u64,
 }
@@ -248,10 +255,11 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
     }
 
     let mut directories = Vec::<DirectorySpec>::new();
+    let mut symlinks = Vec::<DirectorySymlinkSpec>::new();
     let mut files = Vec::<DirectoryFileSpec>::new();
     let mut input_bytes_total = 0u64;
 
-    for entry in WalkDir::new(root) {
+    for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry.map_err(anyhow::Error::from)?;
         let path = entry.path();
         if path == root {
@@ -262,7 +270,7 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
             .strip_prefix(root)
             .map_err(|_| crate::OxideError::InvalidFormat("invalid relative path"))?
             .to_path_buf();
-        let metadata = fs::metadata(&path)?;
+        let metadata = fs::symlink_metadata(&path)?;
 
         if entry.file_type().is_dir() {
             directories.push(DirectorySpec {
@@ -271,6 +279,21 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
                 mtime: metadata_mtime(&metadata)?,
                 uid: metadata_uid(&metadata),
                 gid: metadata_gid(&metadata),
+            });
+        } else if entry.file_type().is_symlink() {
+            let target = fs::read_link(&path)?;
+            let target = target.to_str().ok_or(crate::OxideError::InvalidFormat(
+                "non-utf8 symlink target not supported",
+            ))?;
+            symlinks.push(DirectorySymlinkSpec {
+                entry: DirectorySpec {
+                    rel_path: relative_path_to_utf8(&rel_path)?,
+                    mode: metadata_mode(&metadata),
+                    mtime: metadata_mtime(&metadata)?,
+                    uid: metadata_uid(&metadata),
+                    gid: metadata_gid(&metadata),
+                },
+                target: target.to_string(),
             });
         } else if entry.file_type().is_file() {
             let full_path = path;
@@ -296,17 +319,19 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
             });
         } else {
             return Err(crate::OxideError::InvalidFormat(
-                "directory archive supports regular files/directories only",
+                "directory archive supports regular files, directories, and symlinks only",
             ));
         }
     }
 
     directories.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    symlinks.sort_by(|left, right| left.entry.rel_path.cmp(&right.entry.rel_path));
     files.sort_by(|left, right| left.entry.rel_path.cmp(&right.entry.rel_path));
 
     Ok(DirectoryDiscovery {
         root: root.to_path_buf(),
         directories,
+        symlinks,
         files,
         input_bytes_total,
     })
@@ -315,7 +340,9 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
 pub(super) fn manifest_from_discovery(
     discovery: &DirectoryDiscovery,
 ) -> crate::types::Result<crate::format::ArchiveManifest> {
-    let mut entries = Vec::with_capacity(discovery.directories.len() + discovery.files.len());
+    let mut entries = Vec::with_capacity(
+        discovery.directories.len() + discovery.symlinks.len() + discovery.files.len(),
+    );
     entries.extend(discovery.directories.iter().map(|directory| {
         ArchiveListingEntry::directory(
             directory.rel_path.clone(),
@@ -325,6 +352,23 @@ pub(super) fn manifest_from_discovery(
             directory.gid,
         )
     }));
+
+    entries.extend(
+        discovery
+            .symlinks
+            .iter()
+            .map(|symlink| ArchiveListingEntry {
+                path: symlink.entry.rel_path.clone(),
+                kind: crate::ArchiveEntryKind::Symlink,
+                target: Some(symlink.target.clone()),
+                size: 0,
+                mode: symlink.entry.mode,
+                mtime: symlink.entry.mtime,
+                uid: symlink.entry.uid,
+                gid: symlink.entry.gid,
+                content_offset: 0,
+            }),
+    );
 
     let mut content_offset = 0u64;
     for file in &discovery.files {
@@ -391,6 +435,9 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
     #[test]
     fn discovery_collects_sizes_in_one_pass() {
         let temp = tempdir().expect("tempdir");
@@ -404,10 +451,32 @@ mod tests {
 
         assert_eq!(discovery.directories.len(), 1);
         assert_eq!(discovery.directories[0].rel_path, "nested");
+        assert_eq!(discovery.symlinks.len(), 0);
         assert_eq!(discovery.files.len(), 2);
         assert_eq!(discovery.files[0].entry.rel_path, "nested/payload.bin");
         assert_eq!(discovery.files[1].entry.rel_path, "notes.txt");
         assert_eq!(discovery.input_bytes_total, 16);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_preserves_symlinks_without_following_them() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let nested = root.join("nested");
+        fs::create_dir(&nested).expect("create nested dir");
+        symlink(&nested, root.join("nested-link")).expect("create symlink");
+
+        let discovery = discover_directory_tree(root).expect("discover directory");
+
+        assert_eq!(discovery.directories.len(), 1);
+        assert_eq!(discovery.symlinks.len(), 1);
+        assert_eq!(discovery.symlinks[0].entry.rel_path, "nested-link");
+        assert_eq!(
+            discovery.symlinks[0].target,
+            nested.to_string_lossy().as_ref()
+        );
+        assert_eq!(discovery.files.len(), 0);
     }
 
     #[test]

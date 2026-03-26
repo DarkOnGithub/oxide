@@ -25,6 +25,8 @@ pub enum ArchiveEntryKind {
     File,
     /// Entry is a directory.
     Directory,
+    /// Entry is a symbolic link.
+    Symlink,
 }
 /// Cross-platform timestamp metadata stored for archive entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -84,6 +86,8 @@ pub struct ArchiveListingEntry {
     pub path: String,
     /// Entry kind.
     pub kind: ArchiveEntryKind,
+    /// Symbolic link target for symlink entries.
+    pub target: Option<String>,
     /// File size in bytes. Directory entries report `0`.
     pub size: u64,
     /// Unix file mode bits. Directory and file entries both preserve this.
@@ -103,6 +107,7 @@ impl ArchiveListingEntry {
         Self {
             path,
             kind: ArchiveEntryKind::Directory,
+            target: None,
             size: 0,
             mode,
             mtime,
@@ -124,6 +129,7 @@ impl ArchiveListingEntry {
         Self {
             path,
             kind: ArchiveEntryKind::File,
+            target: None,
             size,
             mode,
             mtime,
@@ -133,10 +139,32 @@ impl ArchiveListingEntry {
         }
     }
 
+    pub fn symlink(
+        path: String,
+        target: String,
+        metadata: &fs::Metadata,
+    ) -> crate::types::Result<Self> {
+        let mtime = ArchiveTimestamp::from_system_time(metadata.modified()?);
+        let mode = metadata_mode(metadata);
+        let (uid, gid) = metadata_owner_ids(metadata);
+        Ok(Self {
+            path,
+            kind: ArchiveEntryKind::Symlink,
+            target: Some(target),
+            size: 0,
+            mode,
+            mtime,
+            uid,
+            gid,
+            content_offset: 0,
+        })
+    }
+
     pub fn from_metadata(
         path: String,
         kind: ArchiveEntryKind,
         size: u64,
+        target: Option<String>,
         metadata: &fs::Metadata,
         content_offset: u64,
     ) -> crate::types::Result<Self> {
@@ -146,6 +174,19 @@ impl ArchiveListingEntry {
         Ok(match kind {
             ArchiveEntryKind::Directory => Self::directory(path, mode, mtime, uid, gid),
             ArchiveEntryKind::File => Self::file(path, size, mode, mtime, uid, gid, content_offset),
+            ArchiveEntryKind::Symlink => Self {
+                path,
+                kind: ArchiveEntryKind::Symlink,
+                target: Some(target.ok_or(crate::OxideError::InvalidFormat(
+                    "symlink entry requires a target",
+                ))?),
+                size: 0,
+                mode,
+                mtime,
+                uid,
+                gid,
+                content_offset: 0,
+            },
         })
     }
 
