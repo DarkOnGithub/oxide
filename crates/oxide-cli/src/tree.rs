@@ -26,6 +26,10 @@ pub fn print_archive_tree(archive_path: &Path, entries: &[ArchiveListingEntry]) 
         .iter()
         .filter(|entry| matches!(entry.kind, ArchiveEntryKind::Directory))
         .count();
+    let symlink_count = entries
+        .iter()
+        .filter(|entry| matches!(entry.kind, ArchiveEntryKind::Symlink))
+        .count();
     let payload_bytes = entries
         .iter()
         .filter(|entry| matches!(entry.kind, ArchiveEntryKind::File))
@@ -50,9 +54,10 @@ pub fn print_archive_tree(archive_path: &Path, entries: &[ArchiveListingEntry]) 
             StreamTarget::Stdout,
             Tone::Muted,
             &format!(
-                "{} entries | {} directories | {} files | {} payload",
+                "{} entries | {} directories | {} symlinks | {} files | {} payload",
                 entries.len(),
                 directory_count,
+                symlink_count,
                 file_count,
                 format_bytes(payload_bytes)
             )
@@ -144,6 +149,7 @@ fn format_mode(entry: &ArchiveListingEntry) -> String {
     let prefix = match entry.kind {
         ArchiveEntryKind::Directory => 'd',
         ArchiveEntryKind::File => '-',
+        ArchiveEntryKind::Symlink => 'l',
     };
     let mode = entry.mode;
     let bits = [

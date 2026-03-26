@@ -7,12 +7,13 @@ const MANIFEST_MAGIC: [u8; 4] = *b"OXM2";
 const MANIFEST_VERSION: u8 = 1;
 
 const ENTRY_FLAG_DIRECTORY: u8 = 1 << 0;
-const ENTRY_FLAG_MODE_PRESENT: u8 = 1 << 1;
-const ENTRY_FLAG_UID_PRESENT: u8 = 1 << 2;
-const ENTRY_FLAG_GID_PRESENT: u8 = 1 << 3;
-const ENTRY_FLAG_MTIME_SECONDS_PRESENT: u8 = 1 << 4;
-const ENTRY_FLAG_MTIME_NANOS_PRESENT: u8 = 1 << 5;
-const ENTRY_FLAG_RESERVED_MASK: u8 = 0b1100_0000;
+const ENTRY_FLAG_SYMLINK: u8 = 1 << 1;
+const ENTRY_FLAG_MODE_PRESENT: u8 = 1 << 2;
+const ENTRY_FLAG_UID_PRESENT: u8 = 1 << 3;
+const ENTRY_FLAG_GID_PRESENT: u8 = 1 << 4;
+const ENTRY_FLAG_MTIME_SECONDS_PRESENT: u8 = 1 << 5;
+const ENTRY_FLAG_MTIME_NANOS_PRESENT: u8 = 1 << 6;
+const ENTRY_FLAG_RESERVED_MASK: u8 = 1 << 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ArchiveManifest {
@@ -84,6 +85,7 @@ impl ArchiveManifest {
             let mut flags = match entry.kind {
                 ArchiveEntryKind::Directory => ENTRY_FLAG_DIRECTORY,
                 ArchiveEntryKind::File => 0,
+                ArchiveEntryKind::Symlink => ENTRY_FLAG_SYMLINK,
             };
 
             if entry.mode != previous_mode {
@@ -114,6 +116,20 @@ impl ArchiveManifest {
                     .map_err(|_| OxideError::InvalidFormat("manifest path length overflow"))?,
             );
             out.extend_from_slice(suffix);
+
+            if matches!(entry.kind, ArchiveEntryKind::Symlink) {
+                let target = entry.target.as_ref().ok_or(OxideError::InvalidFormat(
+                    "symlink manifest entry missing target",
+                ))?;
+                let target_bytes = target.as_bytes();
+                encode_varint(
+                    &mut out,
+                    u64::try_from(target_bytes.len()).map_err(|_| {
+                        OxideError::InvalidFormat("manifest target length overflow")
+                    })?,
+                );
+                out.extend_from_slice(target_bytes);
+            }
 
             if matches!(entry.kind, ArchiveEntryKind::File) {
                 encode_varint(&mut out, entry.size);
@@ -265,10 +281,37 @@ impl ArchiveManifest {
             let path = String::from_utf8(path_bytes.clone())
                 .map_err(|_| OxideError::InvalidFormat("archive manifest path is not utf8"))?;
 
-            let kind = if flags & ENTRY_FLAG_DIRECTORY != 0 {
-                ArchiveEntryKind::Directory
+            let kind_bits = flags & (ENTRY_FLAG_DIRECTORY | ENTRY_FLAG_SYMLINK);
+            let kind = match kind_bits {
+                0 => ArchiveEntryKind::File,
+                ENTRY_FLAG_DIRECTORY => ArchiveEntryKind::Directory,
+                ENTRY_FLAG_SYMLINK => ArchiveEntryKind::Symlink,
+                _ => {
+                    return Err(OxideError::InvalidFormat(
+                        "invalid archive manifest entry kind flags",
+                    ));
+                }
+            };
+            let target = if matches!(kind, ArchiveEntryKind::Symlink) {
+                let target_len = decode_varint(bytes, &mut cursor)?;
+                let target_len = usize::try_from(target_len)
+                    .map_err(|_| OxideError::InvalidFormat("manifest target length overflow"))?;
+                let target_end = cursor
+                    .checked_add(target_len)
+                    .ok_or(OxideError::InvalidFormat("manifest target range overflow"))?;
+                if target_end > bytes.len() {
+                    return Err(OxideError::InvalidFormat(
+                        "truncated archive manifest target data",
+                    ));
+                }
+                let target =
+                    String::from_utf8(bytes[cursor..target_end].to_vec()).map_err(|_| {
+                        OxideError::InvalidFormat("archive manifest symlink target is not utf8")
+                    })?;
+                cursor = target_end;
+                Some(target)
             } else {
-                ArchiveEntryKind::File
+                None
             };
             let size = if matches!(kind, ArchiveEntryKind::File) {
                 decode_varint(bytes, &mut cursor)?
@@ -326,6 +369,7 @@ impl ArchiveManifest {
 
             let entry_content_offset = match kind {
                 ArchiveEntryKind::Directory => 0,
+                ArchiveEntryKind::Symlink => 0,
                 ArchiveEntryKind::File => {
                     let offset = content_offset;
                     content_offset = content_offset
@@ -338,6 +382,7 @@ impl ArchiveManifest {
             entries.push(ArchiveListingEntry {
                 path,
                 kind,
+                target,
                 size,
                 mode,
                 mtime: ArchiveTimestamp {
@@ -380,6 +425,13 @@ fn validate_entries(entries: &[ArchiveListingEntry]) -> Result<()> {
                 if entry.size != 0 || entry.content_offset != 0 {
                     return Err(OxideError::InvalidFormat(
                         "directory manifest entries must not carry content ranges",
+                    ));
+                }
+            }
+            ArchiveEntryKind::Symlink => {
+                if entry.size != 0 || entry.content_offset != 0 || entry.target.is_none() {
+                    return Err(OxideError::InvalidFormat(
+                        "symlink manifest entries must not carry content ranges",
                     ));
                 }
             }
@@ -475,6 +527,20 @@ mod tests {
                 100,
                 0,
             ),
+            ArchiveListingEntry {
+                path: "nested/link".to_string(),
+                kind: ArchiveEntryKind::Symlink,
+                target: Some("../shared.txt".to_string()),
+                size: 0,
+                mode: 0o777,
+                mtime: ArchiveTimestamp {
+                    seconds: 1_710_000_456,
+                    nanoseconds: 7,
+                },
+                uid: 1000,
+                gid: 100,
+                content_offset: 0,
+            },
         ]);
 
         let bytes = manifest.encode().expect("encode manifest");
@@ -482,6 +548,11 @@ mod tests {
 
         assert_eq!(decoded, manifest);
         assert_eq!(decoded.entries()[0].kind, ArchiveEntryKind::Directory);
-        assert_eq!(decoded.entries()[1].content_offset, 0);
+        assert_eq!(decoded.entries()[1].kind, ArchiveEntryKind::File);
+        assert_eq!(decoded.entries()[2].kind, ArchiveEntryKind::Symlink);
+        assert_eq!(
+            decoded.entries()[2].target.as_deref(),
+            Some("../shared.txt")
+        );
     }
 }

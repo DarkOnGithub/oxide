@@ -247,6 +247,18 @@ impl DirectoryRestoreWriter {
                         entry,
                     });
                 }
+                crate::ArchiveEntryKind::Symlink => {
+                    let out_path = directory::join_safe(&self.root, &entry.path)?;
+                    if let Some(parent) = out_path.parent() {
+                        self.ensure_directory_exists(parent)?;
+                    }
+
+                    let target = entry.target.as_deref().ok_or(OxideError::InvalidFormat(
+                        "symlink manifest entry missing target",
+                    ))?;
+                    create_symlink(&out_path, target)?;
+                    self.defer_metadata(out_path, entry);
+                }
             }
         }
 
@@ -444,9 +456,18 @@ fn path_matches_filter(path: &str, filter: &str) -> bool {
 }
 
 pub(crate) fn apply_entry_metadata(path: &Path, entry: &crate::ArchiveListingEntry) -> Result<()> {
-    apply_owner(path, entry.uid, entry.gid)?;
-    apply_mode(path, entry.mode)?;
-    apply_mtime(path, entry.mtime)?;
+    match entry.kind {
+        crate::ArchiveEntryKind::Symlink => {
+            apply_owner_nofollow(path, entry.uid, entry.gid)?;
+            apply_mode_symlink(path, entry.mode)?;
+            apply_mtime_nofollow(path, entry.mtime)?;
+        }
+        _ => {
+            apply_owner(path, entry.uid, entry.gid)?;
+            apply_mode(path, entry.mode)?;
+            apply_mtime(path, entry.mtime)?;
+        }
+    }
     Ok(())
 }
 
@@ -494,6 +515,31 @@ fn apply_owner(_: &Path, _: u32, _: u32) -> Result<()> {
 }
 
 #[cfg(unix)]
+fn apply_owner_nofollow(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    use std::ffi::CString;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| OxideError::InvalidFormat("path contains interior nul byte"))?;
+    let status = unsafe { libc::lchown(path.as_ptr(), uid, gid) };
+    if status == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EPERM | libc::EACCES | libc::ENOTSUP | libc::EINVAL) => Ok(()),
+        _ => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_owner_nofollow(_: &Path, _: u32, _: u32) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
 fn apply_mtime(path: &Path, mtime: crate::ArchiveTimestamp) -> Result<()> {
     use std::ffi::CString;
     use std::io;
@@ -522,4 +568,110 @@ fn apply_mtime(path: &Path, mtime: crate::ArchiveTimestamp) -> Result<()> {
 #[cfg(not(unix))]
 fn apply_mtime(_: &Path, _: crate::ArchiveTimestamp) -> Result<()> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn apply_mtime_nofollow(path: &Path, mtime: crate::ArchiveTimestamp) -> Result<()> {
+    use std::ffi::CString;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| OxideError::InvalidFormat("path contains interior nul byte"))?;
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: mtime.seconds as libc::time_t,
+            tv_nsec: mtime.nanoseconds as libc::c_long,
+        },
+    ];
+    let status = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EPERM | libc::EACCES | libc::ENOTSUP | libc::EINVAL) => Ok(()),
+            _ => Err(error.into()),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_mtime_nofollow(_: &Path, _: crate::ArchiveTimestamp) -> Result<()> {
+    Ok(())
+}
+
+fn apply_mode_symlink(_: &Path, _: u32) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(path: &Path, target: &str) -> Result<()> {
+    std::os::unix::fs::symlink(target, path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_symlink(path: &Path, target: &str) -> Result<()> {
+    use std::fs;
+
+    let resolved_target = path.parent().unwrap_or_else(|| Path::new("")).join(target);
+    if fs::metadata(&resolved_target)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+    {
+        std::os::windows::fs::symlink_dir(target, path)?;
+    } else {
+        std::os::windows::fs::symlink_file(target, path)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DirectoryRestoreWriter;
+    use crate::{ArchiveEntryKind, ArchiveListingEntry, ArchiveManifest, ArchiveTimestamp};
+    use std::fs;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_creates_symlink_entries() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let manifest = ArchiveManifest::new(vec![ArchiveListingEntry {
+            path: "link".to_string(),
+            kind: ArchiveEntryKind::Symlink,
+            target: Some("target.txt".to_string()),
+            size: 0,
+            mode: 0o777,
+            mtime: ArchiveTimestamp::default(),
+            uid: 0,
+            gid: 0,
+            content_offset: 0,
+        }]);
+
+        let mut writer = DirectoryRestoreWriter::create(root, manifest).expect("create writer");
+        writer.finish().expect("finish restore");
+
+        let link_path = root.join("link");
+        let metadata = fs::symlink_metadata(&link_path).expect("symlink metadata");
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read_link(&link_path).expect("read link"),
+            Path::new("target.txt")
+        );
+    }
 }
