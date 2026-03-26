@@ -175,7 +175,8 @@ where
     let producer_force_raw_storage = file_force_raw_storage;
     let producer_block_size = block_size;
     let producer_compression_plan = ChunkEncodingPlan::new(config.compression_algo)
-        .with_level(config.performance.compression_level);
+        .with_level(config.performance.compression_level)
+        .with_lzma_extreme(config.performance.lzma_extreme);
     let stream_read_buffer_size = config.performance.directory_stream_read_buffer_size.max(1);
     let producer_threads = config.performance.producer_threads.max(1);
     let mmap_threshold = config.performance.directory_mmap_threshold_bytes.max(1);
@@ -671,6 +672,7 @@ where
         block_size,
         raw_passthrough_blocks,
         config.performance.compression_level,
+        config.performance.lzma_extreme,
         max_inflight_blocks,
         max_inflight_bytes,
         config.performance.max_inflight_bytes,

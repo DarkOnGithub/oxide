@@ -99,7 +99,11 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
                 &format!(
                     "using {} ({}) from {}",
                     settings.profile_name,
-                    compression_name(settings.compression, settings.compression_level),
+                    compression_name(
+                        settings.compression,
+                        settings.compression_level,
+                        settings.compression_extreme,
+                    ),
                     settings.profile_source
                 ),
             )
@@ -130,6 +134,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         profile_name: &settings.profile_name,
         compression: settings.compression,
         compression_level: settings.compression_level,
+        compression_extreme: settings.compression_extreme,
         report: &run.report,
         peak_read_bps: live_rates.peak_read_bps,
         peak_write_bps: live_rates.peak_write_bps,
@@ -204,6 +209,7 @@ fn build_archive_pipeline(
 ) -> ArchivePipeline {
     let mut performance = PipelinePerformanceOptions::default();
     performance.compression_level = settings.compression_level;
+    performance.lzma_extreme = settings.compression_extreme;
     performance.dictionary_mode = settings.dictionary_mode;
     performance.max_inflight_bytes = settings.inflight_bytes.max(1);
     performance.max_inflight_blocks_per_worker = settings.inflight_blocks_per_worker.max(1);
@@ -270,15 +276,17 @@ mod tests {
     }
 }
 
-fn compression_name(compression: CompressionAlgo, level: Option<i32>) -> String {
+fn compression_name(compression: CompressionAlgo, level: Option<i32>, extreme: bool) -> String {
     let name = match compression {
         CompressionAlgo::Lz4 => "lz4",
         CompressionAlgo::Lzma => "lzma",
         CompressionAlgo::Zstd => "zstd",
     };
 
-    match level {
-        Some(level) => format!("{name}/{level}"),
-        None => name.to_string(),
+    match (level, compression == CompressionAlgo::Lzma && extreme) {
+        (Some(level), true) => format!("{name}/{level}+extreme"),
+        (Some(level), false) => format!("{name}/{level}"),
+        (None, true) => format!("{name}+extreme"),
+        (None, false) => name.to_string(),
     }
 }

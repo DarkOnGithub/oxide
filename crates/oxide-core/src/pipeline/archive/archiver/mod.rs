@@ -224,7 +224,8 @@ impl<'a> Archiver<'a> {
         let scanner = InputScanner::with_chunking_policy_and_plan(
             ChunkingPolicy::fixed_for_target(block_size),
             ChunkEncodingPlan::new(self.config.compression_algo)
-                .with_level(self.config.performance.compression_level),
+                .with_level(self.config.performance.compression_level)
+                .with_lzma_extreme(self.config.performance.lzma_extreme),
         );
         let mut batches = scanner.scan_file(path)?;
         let force_raw_storage = batches

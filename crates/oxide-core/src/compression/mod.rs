@@ -13,6 +13,7 @@ pub struct CompressionRequest<'a> {
     pub data: &'a [u8],
     pub algo: CompressionAlgo,
     pub level: Option<i32>,
+    pub lzma_extreme: bool,
     pub dictionary_id: u8,
     pub dictionary: Option<&'a [u8]>,
 }
@@ -23,6 +24,7 @@ impl<'a> CompressionRequest<'a> {
             data,
             algo,
             level: None,
+            lzma_extreme: false,
             dictionary_id: 0,
             dictionary: None,
         }
@@ -76,9 +78,12 @@ pub(crate) fn apply_compression_request_with_scratch(
 ) -> Result<Vec<u8>> {
     match request.algo {
         CompressionAlgo::Lz4 => lz4::apply_with_scratch(request.data, scratch.lz4()),
-        CompressionAlgo::Lzma => {
-            lzma::apply_with_scratch(request.data, request.level, scratch.lzma())
-        }
+        CompressionAlgo::Lzma => lzma::apply_with_scratch(
+            request.data,
+            request.level,
+            request.lzma_extreme,
+            scratch.lzma(),
+        ),
         CompressionAlgo::Zstd => zstd::apply_with_scratch(
             request.data,
             request.level,
@@ -96,7 +101,9 @@ pub(crate) fn apply_compression_request_with_scratch_into(
 ) -> Result<()> {
     match request.algo {
         CompressionAlgo::Lz4 => lz4::apply_into_vec(request.data, scratch.lz4(), output),
-        CompressionAlgo::Lzma => lzma::apply_into_vec(request.data, request.level, output),
+        CompressionAlgo::Lzma => {
+            lzma::apply_into_vec(request.data, request.level, request.lzma_extreme, output)
+        }
         CompressionAlgo::Zstd => zstd::apply_into_vec(
             request.data,
             request.level,

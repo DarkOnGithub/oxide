@@ -36,6 +36,7 @@ fn is_likely_incompressible_sample(
             data: &source[..sample_len],
             algo: plan.algo,
             level: plan.level,
+            lzma_extreme: plan.lzma_extreme,
             dictionary_id: selected_dictionary
                 .map(|dictionary| dictionary.id)
                 .unwrap_or(0),
@@ -103,6 +104,7 @@ pub fn process_batch(
         data: source,
         algo: plan.algo,
         level: plan.level,
+        lzma_extreme: plan.lzma_extreme,
         dictionary_id,
         dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
     };
