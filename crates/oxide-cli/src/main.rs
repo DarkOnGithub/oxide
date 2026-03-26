@@ -9,7 +9,7 @@ mod ui;
 use clap::Parser;
 use cli::{Cli, Commands};
 use ui::print_startup_banner;
-
+use::crates::oxide-gui::src::main::*;
 type AppResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() {
@@ -28,6 +28,7 @@ fn run() -> AppResult {
         Commands::Archive(args) => commands::archive(args)?,
         Commands::Extract(args) => commands::extract(args)?,
         Commands::Tree(args) => commands::tree(args)?,
+        _ => print(),
     }
 
     Ok(())
