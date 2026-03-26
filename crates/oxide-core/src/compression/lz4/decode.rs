@@ -97,15 +97,6 @@ impl DecodeStats {
     fn record_match(&mut self, _len: usize, _kernel: CopyKernel) {}
 }
 
-pub(super) fn decompress_block(
-    input: &[u8],
-    expected_size: usize,
-) -> core::result::Result<Vec<u8>, DecodeError> {
-    let mut output = Vec::new();
-    decompress_block_into(input, expected_size, &mut output)?;
-    Ok(output)
-}
-
 pub(super) fn decompress_block_into(
     input: &[u8],
     expected_size: usize,
