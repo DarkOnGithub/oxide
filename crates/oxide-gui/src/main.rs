@@ -3,5 +3,5 @@ fn print() {
 }
 
 fn main() {
-    print();
+    print!();
 }
