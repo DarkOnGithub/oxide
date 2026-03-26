@@ -241,7 +241,7 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
                     ("producer_submit_blocked", "batch queue"),
                     ("submit_wait", "submit wait"),
                     ("result_wait", "result wait"),
-                    ("writer_enqueue_blocked", "writer queue"),
+                    ("writer_enqueue_blocked", "writer enqueue blocked"),
                     ("writer", "writer"),
                 ],
             ),
@@ -348,6 +348,7 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
                     ("archive_read", "archive read"),
                     ("decode_submit", "decode submit"),
                     ("decode_wait", "decode wait"),
+                    ("writer_enqueue_blocked", "writer enqueue blocked"),
                     ("merge", "merge"),
                     ("directory_decode", "directory decode"),
                     ("output_write", "output write"),
@@ -369,6 +370,42 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
             "Decode busy",
             extension_u64(&report.extensions, "runtime.decode_busy_us")
                 .map(|value| format_duration(Duration::from_micros(value))),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Decode queue peak",
+            extension_u64(&report.extensions, "pipeline.decode_task_queue_peak")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Decode result queue peak",
+            extension_u64(&report.extensions, "pipeline.decode_result_queue_peak")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Ordered write queue peak",
+            extension_u64(&report.extensions, "pipeline.ordered_write_queue_peak")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Reorder limit",
+            extension_u64(&report.extensions, "pipeline.reorder_pending_limit")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Reorder peak",
+            extension_u64(&report.extensions, "pipeline.reorder_pending_peak")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Reorder bytes peak",
+            extension_u64(&report.extensions, "pipeline.reorder_pending_bytes_peak")
+                .map(format_bytes),
         );
         print_key_value_table("Runtime", &runtime_rows, Tone::Info);
     }
