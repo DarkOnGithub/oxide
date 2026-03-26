@@ -8,18 +8,18 @@ use oxide_core::{
     PipelinePerformanceOptions, RunTelemetryOptions,
 };
 
+use crate::AppResult;
 use crate::cli::{
-    default_extract_output_path, default_output_path, ArchiveArgs, ExtractArgs, TreeArgs,
+    ArchiveArgs, ExtractArgs, TreeArgs, default_extract_output_path, default_output_path,
 };
-use crate::presets::{resolve_archive_settings, ArchiveOverrides, ResolvedArchiveSettings};
+use crate::presets::{ArchiveOverrides, ResolvedArchiveSettings, resolve_archive_settings};
 use crate::progress::{ArchiveCliSink, ExtractCliSink, LiveRateStats};
 use crate::report::{
-    print_archive_report_summary, print_extract_report_summary, ArchiveReportSummary,
-    ExtractReportSummary,
+    ArchiveReportSummary, ExtractReportSummary, print_archive_report_summary,
+    print_extract_report_summary,
 };
 use crate::tree::print_archive_tree;
-use crate::ui::{tagged_message, StreamTarget, Tone};
-use crate::AppResult;
+use crate::ui::{StreamTarget, Tone, tagged_message};
 
 pub fn archive(args: ArchiveArgs) -> AppResult {
     let ArchiveArgs {
