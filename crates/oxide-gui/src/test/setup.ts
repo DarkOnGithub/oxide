@@ -27,6 +27,19 @@ vi.mock('@tauri-apps/plugin-updater', () => ({
   check: vi.fn().mockResolvedValue(null),
 }))
 
+vi.mock('@tauri-apps/plugin-os', () => ({
+  locale: vi.fn().mockResolvedValue('en-US'),
+}))
+
+vi.mock('@/i18n/language-init', () => ({
+  initializeLanguage: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('@/lib/menu', () => ({
+  buildAppMenu: vi.fn().mockResolvedValue(undefined),
+  setupMenuLanguageListener: vi.fn(),
+}))
+
 // Mock typed Tauri bindings (tauri-specta generated)
 vi.mock('@/lib/tauri-bindings', () => ({
   commands: {

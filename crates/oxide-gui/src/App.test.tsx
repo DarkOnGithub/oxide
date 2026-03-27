@@ -7,8 +7,9 @@ import App from './App'
 describe('App', () => {
   it('renders main window layout', () => {
     render(<App />)
+    expect(screen.getByRole('heading', { name: /file explorer/i })).toBeInTheDocument()
     expect(
-      screen.getByRole('heading', { name: /hello world/i })
+      screen.getByRole('heading', { name: /start from a folder on disk/i })
     ).toBeInTheDocument()
   })
 

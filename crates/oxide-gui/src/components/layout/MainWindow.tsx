@@ -14,6 +14,10 @@ import { useTheme } from '@/hooks/use-theme'
 import { useUIStore } from '@/store/ui-store'
 import { useMainWindowEventListeners } from '@/hooks/useMainWindowEventListeners'
 import { cn } from '@/lib/utils'
+import { ExplorerSidebar } from '@/components/file-explorer/ExplorerSidebar'
+import { ExplorerContent } from '@/components/file-explorer/ExplorerContent'
+import { ExplorerDetails } from '@/components/file-explorer/ExplorerDetails'
+import { useFileExplorer } from '@/components/file-explorer/use-file-explorer'
 
 /**
  * Layout sizing configuration for resizable panels.
@@ -31,15 +35,16 @@ const MAIN_CONTENT_DEFAULT =
   100 - LAYOUT.leftSidebar.default - LAYOUT.rightSidebar.default
 
 export function MainWindow() {
-  const { theme } = useTheme()
+  const { resolvedTheme } = useTheme()
   const leftSidebarVisible = useUIStore(state => state.leftSidebarVisible)
   const rightSidebarVisible = useUIStore(state => state.rightSidebarVisible)
+  const explorer = useFileExplorer()
 
   // Set up global event listeners (keyboard shortcuts, etc.)
   useMainWindowEventListeners()
 
   return (
-    <div className="flex h-screen w-full flex-col overflow-hidden rounded-xl bg-background">
+    <div className="flex h-screen w-full flex-col overflow-hidden bg-background/95">
       <TitleBar />
 
       <div className="flex flex-1 overflow-hidden">
@@ -50,7 +55,9 @@ export function MainWindow() {
             maxSize={LAYOUT.leftSidebar.max}
             className={cn(!leftSidebarVisible && 'hidden')}
           >
-            <LeftSideBar />
+            <LeftSideBar className="border-border/60 bg-surface/75 backdrop-blur-xl">
+              <ExplorerSidebar explorer={explorer} />
+            </LeftSideBar>
           </ResizablePanel>
 
           <ResizableHandle className={cn(!leftSidebarVisible && 'hidden')} />
@@ -59,7 +66,9 @@ export function MainWindow() {
             defaultSize={MAIN_CONTENT_DEFAULT}
             minSize={LAYOUT.main.min}
           >
-            <MainWindowContent />
+            <MainWindowContent className="bg-transparent">
+              <ExplorerContent explorer={explorer} />
+            </MainWindowContent>
           </ResizablePanel>
 
           <ResizableHandle className={cn(!rightSidebarVisible && 'hidden')} />
@@ -70,7 +79,9 @@ export function MainWindow() {
             maxSize={LAYOUT.rightSidebar.max}
             className={cn(!rightSidebarVisible && 'hidden')}
           >
-            <RightSideBar />
+            <RightSideBar className="border-border/60 bg-surface/80 backdrop-blur-xl">
+              <ExplorerDetails explorer={explorer} />
+            </RightSideBar>
           </ResizablePanel>
         </ResizablePanelGroup>
       </div>
@@ -80,9 +91,7 @@ export function MainWindow() {
       <PreferencesDialog />
       <Toaster
         position="bottom-right"
-        theme={
-          theme === 'dark' ? 'dark' : theme === 'light' ? 'light' : 'system'
-        }
+        theme={resolvedTheme}
         className="toaster group"
         toastOptions={{
           classNames: {

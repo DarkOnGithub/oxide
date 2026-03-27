@@ -13,6 +13,7 @@ import { SettingsField, SettingsSection } from '../shared/SettingsComponents'
 import { usePreferences, useSavePreferences } from '@/services/preferences'
 import { availableLanguages } from '@/i18n'
 import { logger } from '@/lib/logger'
+import { THEME_OPTIONS, type Theme } from '@/lib/theme'
 
 // Language display names (native names)
 const languageNames: Record<string, string> = {
@@ -27,7 +28,7 @@ export function AppearancePane() {
   const { data: preferences } = usePreferences()
   const savePreferences = useSavePreferences()
 
-  const handleThemeChange = (value: 'light' | 'dark' | 'system') => {
+  const handleThemeChange = (value: Theme) => {
     // Update the theme provider immediately for instant UI feedback
     setTheme(value)
 
@@ -68,6 +69,25 @@ export function AppearancePane() {
   // Determine the current language value for the select
   const currentLanguageValue = preferences?.language ?? 'system'
 
+  const getThemeLabel = (value: Theme) => {
+    switch (value) {
+      case 'light':
+        return t('preferences.appearance.theme.light')
+      case 'dark':
+        return t('preferences.appearance.theme.dark')
+      case 'system':
+        return t('preferences.appearance.theme.system')
+      case 'latte':
+        return t('preferences.appearance.theme.latte')
+      case 'frappe':
+        return t('preferences.appearance.theme.frappe')
+      case 'macchiato':
+        return t('preferences.appearance.theme.macchiato')
+      case 'mocha':
+        return t('preferences.appearance.theme.mocha')
+    }
+  }
+
   return (
     <div className="space-y-6">
       <SettingsSection title={t('preferences.appearance.language')}>
@@ -104,7 +124,7 @@ export function AppearancePane() {
         >
           <Select
             value={theme}
-            onValueChange={handleThemeChange}
+            onValueChange={value => handleThemeChange(value as Theme)}
             disabled={savePreferences.isPending}
           >
             <SelectTrigger>
@@ -113,15 +133,11 @@ export function AppearancePane() {
               />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="light">
-                {t('preferences.appearance.theme.light')}
-              </SelectItem>
-              <SelectItem value="dark">
-                {t('preferences.appearance.theme.dark')}
-              </SelectItem>
-              <SelectItem value="system">
-                {t('preferences.appearance.theme.system')}
-              </SelectItem>
+              {THEME_OPTIONS.map(option => (
+                <SelectItem key={option.value} value={option.value}>
+                  {getThemeLabel(option.value)}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </SettingsField>

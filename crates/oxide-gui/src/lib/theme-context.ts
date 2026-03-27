@@ -1,14 +1,15 @@
 import { createContext } from 'react'
-
-export type Theme = 'dark' | 'light' | 'system'
+import type { ResolvedThemeMode, Theme } from './theme'
 
 export interface ThemeProviderState {
   theme: Theme
+  resolvedTheme: ResolvedThemeMode
   setTheme: (theme: Theme) => void
 }
 
 const initialState: ThemeProviderState = {
   theme: 'system',
+  resolvedTheme: 'light',
   setTheme: () => null,
 }
 

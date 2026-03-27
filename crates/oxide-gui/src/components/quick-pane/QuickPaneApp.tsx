@@ -3,6 +3,12 @@ import { emit, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { commands } from '@/lib/tauri-bindings'
 import { logger } from '@/lib/logger'
+import {
+  isTheme,
+  resolveAppliedTheme,
+  resolveThemeMode,
+  type Theme,
+} from '@/lib/theme'
 
 /** Dismiss the quick pane window, logging any errors */
 async function dismissQuickPane() {
@@ -23,20 +29,17 @@ async function dismissQuickPane() {
  */
 // Apply theme from localStorage to document
 function applyTheme() {
-  const theme = localStorage.getItem('ui-theme') || 'system'
+  const storedTheme = localStorage.getItem('ui-theme')
+  const theme: Theme = isTheme(storedTheme) ? storedTheme : 'system'
   const root = document.documentElement
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+  const appliedTheme = resolveAppliedTheme(theme, prefersDark)
+  const resolvedTheme = resolveThemeMode(theme, prefersDark)
 
   root.classList.remove('light', 'dark')
-
-  if (theme === 'system') {
-    const systemTheme = window.matchMedia('(prefers-color-scheme: dark)')
-      .matches
-      ? 'dark'
-      : 'light'
-    root.classList.add(systemTheme)
-  } else {
-    root.classList.add(theme)
-  }
+  root.classList.add(resolvedTheme)
+  root.dataset.theme = appliedTheme
+  root.style.colorScheme = resolvedTheme
 }
 
 export default function QuickPaneApp() {
