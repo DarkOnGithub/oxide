@@ -259,7 +259,7 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
     let mut files = Vec::<DirectoryFileSpec>::new();
     let mut input_bytes_total = 0u64;
 
-    for entry in WalkDir::new(root).follow_links(false) {
+    for entry in WalkDir::new(root).skip_hidden(false).follow_links(false) {
         let entry = entry.map_err(anyhow::Error::from)?;
         let path = entry.path();
         if path == root {
@@ -456,6 +456,45 @@ mod tests {
         assert_eq!(discovery.files[0].entry.rel_path, "nested/payload.bin");
         assert_eq!(discovery.files[1].entry.rel_path, "notes.txt");
         assert_eq!(discovery.input_bytes_total, 16);
+    }
+
+    #[test]
+    fn discovery_includes_hidden_files_and_directories() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let hidden_dir = root.join(".hidden");
+        let nested_hidden_dir = hidden_dir.join("nested");
+
+        fs::create_dir(&hidden_dir).expect("create hidden dir");
+        fs::create_dir(&nested_hidden_dir).expect("create nested hidden dir");
+        fs::write(root.join(".root-hidden.txt"), b"root").expect("write root hidden file");
+        fs::write(hidden_dir.join("visible.txt"), b"hidden-dir").expect("write hidden dir file");
+        fs::write(nested_hidden_dir.join(".nested-hidden.txt"), b"nested")
+            .expect("write nested hidden file");
+
+        let discovery = discover_directory_tree(root).expect("discover directory");
+
+        assert_eq!(
+            discovery
+                .directories
+                .iter()
+                .map(|entry| entry.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![".hidden", ".hidden/nested"]
+        );
+        assert_eq!(
+            discovery
+                .files
+                .iter()
+                .map(|entry| entry.entry.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                ".hidden/nested/.nested-hidden.txt",
+                ".hidden/visible.txt",
+                ".root-hidden.txt",
+            ]
+        );
+        assert_eq!(discovery.input_bytes_total, 4 + 10 + 6);
     }
 
     #[cfg(unix)]
