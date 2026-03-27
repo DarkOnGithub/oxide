@@ -242,7 +242,9 @@ def parse_args() -> Settings:
         ),
     )
     parser.add_argument(
-        "--threads", type=int, default=int(env_value("BENCHMARK_THREADS", "16"))
+        "--threads",
+        type=int,
+        default=int(env_value("BENCHMARK_THREADS", str(os.cpu_count() or 1))),
     )
     parser.add_argument(
         "--worker-modes",
@@ -250,7 +252,7 @@ def parse_args() -> Settings:
         default=None,
         help=(
             "Oxide worker configurations to benchmark. Use 'auto' (or 0) to omit "
-            "--workers. Defaults to: auto plus the explicit --threads value."
+            "--workers. Defaults to auto only."
         ),
     )
     parser.add_argument(
@@ -306,7 +308,7 @@ def parse_args() -> Settings:
         else random.randint(0, 2**31 - 1)
     )
     squashfs_block_size = args.squashfs_block_size or None
-    worker_modes = normalize_worker_modes(args.worker_modes, args.threads)
+    worker_modes = normalize_worker_modes(args.worker_modes)
 
     return Settings(
         source=Path(args.source),
@@ -329,11 +331,9 @@ def parse_args() -> Settings:
     )
 
 
-def normalize_worker_modes(
-    raw_modes: Sequence[str] | None, default_threads: int
-) -> tuple[str, ...]:
+def normalize_worker_modes(raw_modes: Sequence[str] | None) -> tuple[str, ...]:
     if not raw_modes:
-        raw_modes = ("auto", str(default_threads))
+        raw_modes = ("auto",)
 
     normalized: list[str] = []
     seen: set[str] = set()
