@@ -8,6 +8,10 @@ pub fn generate_bindings() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new().commands(collect_commands![
         file_explorer::list_directory_entries,
         file_explorer::get_path_metadata,
+        file_explorer::is_oxide_archive,
+        file_explorer::read_oxide_archive_index,
+        file_explorer::create_oxide_archive,
+        file_explorer::extract_oxide_archive,
         preferences::greet,
         preferences::load_preferences,
         preferences::save_preferences,

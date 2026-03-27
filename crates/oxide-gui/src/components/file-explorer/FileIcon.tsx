@@ -72,6 +72,7 @@ const extensionIcons: Record<string, string> = {
   mov: 'video',
   mp3: 'audio',
   mp4: 'video',
+  oxz: 'zip',
   pdf: 'pdf',
   png: 'image',
   py: 'python',

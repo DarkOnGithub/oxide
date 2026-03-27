@@ -24,6 +24,14 @@
 export { commands, type Result } from './bindings'
 export type {
   AppPreferences,
+  ArchiveCompressionAlgo,
+  ArchiveDictionaryModeOption,
+  ExplorerArchiveEntry,
+  ExplorerArchiveEntryKind,
+  ExplorerArchiveIndex,
+  ExplorerArchiveSourceKind,
+  ArchivePreset,
+  CreateArchiveOptions,
   ExplorerDirectoryEntry,
   ExplorerPathMetadata,
   JsonValue,

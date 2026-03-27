@@ -1,18 +1,20 @@
-import {
-  ChevronRight,
-  FolderOpen,
-  LoaderCircle,
-  RefreshCw,
-  Undo2,
-} from 'lucide-react'
+import { ChevronRight, FolderOpen, LoaderCircle, RefreshCw, Undo2 } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
+import { ArchiveCreationDialog } from './ArchiveCreationDialog'
 import { FileIcon } from './FileIcon'
-import type { FileExplorerState } from './use-file-explorer'
+import type { ExplorerEntry, FileExplorerState } from './use-file-explorer'
 
 interface ExplorerContentProps {
   explorer: FileExplorerState
+}
+
+interface ContextMenuState {
+  entry: ExplorerEntry
+  x: number
+  y: number
 }
 
 function formatBytes(bytes: number) {
@@ -42,9 +44,58 @@ function formatDate(date: Date | null) {
   }).format(date)
 }
 
+function entryTypeLabel(entry: ExplorerEntry) {
+  if (entry.isDirectory) {
+    return 'Folder'
+  }
+
+  if (entry.isOxideArchive) {
+    return 'Oxide archive'
+  }
+
+  return entry.extension ? `${entry.extension.toUpperCase()} File` : 'File'
+}
+
 export function ExplorerContent({ explorer }: ExplorerContentProps) {
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const contextMenuRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target
+
+      if (
+        contextMenuRef.current &&
+        target instanceof Node &&
+        !contextMenuRef.current.contains(target)
+      ) {
+        setContextMenu(null)
+      }
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setContextMenu(null)
+      }
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown)
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown)
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [contextMenu])
+
+  const isEmptyState = explorer.mode === 'filesystem' && !explorer.currentPath
+
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface/20 px-3 py-3">
+    <div className="relative flex h-full min-h-0 flex-col bg-surface/20 px-3 py-3">
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border/40 bg-background/70 shadow-sm backdrop-blur-xl">
         <div className="border-b border-border/40 bg-background/70 px-3 py-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -65,7 +116,7 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
                 size="icon"
                 className="size-8 rounded-lg"
                 onClick={explorer.refresh}
-                disabled={!explorer.currentPath || explorer.isRefreshing}
+                disabled={!explorer.currentDisplayPath || explorer.isRefreshing}
                 title="Refresh"
               >
                 <RefreshCw
@@ -92,7 +143,7 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
             {explorer.breadcrumbs.length > 0 ? (
               <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-sm">
                 {explorer.breadcrumbs.map((crumb, index) => (
-                  <div key={crumb.path} className="flex min-w-0 items-center gap-1.5">
+                  <div key={crumb.path || '__root__'} className="flex min-w-0 items-center gap-1.5">
                     <button
                       type="button"
                       className="truncate rounded-md px-1.5 py-0.5 text-left text-foreground transition-colors hover:bg-background/70"
@@ -109,13 +160,14 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
               </div>
             ) : (
               <span className="truncate text-sm text-foreground">
-                {explorer.currentPath ?? 'Select a folder'}
+                {explorer.currentDisplayPath ?? 'Select a folder'}
               </span>
             )}
           </div>
+
         </div>
 
-        {!explorer.currentPath ? (
+        {isEmptyState ? (
           <div className="flex min-h-0 flex-1 items-center justify-center p-8 text-center">
             <div className="max-w-sm">
               <FolderOpen className="mx-auto size-10 text-muted-foreground/70" />
@@ -123,7 +175,7 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
                 Open a folder to begin
               </h3>
               <p className="mt-2 text-sm text-muted-foreground">
-                The explorer will show a clean list view once a folder is selected.
+                Browse directories, archive folders, and open Oxide archives like folders.
               </p>
               <Button className="mt-4 rounded-lg" onClick={explorer.pickRootFolder}>
                 Open folder
@@ -152,7 +204,7 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
                 {explorer.isLoading && explorer.entries.length === 0 ? (
                   <div className="flex min-h-[360px] items-center justify-center gap-3 text-sm text-muted-foreground">
                     <LoaderCircle className="size-4 animate-spin" />
-                    Loading folder contents...
+                    Loading contents...
                   </div>
                 ) : explorer.entries.length === 0 ? (
                   <div className="flex min-h-[360px] items-center justify-center text-sm text-muted-foreground">
@@ -167,7 +219,28 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
                         key={entry.path}
                         type="button"
                         onClick={() => explorer.setSelectedEntryPath(entry.path)}
-                        onDoubleClick={() => explorer.openEntry(entry)}
+                        onDoubleClick={() => void explorer.openEntry(entry)}
+                        onContextMenu={event => {
+                          if (explorer.mode !== 'filesystem') {
+                            return
+                          }
+
+                          if (!entry.isDirectory && !entry.isOxideArchive) {
+                            return
+                          }
+
+                          event.preventDefault()
+                          event.stopPropagation()
+                          explorer.setSelectedEntryPath(entry.path)
+
+                          const menuWidth = 220
+                          const menuHeight = entry.isOxideArchive ? 170 : 52
+                          setContextMenu({
+                            entry,
+                            x: Math.min(event.clientX, window.innerWidth - menuWidth),
+                            y: Math.min(event.clientY, window.innerHeight - menuHeight),
+                          })
+                        }}
                         className={cn(
                           'grid w-full grid-cols-[minmax(0,1fr)_92px_120px_140px] items-center gap-4 border-b border-border/30 px-4 py-3 text-left text-sm transition-colors',
                           isSelected
@@ -192,11 +265,7 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
                         </span>
 
                         <span className="truncate text-muted-foreground">
-                          {entry.isDirectory
-                            ? 'Folder'
-                            : entry.extension
-                              ? `${entry.extension.toUpperCase()} File`
-                              : 'File'}
+                          {entryTypeLabel(entry)}
                         </span>
 
                         <span className="truncate text-muted-foreground">
@@ -214,11 +283,132 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
                 {explorer.entries.length} items · {explorer.directoryEntries.length} folders ·{' '}
                 {explorer.fileEntries.length} files
               </span>
-              <span>Select an item to inspect it</span>
+              <span>
+                {explorer.mode === 'archive'
+                  ? 'Browsing archive index'
+                  : 'Right-click folders or archives for actions'}
+              </span>
             </div>
           </>
         )}
       </div>
+
+      {contextMenu && (
+        <div
+          ref={contextMenuRef}
+          className="fixed z-50 min-w-52 rounded-xl border border-border/60 bg-background/95 p-1.5 shadow-xl backdrop-blur-xl"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onContextMenu={event => event.preventDefault()}
+        >
+          {contextMenu.entry.isDirectory && (
+            <ContextMenuItem
+              label="Archive folder…"
+              onClick={() => void explorer.archiveFolder(contextMenu.entry)}
+              onClose={() => setContextMenu(null)}
+            />
+          )}
+
+          {contextMenu.entry.isOxideArchive && (
+            <>
+              <ContextMenuItem
+                label="Open archive"
+                onClick={() => void explorer.openArchive(contextMenu.entry.path)}
+                onClose={() => setContextMenu(null)}
+              />
+              <ContextMenuItem
+                label="Extract here"
+                onClick={() =>
+                  void explorer.extractArchiveEntry(contextMenu.entry, 'here')
+                }
+                onClose={() => setContextMenu(null)}
+              />
+              <ContextMenuItem
+                label="Extract to…"
+                onClick={() =>
+                  void explorer.extractArchiveEntry(contextMenu.entry, 'choose')
+                }
+                onClose={() => setContextMenu(null)}
+              />
+              <ContextMenuItem
+                label="Extract here and delete"
+                onClick={() =>
+                  void explorer.extractArchiveEntry(contextMenu.entry, 'here-delete')
+                }
+                onClose={() => setContextMenu(null)}
+                destructive
+              />
+            </>
+          )}
+        </div>
+      )}
+
+      {explorer.operation && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/35 backdrop-blur-[2px]">
+          <div className="w-full max-w-md rounded-2xl border border-border/60 bg-background/95 p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-base font-semibold text-foreground">
+                  {explorer.operation.title}
+                </p>
+                <p className="mt-1 break-all text-sm text-muted-foreground">
+                  {explorer.operation.detail}
+                </p>
+                {explorer.operation.secondaryDetail && (
+                  <p className="mt-1 break-all text-xs text-muted-foreground/80">
+                    {explorer.operation.secondaryDetail}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground">
+                <LoaderCircle className="size-4 animate-spin" />
+                <span>{Math.round(explorer.operation.progress)}%</span>
+              </div>
+            </div>
+
+            <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-primary/10">
+              <div
+                className="h-full rounded-full bg-primary transition-[width] duration-200 ease-out"
+                style={{ width: `${explorer.operation.progress}%` }}
+              />
+            </div>
+
+            <p className="mt-3 text-xs text-muted-foreground">
+              Please wait while the archive operation completes.
+            </p>
+          </div>
+        </div>
+      )}
+
+      <ArchiveCreationDialog explorer={explorer} />
     </div>
+  )
+}
+
+function ContextMenuItem({
+  label,
+  onClick,
+  onClose,
+  destructive = false,
+}: {
+  label: string
+  onClick: () => void
+  onClose: () => void
+  destructive?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        'flex w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-surface-elevated',
+        destructive ? 'text-destructive' : 'text-foreground'
+      )}
+      onClick={() => {
+        onClose()
+        onClick()
+      }}
+    >
+      {label}
+    </button>
   )
 }
