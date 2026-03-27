@@ -41,6 +41,8 @@ pub struct ChunkEncodingPlan {
     pub level: Option<i32>,
     /// Enables liblzma's extreme preset variant when using LZMA encoding.
     pub lzma_extreme: bool,
+    /// Optional explicit LZMA dictionary size used during encoding.
+    pub lzma_dictionary_size: Option<usize>,
 }
 
 impl ChunkEncodingPlan {
@@ -50,6 +52,7 @@ impl ChunkEncodingPlan {
             algo,
             level: None,
             lzma_extreme: false,
+            lzma_dictionary_size: None,
         }
     }
 
@@ -62,6 +65,12 @@ impl ChunkEncodingPlan {
     /// Enables or disables liblzma's extreme preset variant for LZMA encoding.
     pub const fn with_lzma_extreme(mut self, lzma_extreme: bool) -> Self {
         self.lzma_extreme = lzma_extreme;
+        self
+    }
+
+    /// Attaches an explicit LZMA dictionary size override for encoding.
+    pub const fn with_lzma_dictionary_size(mut self, lzma_dictionary_size: Option<usize>) -> Self {
+        self.lzma_dictionary_size = lzma_dictionary_size;
         self
     }
 

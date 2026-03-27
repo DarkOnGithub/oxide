@@ -168,6 +168,7 @@ pub fn build_stats_extensions(
     raw_passthrough_blocks: u64,
     compression_level: Option<i32>,
     lzma_extreme: bool,
+    lzma_dictionary_size: Option<usize>,
     max_inflight_blocks: usize,
     max_inflight_bytes: usize,
     configured_inflight_bytes: usize,
@@ -249,6 +250,12 @@ pub fn build_stats_extensions(
     }
     if lzma_extreme {
         extensions.insert("compression.lzma_extreme".to_string(), StatValue::U64(1));
+    }
+    if let Some(dictionary_size) = lzma_dictionary_size {
+        extensions.insert(
+            "compression.lzma_dictionary_size".to_string(),
+            StatValue::U64(dictionary_size as u64),
+        );
     }
     extensions.insert(
         "pipeline.max_inflight_blocks".to_string(),

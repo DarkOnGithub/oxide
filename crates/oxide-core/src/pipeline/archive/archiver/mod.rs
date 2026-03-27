@@ -225,7 +225,8 @@ impl<'a> Archiver<'a> {
             ChunkingPolicy::fixed_for_target(block_size),
             ChunkEncodingPlan::new(self.config.compression_algo)
                 .with_level(self.config.performance.compression_level)
-                .with_lzma_extreme(self.config.performance.lzma_extreme),
+                .with_lzma_extreme(self.config.performance.lzma_extreme)
+                .with_lzma_dictionary_size(self.config.performance.lzma_dictionary_size),
         );
         let mut batches = scanner.scan_file(path)?;
         let force_raw_storage = batches

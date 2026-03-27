@@ -217,6 +217,7 @@ where
         raw_passthrough_blocks,
         config.performance.compression_level,
         config.performance.lzma_extreme,
+        config.performance.lzma_dictionary_size,
         max_inflight_blocks,
         max_inflight_bytes,
         config.performance.max_inflight_bytes,
