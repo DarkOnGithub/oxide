@@ -1,10 +1,14 @@
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,9 +24,15 @@ use super::super::directory;
 use super::reorder_writer::OrderedChunkWriter;
 
 pub(crate) const OUTPUT_BUFFER_CAPACITY: usize = 1024 * 1024;
+const MEDIUM_OUTPUT_BUFFER_CAPACITY: usize = 256 * 1024;
+const SMALL_OUTPUT_BUFFER_CAPACITY: usize = 64 * 1024;
 const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
 const MAX_METADATA_WORKERS: usize = 8;
-const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 128;
+const MAX_PREPARED_ENTRY_WORKERS: usize = 8;
+const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 256;
+const DIRECT_FILE_WRITE_MAX_BYTES: u64 = 32 * 1024;
+const SMALL_FILE_BUFFER_MAX_BYTES: u64 = 256 * 1024;
+const MEDIUM_FILE_BUFFER_MAX_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DirectoryRestoreStats {
@@ -165,9 +175,38 @@ impl DirectoryExtractSelection {
 #[derive(Debug)]
 struct PendingFile {
     remaining: u64,
-    writer: BufWriter<fs::File>,
+    writer: PendingFileWriter,
     path: PathBuf,
     entry: crate::ArchiveListingEntry,
+}
+
+#[derive(Debug)]
+enum PendingFileWriter {
+    Direct(fs::File),
+    Buffered(BufWriter<fs::File>),
+}
+
+impl PendingFileWriter {
+    fn new(file: fs::File, entry_size: u64) -> Self {
+        match output_buffer_capacity(entry_size) {
+            Some(capacity) => Self::Buffered(BufWriter::with_capacity(capacity, file)),
+            None => Self::Direct(file),
+        }
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Direct(file) => file.write_all(bytes),
+            Self::Buffered(writer) => writer.write_all(bytes),
+        }
+    }
+
+    fn into_inner(self) -> std::io::Result<fs::File> {
+        match self {
+            Self::Direct(file) => Ok(file),
+            Self::Buffered(writer) => writer.into_inner().map_err(|error| error.into_error()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -332,7 +371,7 @@ impl DirectoryRestoreWriter {
                     ))?;
                     self.pending_file = Some(PendingFile {
                         remaining: entry.size,
-                        writer: BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file),
+                        writer: PendingFileWriter::new(file, entry.size),
                         path,
                         entry,
                     });
@@ -390,7 +429,7 @@ impl DirectoryRestoreWriter {
             entry,
             ..
         } = pending;
-        let _file = writer.into_inner().map_err(|error| error.into_error())?;
+        let _file = writer.into_inner()?;
         self.stats.record_output_flush(output_started.elapsed());
         self.defer_file_metadata(path, entry);
         Ok(())
@@ -457,6 +496,33 @@ fn path_depth(path: &Path) -> usize {
     path.components().count()
 }
 
+fn output_buffer_capacity(entry_size: u64) -> Option<usize> {
+    if entry_size <= DIRECT_FILE_WRITE_MAX_BYTES {
+        return None;
+    }
+
+    if entry_size <= SMALL_FILE_BUFFER_MAX_BYTES {
+        return Some(
+            (entry_size.min(usize::MAX as u64) as usize).min(SMALL_OUTPUT_BUFFER_CAPACITY),
+        );
+    }
+
+    if entry_size <= MEDIUM_FILE_BUFFER_MAX_BYTES {
+        return Some(MEDIUM_OUTPUT_BUFFER_CAPACITY);
+    }
+
+    Some(OUTPUT_BUFFER_CAPACITY)
+}
+
+fn available_prepared_entry_workers(item_count: usize) -> usize {
+    thread::available_parallelism()
+        .unwrap_or(NonZeroUsize::MIN)
+        .get()
+        .min(MAX_PREPARED_ENTRY_WORKERS)
+        .min(item_count)
+        .max(1)
+}
+
 fn spawn_prepared_restore_entries(
     entries: Vec<RestoreEntry>,
 ) -> (
@@ -465,16 +531,113 @@ fn spawn_prepared_restore_entries(
 ) {
     let (tx, rx) = bounded::<Result<PreparedRestoreEntry>>(PREPARED_ENTRY_QUEUE_CAPACITY);
     let handle = thread::spawn(move || -> Result<()> {
-        for restore_entry in entries {
-            let prepared = prepare_restore_entry(restore_entry);
-            let stop_after_send = prepared.is_err();
-            if tx.send(prepared).is_err() {
-                return Ok(());
+        let total_entries = entries.len();
+        let worker_count = available_prepared_entry_workers(total_entries);
+        if worker_count <= 1 {
+            for restore_entry in entries {
+                let prepared = prepare_restore_entry(restore_entry);
+                let stop_after_send = prepared.is_err();
+                if tx.send(prepared).is_err() {
+                    return Ok(());
+                }
+                if stop_after_send {
+                    return Ok(());
+                }
             }
-            if stop_after_send {
-                return Ok(());
+
+            return Ok(());
+        }
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (work_tx, work_rx) = bounded::<(usize, RestoreEntry)>(PREPARED_ENTRY_QUEUE_CAPACITY);
+        let (result_tx, result_rx) =
+            bounded::<(usize, Result<PreparedRestoreEntry>)>(PREPARED_ENTRY_QUEUE_CAPACITY);
+
+        let mut worker_handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let work_rx = work_rx.clone();
+            let result_tx = result_tx.clone();
+            let cancelled = Arc::clone(&cancelled);
+            worker_handles.push(thread::spawn(move || -> Result<()> {
+                while !cancelled.load(Ordering::Relaxed) {
+                    let Ok((index, restore_entry)) = work_rx.recv() else {
+                        return Ok(());
+                    };
+                    if cancelled.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+
+                    let prepared = prepare_restore_entry(restore_entry);
+                    if prepared.is_err() {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                    if result_tx.send((index, prepared)).is_err() {
+                        return Ok(());
+                    }
+                }
+
+                Ok(())
+            }));
+        }
+        drop(result_tx);
+
+        for (index, restore_entry) in entries.into_iter().enumerate() {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            if work_tx.send((index, restore_entry)).is_err() {
+                cancelled.store(true, Ordering::Relaxed);
+                break;
             }
         }
+        drop(work_tx);
+
+        let mut next_index = 0usize;
+        let mut pending: BTreeMap<usize, Result<PreparedRestoreEntry>> = BTreeMap::new();
+        let mut sent_error = false;
+        while next_index < total_entries && !sent_error {
+            while let Some(prepared) = pending.remove(&next_index) {
+                sent_error = prepared.is_err();
+                if tx.send(prepared).is_err() {
+                    cancelled.store(true, Ordering::Relaxed);
+                    sent_error = true;
+                    break;
+                }
+                next_index += 1;
+                if sent_error {
+                    break;
+                }
+            }
+
+            if next_index >= total_entries || sent_error {
+                break;
+            }
+
+            let (index, prepared) = result_rx.recv().map_err(|_| {
+                crate::OxideError::CompressionError(
+                    "prepared entry workers exited before completion".to_string(),
+                )
+            })?;
+            pending.insert(index, prepared);
+        }
+
+        cancelled.store(true, Ordering::Relaxed);
+
+        for handle in worker_handles {
+            handle.join().map_err(|payload| {
+                let details = if let Some(message) = payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "unknown panic payload".to_string()
+                };
+                crate::OxideError::CompressionError(format!(
+                    "prepared entry worker thread panicked: {details}"
+                ))
+            })??;
+        }
+
         Ok(())
     });
 
