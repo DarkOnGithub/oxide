@@ -1,8 +1,8 @@
 use std::io::Read;
 
 use liblzma::{
-    read::{XzDecoder, XzEncoder},
-    stream::PRESET_EXTREME,
+    read::XzDecoder,
+    stream::{Action, Check, PRESET_EXTREME, Status, Stream},
 };
 
 use super::scratch::LzmaScratch;
@@ -52,11 +52,51 @@ pub(crate) fn apply_into_vec(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     output.clear();
-    let mut encoder = XzEncoder::new(data, resolve_level(level, extreme)?);
-    encoder
-        .read_to_end(output)
-        .map_err(|err| OxideError::CompressionError(format!("lzma encode failed: {err}")))?;
+    ensure_output_spare_capacity(output, data.len().min(32 * 1024).max(32 * 1024));
+    let mut stream = Stream::new_easy_encoder(resolve_level(level, extreme)?, Check::Crc64)
+        .map_err(|err| OxideError::CompressionError(format!("lzma encoder init failed: {err}")))?;
+
+    let mut remaining = data;
+    while !remaining.is_empty() {
+        let total_in = stream.total_in();
+        stream
+            .process_vec(remaining, output, Action::Run)
+            .map_err(|err| OxideError::CompressionError(format!("lzma encode failed: {err}")))?;
+
+        let consumed = (stream.total_in() - total_in) as usize;
+        if consumed == 0 {
+            ensure_output_spare_capacity(output, output.capacity().max(32 * 1024));
+            continue;
+        }
+
+        remaining = &remaining[consumed..];
+        if !remaining.is_empty() {
+            ensure_output_spare_capacity(output, remaining.len().min(32 * 1024).max(32 * 1024));
+        }
+    }
+
+    loop {
+        let total_out = stream.total_out();
+        let status = stream
+            .process_vec(&[], output, Action::Finish)
+            .map_err(|err| OxideError::CompressionError(format!("lzma encode failed: {err}")))?;
+        if status == Status::StreamEnd {
+            break;
+        }
+        if stream.total_out() == total_out {
+            ensure_output_spare_capacity(output, output.capacity().max(32 * 1024));
+        }
+    }
+
     Ok(())
+}
+
+#[inline]
+fn ensure_output_spare_capacity(output: &mut Vec<u8>, additional: usize) {
+    let spare = output.spare_capacity_mut().len();
+    if spare < additional {
+        output.reserve(additional - spare);
+    }
 }
 
 pub(crate) fn recycle_output(output: Vec<u8>, scratch: &mut LzmaScratch) {
