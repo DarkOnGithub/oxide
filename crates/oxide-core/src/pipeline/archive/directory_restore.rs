@@ -9,11 +9,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
+use crossbeam_channel::{bounded, never, Receiver};
 use regex::RegexSet;
 
-use crate::OxideError;
 use crate::format::ArchiveManifest;
 use crate::types::Result;
+use crate::OxideError;
 
 use super::super::directory;
 use super::reorder_writer::OrderedChunkWriter;
@@ -21,6 +22,7 @@ use super::reorder_writer::OrderedChunkWriter;
 pub(crate) const OUTPUT_BUFFER_CAPACITY: usize = 1024 * 1024;
 const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
 const MAX_METADATA_WORKERS: usize = 8;
+const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 128;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DirectoryRestoreStats {
@@ -84,6 +86,25 @@ impl DirectoryRestoreStats {
 struct RestoreEntry {
     path: PathBuf,
     entry: crate::ArchiveListingEntry,
+}
+
+#[derive(Debug)]
+enum PreparedRestoreEntry {
+    Directory {
+        path: PathBuf,
+        entry: crate::ArchiveListingEntry,
+    },
+    File {
+        path: PathBuf,
+        entry: crate::ArchiveListingEntry,
+        file: Option<fs::File>,
+        create_elapsed: Duration,
+    },
+    Symlink {
+        path: PathBuf,
+        entry: crate::ArchiveListingEntry,
+        create_elapsed: Duration,
+    },
 }
 
 #[derive(Debug)]
@@ -159,12 +180,14 @@ struct PendingMetadata {
 #[derive(Debug)]
 pub(crate) struct DirectoryRestoreWriter {
     root: PathBuf,
-    entries: Vec<RestoreEntry>,
+    entry_count_total: usize,
     next_entry: usize,
     pending_file: Option<PendingFile>,
     created_directories: HashSet<PathBuf>,
     pending_file_metadata: Vec<PendingMetadata>,
     pending_directory_metadata: Vec<PendingMetadata>,
+    prepared_entry_rx: Receiver<Result<PreparedRestoreEntry>>,
+    prepared_entry_handle: Option<thread::JoinHandle<Result<()>>>,
     stats: DirectoryRestoreStats,
 }
 
@@ -181,16 +204,21 @@ impl DirectoryRestoreWriter {
         let entries = build_restore_entries(root, manifest)?;
         let mut writer = Self {
             root: root.to_path_buf(),
-            entries,
+            entry_count_total: entries.len(),
             next_entry: 0,
             pending_file: None,
             created_directories: HashSet::new(),
             pending_file_metadata: Vec::new(),
             pending_directory_metadata: Vec::new(),
+            prepared_entry_rx: never(),
+            prepared_entry_handle: None,
             stats: DirectoryRestoreStats::default(),
         };
         writer.ensure_directory_exists(root)?;
-        writer.prepare_output_directories()?;
+        writer.prepare_output_directories(&entries)?;
+        let (prepared_entry_rx, prepared_entry_handle) = spawn_prepared_restore_entries(entries);
+        writer.prepared_entry_rx = prepared_entry_rx;
+        writer.prepared_entry_handle = Some(prepared_entry_handle);
         Ok(writer)
     }
 
@@ -203,13 +231,14 @@ impl DirectoryRestoreWriter {
                 ));
             }
         }
-        if self.pending_file.is_some() || self.next_entry != self.entries.len() {
+        if self.pending_file.is_some() || self.next_entry != self.entry_count_total {
             return Err(crate::OxideError::InvalidFormat(
                 "directory restore ended before all entries completed",
             ));
         }
         self.finalize_file_metadata()?;
         self.finalize_directories()?;
+        self.join_prepared_entries()?;
         Ok(self.stats)
     }
 
@@ -252,10 +281,9 @@ impl DirectoryRestoreWriter {
         });
     }
 
-    fn prepare_output_directories(&mut self) -> Result<()> {
+    fn prepare_output_directories(&mut self, entries: &[RestoreEntry]) -> Result<()> {
         let started = Instant::now();
-        let directories = self
-            .entries
+        let directories = entries
             .iter()
             .filter_map(|restore_entry| match restore_entry.entry.kind {
                 crate::ArchiveEntryKind::Directory => Some(restore_entry.path.clone()),
@@ -277,49 +305,77 @@ impl DirectoryRestoreWriter {
     }
 
     fn advance_entries(&mut self) -> Result<()> {
-        while self.pending_file.is_none() && self.next_entry < self.entries.len() {
-            let restore_entry = &self.entries[self.next_entry];
-            let entry = restore_entry.entry.clone();
-            let out_path = restore_entry.path.clone();
+        while self.pending_file.is_none() && self.next_entry < self.entry_count_total {
+            let prepared_entry = self.receive_prepared_entry()?;
             self.next_entry += 1;
             self.stats.entry_count = self.stats.entry_count.saturating_add(1);
 
-            match entry.kind {
-                crate::ArchiveEntryKind::Directory => {
-                    self.defer_directory_metadata(out_path, entry);
+            match prepared_entry {
+                PreparedRestoreEntry::Directory { path, entry } => {
+                    self.defer_directory_metadata(path, entry);
                 }
-                crate::ArchiveEntryKind::File => {
-                    let output_started = Instant::now();
-                    let file = fs::File::create(&out_path)?;
-                    self.stats
-                        .record_output_create_file(output_started.elapsed());
+                PreparedRestoreEntry::File {
+                    path,
+                    entry,
+                    file,
+                    create_elapsed,
+                } => {
+                    self.stats.record_output_create_file(create_elapsed);
 
                     if entry.size == 0 {
-                        self.defer_file_metadata(out_path, entry);
+                        self.defer_file_metadata(path, entry);
                         continue;
                     }
 
+                    let file = file.ok_or(OxideError::InvalidFormat(
+                        "prepared file entry missing file handle",
+                    ))?;
                     self.pending_file = Some(PendingFile {
                         remaining: entry.size,
                         writer: BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file),
-                        path: out_path,
+                        path,
                         entry,
                     });
                 }
-                crate::ArchiveEntryKind::Symlink => {
-                    let target = entry.target.as_deref().ok_or(OxideError::InvalidFormat(
-                        "symlink manifest entry missing target",
-                    ))?;
-                    let output_started = Instant::now();
-                    create_symlink(&out_path, target)?;
-                    self.stats
-                        .record_output_create_file(output_started.elapsed());
-                    self.defer_file_metadata(out_path, entry);
+                PreparedRestoreEntry::Symlink {
+                    path,
+                    entry,
+                    create_elapsed,
+                } => {
+                    self.stats.record_output_create_file(create_elapsed);
+                    self.defer_file_metadata(path, entry);
                 }
             }
         }
 
         Ok(())
+    }
+
+    fn receive_prepared_entry(&self) -> Result<PreparedRestoreEntry> {
+        self.prepared_entry_rx.recv().map_err(|_| {
+            crate::OxideError::CompressionError(
+                "prepared entry queue closed before completion".to_string(),
+            )
+        })?
+    }
+
+    fn join_prepared_entries(&mut self) -> Result<()> {
+        let Some(handle) = self.prepared_entry_handle.take() else {
+            return Ok(());
+        };
+
+        handle.join().map_err(|payload| {
+            let details = if let Some(message) = payload.downcast_ref::<&str>() {
+                (*message).to_string()
+            } else if let Some(message) = payload.downcast_ref::<String>() {
+                message.clone()
+            } else {
+                "unknown panic payload".to_string()
+            };
+            crate::OxideError::CompressionError(format!(
+                "prepared entry worker thread panicked: {details}"
+            ))
+        })?
     }
 
     fn finalize_pending_file(&mut self) -> Result<()> {
@@ -399,6 +455,61 @@ fn build_restore_entries(root: &Path, manifest: ArchiveManifest) -> Result<Vec<R
 
 fn path_depth(path: &Path) -> usize {
     path.components().count()
+}
+
+fn spawn_prepared_restore_entries(
+    entries: Vec<RestoreEntry>,
+) -> (
+    Receiver<Result<PreparedRestoreEntry>>,
+    thread::JoinHandle<Result<()>>,
+) {
+    let (tx, rx) = bounded::<Result<PreparedRestoreEntry>>(PREPARED_ENTRY_QUEUE_CAPACITY);
+    let handle = thread::spawn(move || -> Result<()> {
+        for restore_entry in entries {
+            let prepared = prepare_restore_entry(restore_entry);
+            let stop_after_send = prepared.is_err();
+            if tx.send(prepared).is_err() {
+                return Ok(());
+            }
+            if stop_after_send {
+                return Ok(());
+            }
+        }
+        Ok(())
+    });
+
+    (rx, handle)
+}
+
+fn prepare_restore_entry(restore_entry: RestoreEntry) -> Result<PreparedRestoreEntry> {
+    let RestoreEntry { path, entry } = restore_entry;
+    match entry.kind {
+        crate::ArchiveEntryKind::Directory => Ok(PreparedRestoreEntry::Directory { path, entry }),
+        crate::ArchiveEntryKind::File => {
+            let has_payload = entry.size > 0;
+            let create_started = Instant::now();
+            let file = fs::File::create(&path)?;
+            let create_elapsed = create_started.elapsed();
+            Ok(PreparedRestoreEntry::File {
+                path,
+                entry,
+                file: has_payload.then_some(file),
+                create_elapsed,
+            })
+        }
+        crate::ArchiveEntryKind::Symlink => {
+            let target = entry.target.as_deref().ok_or(OxideError::InvalidFormat(
+                "symlink manifest entry missing target",
+            ))?;
+            let create_started = Instant::now();
+            create_symlink(&path, target)?;
+            Ok(PreparedRestoreEntry::Symlink {
+                path,
+                entry,
+                create_elapsed: create_started.elapsed(),
+            })
+        }
+    }
 }
 
 fn apply_pending_metadata_in_parallel(entries: &[PendingMetadata]) -> Result<()> {
