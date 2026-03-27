@@ -1,7 +1,7 @@
 import { ChevronRight, FolderOpen, LoaderCircle, RefreshCw, Undo2 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { ScrollArea } from '@/components/ui/scroll-area'
+import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 import { ArchiveCreationDialog } from './ArchiveCreationDialog'
 import { FileIcon } from './FileIcon'
@@ -16,6 +16,11 @@ interface ContextMenuState {
   x: number
   y: number
 }
+
+// Virtualization constants
+const ROW_HEIGHT = 52 // Height of each row in pixels (py-3 + content)
+const OVERSCAN_COUNT = 5 // Number of extra rows to render above/below viewport
+const MIN_ROWS_FOR_VIRTUALIZATION = 50 // Only virtualize if more than this many rows
 
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes < 0) {
@@ -56,9 +61,91 @@ function entryTypeLabel(entry: ExplorerEntry) {
   return entry.extension ? `${entry.extension.toUpperCase()} File` : 'File'
 }
 
+// Virtual list hook for efficient rendering of large lists
+function useVirtualList<T>(items: T[], rowHeight: number, overscan: number) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(0)
+
+  const shouldVirtualize = items.length >= MIN_ROWS_FOR_VIRTUALIZATION
+
+  useEffect(() => {
+    if (!shouldVirtualize) return
+
+    const scrollContainer = scrollRef.current?.querySelector('[data-radix-scroll-area-viewport]')
+    if (!scrollContainer) return
+
+    const handleScroll = () => {
+      setScrollTop(scrollContainer.scrollTop)
+    }
+
+    const resizeObserver = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setViewportHeight(entry.contentRect.height)
+      }
+    })
+
+    // Initial measurements
+    setViewportHeight(scrollContainer.clientHeight)
+    setScrollTop(scrollContainer.scrollTop)
+
+    scrollContainer.addEventListener('scroll', handleScroll, { passive: true })
+    resizeObserver.observe(scrollContainer)
+
+    return () => {
+      scrollContainer.removeEventListener('scroll', handleScroll)
+      resizeObserver.disconnect()
+    }
+  }, [shouldVirtualize])
+
+  const virtualItems = useMemo(() => {
+    if (!shouldVirtualize) {
+      return items.map((item, index) => ({
+        item,
+        index,
+        style: {},
+      }))
+    }
+
+    const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan)
+    const endIndex = Math.min(
+      items.length,
+      Math.ceil((scrollTop + viewportHeight) / rowHeight) + overscan
+    )
+
+    return items.slice(startIndex, endIndex).map((item, i) => ({
+      item,
+      index: startIndex + i,
+      style: {
+        position: 'absolute' as const,
+        top: (startIndex + i) * rowHeight,
+        height: rowHeight,
+        left: 0,
+        right: 0,
+      },
+    }))
+  }, [items, scrollTop, viewportHeight, rowHeight, overscan, shouldVirtualize])
+
+  const totalHeight = items.length * rowHeight
+  return {
+    scrollRef,
+    virtualItems,
+    totalHeight,
+    shouldVirtualize,
+  }
+}
+
 export function ExplorerContent({ explorer }: ExplorerContentProps) {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const contextMenuRef = useRef<HTMLDivElement | null>(null)
+
+  // Setup virtualization for entries
+  const {
+    scrollRef,
+    virtualItems,
+    totalHeight,
+    shouldVirtualize,
+  } = useVirtualList(explorer.entries, ROW_HEIGHT, OVERSCAN_COUNT)
 
   useEffect(() => {
     if (!contextMenu) {
@@ -93,6 +180,32 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
   }, [contextMenu])
 
   const isEmptyState = explorer.mode === 'filesystem' && !explorer.currentPath
+
+  // Handle context menu for virtualized rows
+  const handleContextMenu = useCallback((
+    event: React.MouseEvent,
+    entry: ExplorerEntry
+  ) => {
+    if (explorer.mode !== 'filesystem') {
+      return
+    }
+
+    if (!entry.isDirectory && !entry.isOxideArchive) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    explorer.setSelectedEntryPath(entry.path)
+
+    const menuWidth = 220
+    const menuHeight = entry.isOxideArchive ? 170 : 52
+    setContextMenu({
+      entry,
+      x: Math.min(event.clientX, window.innerWidth - menuWidth),
+      y: Math.min(event.clientY, window.innerHeight - menuHeight),
+    })
+  }, [explorer])
 
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-surface/20 px-3 py-3">
@@ -199,7 +312,7 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
               </div>
             </div>
 
-            <ScrollArea className="min-h-0 flex-1">
+            <ScrollArea ref={scrollRef} className="min-h-0 flex-1">
               <div className="px-2 py-1">
                 {explorer.isLoading && explorer.entries.length === 0 ? (
                   <div className="flex min-h-[360px] items-center justify-center gap-3 text-sm text-muted-foreground">
@@ -211,71 +324,61 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
                     This folder is empty.
                   </div>
                 ) : (
-                  explorer.entries.map(entry => {
-                    const isSelected = explorer.selectedEntryPath === entry.path
+                  <div
+                    style={shouldVirtualize ? {
+                      height: totalHeight,
+                      position: 'relative',
+                    } : undefined}
+                  >
+                    {virtualItems.map(({ item: entry, style }) => {
+                      const isSelected = explorer.selectedEntryPath === entry.path
 
-                    return (
-                      <button
-                        key={entry.path}
-                        type="button"
-                        onClick={() => explorer.setSelectedEntryPath(entry.path)}
-                        onDoubleClick={() => void explorer.openEntry(entry)}
-                        onContextMenu={event => {
-                          if (explorer.mode !== 'filesystem') {
-                            return
-                          }
-
-                          if (!entry.isDirectory && !entry.isOxideArchive) {
-                            return
-                          }
-
-                          event.preventDefault()
-                          event.stopPropagation()
-                          explorer.setSelectedEntryPath(entry.path)
-
-                          const menuWidth = 220
-                          const menuHeight = entry.isOxideArchive ? 170 : 52
-                          setContextMenu({
-                            entry,
-                            x: Math.min(event.clientX, window.innerWidth - menuWidth),
-                            y: Math.min(event.clientY, window.innerHeight - menuHeight),
-                          })
-                        }}
-                        className={cn(
-                          'grid w-full grid-cols-[minmax(0,1fr)_92px_120px_140px] items-center gap-4 border-b border-border/30 px-4 py-3 text-left text-sm transition-colors',
-                          isSelected
-                            ? 'bg-selection/70 text-selection-foreground'
-                            : 'bg-transparent hover:bg-surface-elevated/70'
-                        )}
-                      >
-                        <div className="flex min-w-0 items-center gap-3">
-                          <FileIcon
-                            name={entry.name}
-                            isDirectory={entry.isDirectory}
-                            open={isSelected && entry.isDirectory}
-                            className="size-5 shrink-0"
-                          />
-                          <div className="min-w-0">
-                            <p className="truncate font-medium">{entry.name}</p>
+                      return (
+                        <button
+                          key={entry.path}
+                          type="button"
+                          onClick={() => explorer.setSelectedEntryPath(entry.path)}
+                          onDoubleClick={() => void explorer.openEntry(entry)}
+                          onContextMenu={event => handleContextMenu(event, entry)}
+                          className={cn(
+                            'grid w-full grid-cols-[minmax(0,1fr)_92px_120px_140px] items-center gap-4 border-b border-border/30 px-4 py-3 text-left text-sm transition-colors',
+                            isSelected
+                              ? 'bg-selection/70 text-selection-foreground'
+                              : 'bg-transparent hover:bg-surface-elevated/70',
+                            shouldVirtualize && 'absolute'
+                          )}
+                          style={shouldVirtualize ? style : undefined}
+                        >
+                          <div className="flex min-w-0 items-center gap-3">
+                            <FileIcon
+                              name={entry.name}
+                              isDirectory={entry.isDirectory}
+                              open={isSelected && entry.isDirectory}
+                              className="size-5 shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <p className="truncate font-medium">{entry.name}</p>
+                            </div>
                           </div>
-                        </div>
 
-                        <span className="truncate text-muted-foreground">
-                          {entry.isDirectory ? '—' : formatBytes(entry.size)}
-                        </span>
+                          <span className="truncate text-muted-foreground">
+                            {entry.isDirectory ? '—' : formatBytes(entry.size)}
+                          </span>
 
-                        <span className="truncate text-muted-foreground">
-                          {entryTypeLabel(entry)}
-                        </span>
+                          <span className="truncate text-muted-foreground">
+                            {entryTypeLabel(entry)}
+                          </span>
 
-                        <span className="truncate text-muted-foreground">
-                          {formatDate(entry.modifiedAt)}
-                        </span>
-                      </button>
-                    )
-                  })
+                          <span className="truncate text-muted-foreground">
+                            {formatDate(entry.modifiedAt)}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
                 )}
               </div>
+              <ScrollBar />
             </ScrollArea>
 
             <div className="flex items-center justify-between gap-2 border-t border-border/40 px-4 py-2 text-xs text-muted-foreground">
