@@ -31,11 +31,11 @@
         "stream_read_buffer": "64M",
         "inflight_bytes": "2G",
         "inflight_blocks_per_worker": 64,
-        "producer_threads": 6,
+        "producer_threads": 3,
         "result_wait_ms": 1,
         "directory_mmap_threshold": "8M",
         "writer_queue_blocks": 1024,
-        "dictionary_mode": "auto"
+        "dictionary_mode": "off"
       },
       "balanced": {
         "compression": {
@@ -50,10 +50,10 @@
         "directory_mmap_threshold": "8M",
         "inflight_bytes": "2G",
         "inflight_blocks_per_worker": 48,
-        "producer_threads": 6,
+        "producer_threads": 3,
         "writer_queue_blocks": 768,
         "result_wait_ms": 1,
-        "dictionary_mode": "auto"
+        "dictionary_mode": "off"
       },
       "ultra": {
         "compression": {
