@@ -796,9 +796,21 @@ fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>
         Some(ReportValue::U64(value)) if *value > 0
     ));
     assert!(report.main_thread.stage_us.contains_key("ordered_write"));
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("output_create_files")
+    );
     assert!(report.main_thread.stage_us.contains_key("output_data"));
     assert!(report.main_thread.stage_us.contains_key("output_flush"));
     assert!(report.main_thread.stage_us.contains_key("output_metadata"));
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("output_metadata_files")
+    );
     Ok(())
 }
 
@@ -837,11 +849,41 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
         Some(ReportValue::U64(2))
     ));
     assert!(report.main_thread.stage_us.contains_key("directory_decode"));
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("output_prepare_directories")
+    );
     assert!(report.main_thread.stage_us.contains_key("output_write"));
     assert!(report.main_thread.stage_us.contains_key("output_create"));
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("output_create_directories")
+    );
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("output_create_files")
+    );
     assert!(report.main_thread.stage_us.contains_key("output_data"));
     assert!(report.main_thread.stage_us.contains_key("output_flush"));
     assert!(report.main_thread.stage_us.contains_key("output_metadata"));
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("output_metadata_files")
+    );
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("output_metadata_directories")
+    );
     Ok(())
 }
 

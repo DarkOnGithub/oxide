@@ -1650,8 +1650,13 @@ def build_oxide_telemetry_summaries(
 
         for stage_key in (
             "writer_enqueue_blocked",
+            "output_prepare_directories",
             "output_create",
+            "output_create_directories",
+            "output_create_files",
             "output_metadata",
+            "output_metadata_files",
+            "output_metadata_directories",
             "output_flush",
         ):
             value = stage_timings.get(stage_key)

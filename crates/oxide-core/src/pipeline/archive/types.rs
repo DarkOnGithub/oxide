@@ -76,11 +76,16 @@ pub struct ExtractStageTimings {
     pub merge: Duration,
     pub ordered_write: Duration,
     pub directory_decode: Duration,
+    pub output_prepare_directories: Duration,
     pub output_write: Duration,
     pub output_create: Duration,
+    pub output_create_directories: Duration,
+    pub output_create_files: Duration,
     pub output_data: Duration,
     pub output_flush: Duration,
     pub output_metadata: Duration,
+    pub output_metadata_files: Duration,
+    pub output_metadata_directories: Duration,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

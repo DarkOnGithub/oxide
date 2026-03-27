@@ -64,15 +64,25 @@ struct FileRestoreStats {
     ordered_write_time: Duration,
     output_write: Duration,
     output_create: Duration,
+    output_create_directories: Duration,
+    output_create_files: Duration,
     output_data: Duration,
     output_flush: Duration,
     output_metadata: Duration,
+    output_metadata_files: Duration,
 }
 
 impl FileRestoreStats {
-    fn record_output_create(&mut self, elapsed: Duration) {
+    fn record_output_create_directories(&mut self, elapsed: Duration) {
         self.output_write += elapsed;
         self.output_create += elapsed;
+        self.output_create_directories += elapsed;
+    }
+
+    fn record_output_create_file(&mut self, elapsed: Duration) {
+        self.output_write += elapsed;
+        self.output_create += elapsed;
+        self.output_create_files += elapsed;
     }
 
     fn record_output_data(&mut self, elapsed: Duration) {
@@ -85,21 +95,25 @@ impl FileRestoreStats {
         self.output_flush += elapsed;
     }
 
-    fn record_output_metadata(&mut self, elapsed: Duration) {
+    fn record_output_metadata_file(&mut self, elapsed: Duration) {
         self.output_write += elapsed;
         self.output_metadata += elapsed;
+        self.output_metadata_files += elapsed;
     }
 }
 
 impl FileChunkWriter {
     fn create(path: &Path, entry: crate::ArchiveListingEntry) -> Result<Self> {
         let mut stats = FileRestoreStats::default();
-        let output_started = Instant::now();
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+            let output_started = Instant::now();
             fs::create_dir_all(parent)?;
+            stats.record_output_create_directories(output_started.elapsed());
         }
+
+        let output_started = Instant::now();
         let file = fs::File::create(path)?;
-        stats.record_output_create(output_started.elapsed());
+        stats.record_output_create_file(output_started.elapsed());
         Ok(Self {
             writer: BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file),
             path: path.to_path_buf(),
@@ -116,7 +130,7 @@ impl FileChunkWriter {
         let metadata_started = Instant::now();
         apply_entry_metadata(&self.path, &self.entry)?;
         self.stats
-            .record_output_metadata(metadata_started.elapsed());
+            .record_output_metadata_file(metadata_started.elapsed());
         Ok(())
     }
 
@@ -957,9 +971,12 @@ fn apply_file_restore_stats(stage_timings: &mut ExtractStageTimings, stats: File
         .saturating_sub(stats.ordered_write_time);
     stage_timings.output_write += stats.output_write;
     stage_timings.output_create += stats.output_create;
+    stage_timings.output_create_directories += stats.output_create_directories;
+    stage_timings.output_create_files += stats.output_create_files;
     stage_timings.output_data += stats.output_data;
     stage_timings.output_flush += stats.output_flush;
     stage_timings.output_metadata += stats.output_metadata;
+    stage_timings.output_metadata_files += stats.output_metadata_files;
 }
 
 fn apply_directory_restore_stats(
@@ -970,11 +987,16 @@ fn apply_directory_restore_stats(
         .ordered_write
         .saturating_sub(restore_stats.ordered_write_time);
     stage_timings.directory_decode += restore_stats.directory_decode;
+    stage_timings.output_prepare_directories += restore_stats.output_prepare_directories;
     stage_timings.output_write += restore_stats.output_write;
     stage_timings.output_create += restore_stats.output_create;
+    stage_timings.output_create_directories += restore_stats.output_create_directories;
+    stage_timings.output_create_files += restore_stats.output_create_files;
     stage_timings.output_data += restore_stats.output_data;
     stage_timings.output_flush += restore_stats.output_flush;
     stage_timings.output_metadata += restore_stats.output_metadata;
+    stage_timings.output_metadata_files += restore_stats.output_metadata_files;
+    stage_timings.output_metadata_directories += restore_stats.output_metadata_directories;
 }
 
 fn receive_decode_result(
