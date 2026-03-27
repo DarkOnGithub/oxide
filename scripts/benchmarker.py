@@ -384,7 +384,7 @@ def cleanup_path(path: Path) -> None:
 
 def apparent_size(path: Path) -> int:
     """
-    Calculates size exactly like `du -sb`.
+    Calculates size like `du -sb` for file entries.
     Uses lstat to avoid following symlinks and tracks inodes to avoid double-counting hard links.
     """
     if not path.exists():
@@ -394,12 +394,14 @@ def apparent_size(path: Path) -> int:
 
     total = 0
     seen_inodes = set()
-    for root, _, files in os.walk(path):
-        for name in files:
+    for root, dirs, files in os.walk(path):
+        for name in files + dirs:
             file_path = Path(root) / name
             try:
                 st = file_path.lstat()
                 # Deduplicate hard links by inode
+                if file_path.is_dir() and not file_path.is_symlink():
+                    continue
                 if st.st_nlink > 1:
                     if st.st_ino in seen_inodes:
                         continue
@@ -1482,8 +1484,10 @@ def sevenzip_extract_command(
         str(settings.squashfs_output.with_suffix(".7z")),
         f"-o{settings.squashfs_extract_dir}",
         "-aoa",
-        "-snl",  # Extract Symbolic Links natively
-        "-snh",  # Extract Hard Links natively
+        "-snl",  # Extract Symbolic Links
+        "-snh",  # Extract Hard Links
+        "-snld",  # Extract Symbolic Links for directories
+        "-spe",  # ALLOW "dangerous" symlink paths (the critical fix)
     ]
     command.insert(2, f"-mmt={resolved_thread_count(settings, __workers)}")
     return command
