@@ -6,19 +6,19 @@ use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
-use crossbeam_channel::{bounded, never, Receiver};
+use crossbeam_channel::{Receiver, bounded, never, unbounded};
 use regex::RegexSet;
 
+use crate::OxideError;
 use crate::format::ArchiveManifest;
 use crate::types::Result;
-use crate::OxideError;
 
 use super::super::directory;
 use super::reorder_writer::OrderedChunkWriter;
@@ -549,7 +549,7 @@ fn spawn_prepared_restore_entries(
         }
 
         let cancelled = Arc::new(AtomicBool::new(false));
-        let (work_tx, work_rx) = bounded::<(usize, RestoreEntry)>(PREPARED_ENTRY_QUEUE_CAPACITY);
+        let (work_tx, work_rx) = unbounded::<(usize, RestoreEntry)>();
         let (result_tx, result_rx) =
             bounded::<(usize, Result<PreparedRestoreEntry>)>(PREPARED_ENTRY_QUEUE_CAPACITY);
 
