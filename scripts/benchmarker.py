@@ -56,6 +56,7 @@ class ModeConfig:
     compression: str
     compression_level: str | None
     block_size: str = "1M"
+    lzma_dictionary_size: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class Settings:
     oxide_extract_dir: Path
     squashfs_extract_dir: Path
     threads: int
+    logical_threads: int
     worker_modes: tuple[str, ...]
     passes: int
     skip_extract: bool
@@ -169,8 +171,18 @@ MODE_CONFIGS: dict[str, ModeConfig] = {
         compression_level="6",
         block_size="1M",
     ),
-    "ultra": ModeConfig(compression="lzma", compression_level="7", block_size="2M"),
-    "extreme": ModeConfig(compression="lzma", compression_level="9", block_size="4M"),
+    "ultra": ModeConfig(
+        compression="lzma",
+        compression_level="7",
+        block_size="2M",
+        lzma_dictionary_size="2M",
+    ),
+    "extreme": ModeConfig(
+        compression="lzma",
+        compression_level="9",
+        block_size="4M",
+        lzma_dictionary_size="4M",
+    ),
 }
 
 MODE_BASELINES: dict[str, str] = {
@@ -304,6 +316,7 @@ def parse_args() -> Settings:
         oxide_extract_dir=Path(args.oxide_extract_dir),
         squashfs_extract_dir=Path(args.squashfs_extract_dir),
         threads=args.threads,
+        logical_threads=os.cpu_count() or 1,
         worker_modes=worker_modes,
         passes=args.passes,
         skip_extract=args.skip_extract,
@@ -1165,7 +1178,7 @@ def print_run_header(
             f"source size: [cyan]{format_bytes(source_bytes)}[/cyan]\n"
             f"modes: [cyan]{', '.join(settings.modes)}[/cyan]\n"
             f"worker modes: [cyan]{worker_modes}[/cyan]\n"
-            f"passes: [cyan]{settings.passes}[/cyan]  baseline threads: [cyan]{settings.threads}[/cyan]\n"
+            f"passes: [cyan]{settings.passes}[/cyan]  explicit threads: [cyan]{settings.threads}[/cyan]  auto threads: [cyan]{settings.logical_threads}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
             f"drop caches: [cyan]{'yes' if settings.drop_caches else 'no'}[/cyan]\n"
             f"shuffle seed: [cyan]{settings.shuffle_seed}[/cyan]\n"
@@ -1364,6 +1377,10 @@ def step_key(step: Step, pass_num: int) -> str:
     return f"p{pass_num:02d}_{step.mode}_{step.workers}_{step.tool}_{step.phase}"
 
 
+def resolved_thread_count(settings: Settings, workers: str) -> str:
+    return workers if workers != "auto" else str(settings.logical_threads)
+
+
 def oxide_archive_command(
     settings: Settings, mode: str, config: ModeConfig, workers: str
 ) -> list[str]:
@@ -1375,6 +1392,8 @@ def oxide_archive_command(
         str(settings.oxide_output),
         "--preset",
         mode,
+        "--block-size",
+        config.block_size,
     ]
     if workers != "auto":
         command.extend(["--workers", workers])
@@ -1425,7 +1444,7 @@ def mksquashfs_command(
         "-b",
         block_size,
         "-processors",
-        workers if workers != "auto" else str(settings.threads),
+        resolved_thread_count(settings, workers),
     ]
     if config.compression_level is not None:
         command.extend(["-Xcompression-level", config.compression_level])
@@ -1435,15 +1454,16 @@ def mksquashfs_command(
 def sevenzip_archive_command(
     settings: Settings, mode: str, config: ModeConfig, workers: str
 ) -> list[str]:
-    mmt = workers if workers != "auto" else str(settings.threads)
+    mmt = resolved_thread_count(settings, workers)
+    dictionary_size = config.lzma_dictionary_size or config.block_size
     return [
         resolve_tool("7zz", "7z"),
         "a",
         "-t7z",
-        "-mx=9",
+        f"-mx={config.compression_level or '9'}",
         "-ms=on",
         "-m0=LZMA2",
-        f"-md={config.block_size}",
+        f"-md={dictionary_size}",
         f"-mmt={mmt}",
         "-snl",  # Store Symbolic Links
         "-snh",  # Store Hard Links
@@ -1465,8 +1485,7 @@ def sevenzip_extract_command(
         "-snl",  # Extract Symbolic Links natively
         "-snh",  # Extract Hard Links natively
     ]
-    if __workers != "auto":
-        command.insert(2, f"-mmt={__workers}")
+    command.insert(2, f"-mmt={resolved_thread_count(settings, __workers)}")
     return command
 
 
@@ -1813,6 +1832,7 @@ def run_bench_with_telemetry(
             "oxide_output": str(settings.oxide_output),
             "squashfs_output": str(settings.squashfs_output),
             "threads": settings.threads,
+            "logical_threads": settings.logical_threads,
             "worker_modes": list(settings.worker_modes),
             "passes": settings.passes,
             "skip_extract": settings.skip_extract,
@@ -1821,6 +1841,15 @@ def run_bench_with_telemetry(
             "workers": settings.threads,
             "shuffle_seed": settings.shuffle_seed,
             "squashfs_block_size": settings.squashfs_block_size,
+            "mode_configs": {
+                mode: {
+                    "compression": MODE_CONFIGS[mode].compression,
+                    "compression_level": MODE_CONFIGS[mode].compression_level,
+                    "block_size": MODE_CONFIGS[mode].block_size,
+                    "lzma_dictionary_size": MODE_CONFIGS[mode].lzma_dictionary_size,
+                }
+                for mode in settings.modes
+            },
             "host_telemetry": True,
             "host_telemetry_sample_interval_s": 0.05,
             "telemetry_dir": str(telemetry_run_dir),
