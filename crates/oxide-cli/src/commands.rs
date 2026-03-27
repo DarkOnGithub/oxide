@@ -44,6 +44,8 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         result_wait_ms,
         telemetry_details,
     } = args;
+    let workers_explicitly_requested = workers.is_some();
+    let producer_threads_explicitly_requested = producer_threads.is_some();
     let settings = resolve_archive_settings(
         preset_file.as_deref(),
         preset.as_deref(),
@@ -72,13 +74,23 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         std::fs::create_dir_all(parent)?;
     }
 
-    let producer_threads = settings.producer_threads.max(1);
-    let compression_workers = resolve_archive_workers(settings.workers, producer_threads);
+    let compression_workers = resolve_archive_workers(settings.workers);
+    let producer_threads = resolve_archive_producer_threads(
+        settings.producer_threads,
+        compression_workers,
+        workers_explicitly_requested,
+        producer_threads_explicitly_requested,
+    );
     let buffer_pool = Arc::new(BufferPool::new(
         settings.pool_capacity.max(1),
         settings.pool_buffers.max(1),
     ));
-    let pipeline = build_archive_pipeline(&settings, compression_workers, Arc::clone(&buffer_pool));
+    let pipeline = build_archive_pipeline(
+        &settings,
+        compression_workers,
+        producer_threads,
+        Arc::clone(&buffer_pool),
+    );
     let output_file = File::create(&output_path)?;
     let telemetry_options = RunTelemetryOptions {
         progress_interval: Duration::from_millis(settings.stats_interval_ms.max(50)),
@@ -205,6 +217,7 @@ pub fn tree(args: TreeArgs) -> AppResult {
 fn build_archive_pipeline(
     settings: &ResolvedArchiveSettings,
     workers: usize,
+    producer_threads: usize,
     buffer_pool: Arc<BufferPool>,
 ) -> ArchivePipeline {
     let mut performance = PipelinePerformanceOptions::default();
@@ -214,7 +227,7 @@ fn build_archive_pipeline(
     performance.max_inflight_bytes = settings.inflight_bytes.max(1);
     performance.max_inflight_blocks_per_worker = settings.inflight_blocks_per_worker.max(1);
     performance.directory_stream_read_buffer_size = settings.stream_read_buffer.max(1);
-    performance.producer_threads = settings.producer_threads.max(1);
+    performance.producer_threads = producer_threads.max(1);
     performance.directory_mmap_threshold_bytes = settings.directory_mmap_threshold.max(1);
     performance.writer_result_queue_blocks = settings.writer_queue_blocks.max(1);
     performance.result_wait_timeout = Duration::from_millis(settings.result_wait_ms.max(1));
@@ -246,48 +259,65 @@ fn build_extract_pipeline(workers: usize) -> ArchivePipeline {
     ArchivePipeline::new(config)
 }
 
-fn resolve_archive_workers(requested_workers: usize, producer_threads: usize) -> usize {
-    let physical_cores = num_cpus::get_physical().max(1);
-    let reserved_producers = producer_threads.min(2);
-    let reserved_threads = reserved_producers.saturating_add(1);
-    let available_workers = physical_cores.saturating_sub(reserved_threads).max(1);
-
+fn resolve_archive_workers(requested_workers: usize) -> usize {
     if requested_workers > 0 {
-        return requested_workers.min(available_workers).max(1);
+        return requested_workers.max(1);
     }
 
-    available_workers
+    num_cpus::get().max(1)
+}
+
+fn resolve_archive_producer_threads(
+    requested_producer_threads: usize,
+    compression_workers: usize,
+    workers_explicitly_requested: bool,
+    producer_threads_explicitly_requested: bool,
+) -> usize {
+    let configured = requested_producer_threads.max(1);
+    if producer_threads_explicitly_requested || !workers_explicitly_requested {
+        return configured;
+    }
+
+    let logical_cores = num_cpus::get().max(1);
+    let spare_logical_cores = logical_cores.saturating_sub(compression_workers);
+    configured
+        .min(1usize.saturating_add(spare_logical_cores))
+        .max(1)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_archive_workers;
+    use super::{resolve_archive_producer_threads, resolve_archive_workers};
 
     #[test]
     fn explicit_worker_count_is_preserved() {
-        let physical_cores = num_cpus::get_physical().max(1);
-        let available = physical_cores.saturating_sub(3).max(1);
-        let requested = available.min(4);
-
-        assert_eq!(resolve_archive_workers(requested, 8), requested);
+        assert_eq!(resolve_archive_workers(16), 16);
+        assert_eq!(resolve_archive_workers(3), 3);
     }
 
     #[test]
-    fn explicit_worker_count_is_capped_to_available_budget() {
-        let physical_cores = num_cpus::get_physical().max(1);
-        let expected = physical_cores.saturating_sub(3).max(1);
-
-        assert_eq!(resolve_archive_workers(physical_cores + 8, 4), expected);
-        assert_eq!(resolve_archive_workers(physical_cores + 8, 8), expected);
+    fn auto_worker_count_uses_logical_core_count() {
+        assert_eq!(resolve_archive_workers(0), num_cpus::get().max(1));
     }
 
     #[test]
-    fn auto_worker_count_caps_reserved_producer_threads() {
-        let physical_cores = num_cpus::get_physical().max(1);
-        let expected = physical_cores.saturating_sub(3).max(1);
+    fn explicit_producer_thread_count_is_preserved() {
+        assert_eq!(resolve_archive_producer_threads(4, 16, true, true), 4);
+        assert_eq!(resolve_archive_producer_threads(2, 4, false, true), 2);
+    }
 
-        assert_eq!(resolve_archive_workers(0, 4), expected);
-        assert_eq!(resolve_archive_workers(0, 8), expected);
+    #[test]
+    fn preset_producer_threads_shrink_when_explicit_workers_consume_all_logical_cores() {
+        let logical_cores = num_cpus::get().max(1);
+        assert_eq!(
+            resolve_archive_producer_threads(3, logical_cores, true, false),
+            1
+        );
+    }
+
+    #[test]
+    fn preset_producer_threads_are_preserved_when_workers_are_auto() {
+        assert_eq!(resolve_archive_producer_threads(3, 8, false, false), 3);
     }
 }
 
