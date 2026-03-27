@@ -1,9 +1,5 @@
 import { cn } from '@/lib/utils'
-import {
-  TitleBarLeftActions,
-  TitleBarRightActions,
-  TitleBarTitle,
-} from './TitleBarContent'
+import { TitleBarRightActions, TitleBarTitle } from './TitleBarContent'
 
 interface LinuxTitleBarProps {
   className?: string
@@ -28,11 +24,6 @@ export function LinuxTitleBar({ className, title }: LinuxTitleBarProps) {
         className
       )}
     >
-      {/* Left side - Actions */}
-      <div className="flex items-center pl-2">
-        <TitleBarLeftActions />
-      </div>
-
       {/* Center - Title */}
       <TitleBarTitle title={title} />
 

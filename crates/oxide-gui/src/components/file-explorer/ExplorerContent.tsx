@@ -15,69 +15,69 @@ interface ExplorerContentProps {
   explorer: FileExplorerState
 }
 
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '—'
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let size = bytes
+  let unitIndex = 0
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+
+  return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+}
+
+function formatDate(date: Date | null) {
+  if (!date) {
+    return '—'
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+  }).format(date)
+}
+
 export function ExplorerContent({ explorer }: ExplorerContentProps) {
   return (
-    <div className="flex h-full min-h-0 flex-col px-5 py-5">
-      <div className="flex min-h-0 flex-1 flex-col rounded-[28px] border border-border/70 bg-surface/85 shadow-[0_18px_70px_-48px_rgba(15,23,42,0.6)] backdrop-blur-xl">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-sm">
-              {explorer.breadcrumbs.length > 0 ? (
-                explorer.breadcrumbs.map((crumb, index) => (
-                  <div key={crumb.path} className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      className="cursor-pointer truncate rounded-lg px-2 py-1 text-sm font-medium text-foreground/80 transition-colors hover:bg-surface-elevated hover:text-foreground"
-                      onClick={() => explorer.openPath(crumb.path)}
-                    >
-                      {crumb.label}
-                    </button>
+    <div className="flex h-full min-h-0 flex-col bg-surface/20 px-3 py-3">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border/40 bg-background/70 shadow-sm backdrop-blur-xl">
+        <div className="border-b border-border/40 bg-background/70 px-3 py-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8 rounded-lg"
+                onClick={explorer.goToParent}
+                disabled={!explorer.canGoUp}
+                title="Up"
+              >
+                <Undo2 className="size-4" />
+              </Button>
 
-                    {index < explorer.breadcrumbs.length - 1 && (
-                      <ChevronRight className="size-4 text-muted-foreground" />
-                    )}
-                  </div>
-                ))
-              ) : (
-                <span className="text-sm text-muted-foreground">
-                  No folder selected
-                </span>
-              )}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8 rounded-lg"
+                onClick={explorer.refresh}
+                disabled={!explorer.currentPath || explorer.isRefreshing}
+                title="Refresh"
+              >
+                <RefreshCw
+                  className={cn('size-4', explorer.isRefreshing && 'animate-spin')}
+                />
+              </Button>
+
+              <div className="mx-1 h-5 w-px bg-border/60" />
             </div>
 
-            <p className="mt-1 truncate text-xs text-muted-foreground">
-              {explorer.currentPath ?? 'Select a folder on disk to start browsing.'}
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
             <Button
-              variant="outline"
-              size="sm"
-              className="cursor-pointer rounded-xl"
-              onClick={explorer.goToParent}
-              disabled={!explorer.canGoUp}
-            >
-              <Undo2 className="size-4" />
-              Up
-            </Button>
-
-            <Button
-              variant="outline"
-              size="sm"
-              className="cursor-pointer rounded-xl"
-              onClick={explorer.refresh}
-              disabled={!explorer.currentPath || explorer.isRefreshing}
-            >
-              <RefreshCw
-                className={cn('size-4', explorer.isRefreshing && 'animate-spin')}
-              />
-              Refresh
-            </Button>
-
-            <Button
-              size="sm"
-              className="cursor-pointer rounded-xl"
+              className="h-8 rounded-lg px-3"
               onClick={explorer.pickRootFolder}
               disabled={explorer.isPickingFolder}
             >
@@ -85,50 +85,77 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
               Open folder
             </Button>
           </div>
+
+          <div className="mt-3 flex min-w-0 items-center gap-2 rounded-xl border border-border/40 bg-muted/40 px-3 py-2">
+            <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+
+            {explorer.breadcrumbs.length > 0 ? (
+              <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-sm">
+                {explorer.breadcrumbs.map((crumb, index) => (
+                  <div key={crumb.path} className="flex min-w-0 items-center gap-1.5">
+                    <button
+                      type="button"
+                      className="truncate rounded-md px-1.5 py-0.5 text-left text-foreground transition-colors hover:bg-background/70"
+                      onClick={() => explorer.openPath(crumb.path)}
+                    >
+                      {crumb.label}
+                    </button>
+
+                    {index < explorer.breadcrumbs.length - 1 && (
+                      <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <span className="truncate text-sm text-foreground">
+                {explorer.currentPath ?? 'Select a folder'}
+              </span>
+            )}
+          </div>
         </div>
 
-        {!explorer.currentPath && (
-          <div className="flex min-h-[480px] flex-col items-center justify-center gap-4 px-6 py-12 text-center">
-            <div className="flex size-18 items-center justify-center rounded-[2rem] bg-primary/10 text-primary shadow-inner">
-              <FolderOpen className="size-9" />
-            </div>
-            <div>
-              <h3 className="text-xl font-semibold text-foreground">
-                Start from a folder on disk
+        {!explorer.currentPath ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center p-8 text-center">
+            <div className="max-w-sm">
+              <FolderOpen className="mx-auto size-10 text-muted-foreground/70" />
+              <h3 className="mt-4 text-lg font-semibold text-foreground">
+                Open a folder to begin
               </h3>
-              <p className="mt-2 max-w-md text-sm text-muted-foreground">
-                Choose a folder to load a clean, modern explorer view with themed icons.
+              <p className="mt-2 text-sm text-muted-foreground">
+                The explorer will show a clean list view once a folder is selected.
               </p>
+              <Button className="mt-4 rounded-lg" onClick={explorer.pickRootFolder}>
+                Open folder
+              </Button>
             </div>
-            <Button
-              className="cursor-pointer rounded-full px-5"
-              onClick={explorer.pickRootFolder}
-              disabled={explorer.isPickingFolder}
-            >
-              <FolderOpen className="size-4" />
-              Choose folder
-            </Button>
           </div>
-        )}
-
-        {explorer.currentPath && (
+        ) : (
           <>
             {explorer.error && (
-              <div className="mx-5 mt-5 rounded-2xl border border-destructive/20 bg-destructive/8 px-4 py-3 text-sm text-destructive">
+              <div className="mx-3 mt-3 rounded-xl border border-destructive/20 bg-destructive/8 px-3 py-2 text-sm text-destructive">
                 {explorer.error}
               </div>
             )}
 
-            <ScrollArea className="min-h-0 flex-1 px-3 py-3">
-              <div className="space-y-1 pb-3">
+            <div className="border-b border-border/40 px-4 py-3">
+              <div className="grid grid-cols-[minmax(0,1fr)_92px_120px_140px] gap-4 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                <span>Name</span>
+                <span>Size</span>
+                <span>Type</span>
+                <span>Modified</span>
+              </div>
+            </div>
+
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="px-2 py-1">
                 {explorer.isLoading && explorer.entries.length === 0 ? (
-                  <div className="flex min-h-[320px] items-center justify-center gap-3 text-sm text-muted-foreground">
+                  <div className="flex min-h-[360px] items-center justify-center gap-3 text-sm text-muted-foreground">
                     <LoaderCircle className="size-4 animate-spin" />
                     Loading folder contents...
                   </div>
                 ) : explorer.entries.length === 0 ? (
-                  <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground">
-                    <FolderOpen className="size-8 text-muted-foreground/80" />
+                  <div className="flex min-h-[360px] items-center justify-center text-sm text-muted-foreground">
                     This folder is empty.
                   </div>
                 ) : (
@@ -142,35 +169,39 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
                         onClick={() => explorer.setSelectedEntryPath(entry.path)}
                         onDoubleClick={() => explorer.openEntry(entry)}
                         className={cn(
-                          'group cursor-pointer flex w-full items-center gap-4 rounded-2xl border px-4 py-3 text-left transition-colors',
+                          'grid w-full grid-cols-[minmax(0,1fr)_92px_120px_140px] items-center gap-4 border-b border-border/30 px-4 py-3 text-left text-sm transition-colors',
                           isSelected
-                            ? 'border-primary/20 bg-selection text-selection-foreground'
-                            : 'border-transparent hover:border-border/70 hover:bg-surface-elevated/85'
+                            ? 'bg-selection/70 text-selection-foreground'
+                            : 'bg-transparent hover:bg-surface-elevated/70'
                         )}
                       >
-                        <div className="flex size-11 items-center justify-center rounded-2xl bg-background/80 shadow-sm ring-1 ring-border/60">
+                        <div className="flex min-w-0 items-center gap-3">
                           <FileIcon
                             name={entry.name}
                             isDirectory={entry.isDirectory}
                             open={isSelected && entry.isDirectory}
-                            className="size-5"
+                            className="size-5 shrink-0"
                           />
+                          <div className="min-w-0">
+                            <p className="truncate font-medium">{entry.name}</p>
+                          </div>
                         </div>
 
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium">{entry.name}</p>
-                          <p className="mt-0.5 text-xs text-muted-foreground group-hover:text-current/70">
-                            {entry.isDirectory
-                              ? 'Folder · double-click to open'
-                              : entry.extension
-                                ? `${entry.extension.toUpperCase()} file`
-                                : 'File'}
-                          </p>
-                        </div>
+                        <span className="truncate text-muted-foreground">
+                          {entry.isDirectory ? '—' : formatBytes(entry.size)}
+                        </span>
 
-                        {entry.isDirectory && (
-                          <ChevronRight className="size-4 shrink-0 text-muted-foreground group-hover:text-current/70" />
-                        )}
+                        <span className="truncate text-muted-foreground">
+                          {entry.isDirectory
+                            ? 'Folder'
+                            : entry.extension
+                              ? `${entry.extension.toUpperCase()} File`
+                              : 'File'}
+                        </span>
+
+                        <span className="truncate text-muted-foreground">
+                          {formatDate(entry.modifiedAt)}
+                        </span>
                       </button>
                     )
                   })
@@ -178,12 +209,12 @@ export function ExplorerContent({ explorer }: ExplorerContentProps) {
               </div>
             </ScrollArea>
 
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/60 px-5 py-3 text-xs text-muted-foreground">
+            <div className="flex items-center justify-between gap-2 border-t border-border/40 px-4 py-2 text-xs text-muted-foreground">
               <span>
                 {explorer.entries.length} items · {explorer.directoryEntries.length} folders ·{' '}
                 {explorer.fileEntries.length} files
               </span>
-              <span>Double-click folders to navigate</span>
+              <span>Select an item to inspect it</span>
             </div>
           </>
         )}

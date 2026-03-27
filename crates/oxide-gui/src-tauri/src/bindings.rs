@@ -1,9 +1,13 @@
 use tauri_specta::{collect_commands, Builder};
 
 pub fn generate_bindings() -> Builder<tauri::Wry> {
-    use crate::commands::{notifications, preferences, quick_pane, recovery};
+    use crate::commands::{
+        file_explorer, notifications, preferences, quick_pane, recovery, terminal,
+    };
 
     Builder::<tauri::Wry>::new().commands(collect_commands![
+        file_explorer::list_directory_entries,
+        file_explorer::get_path_metadata,
         preferences::greet,
         preferences::load_preferences,
         preferences::save_preferences,
@@ -16,6 +20,7 @@ pub fn generate_bindings() -> Builder<tauri::Wry> {
         quick_pane::toggle_quick_pane,
         quick_pane::get_default_quick_pane_shortcut,
         quick_pane::update_quick_pane_shortcut,
+        terminal::open_terminal_in_current_folder,
     ])
 }
 

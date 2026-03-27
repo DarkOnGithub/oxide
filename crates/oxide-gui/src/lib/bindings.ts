@@ -9,6 +9,28 @@
 
 export const commands = {
 /**
+ * Lists a directory and includes basic metadata for each entry.
+ */
+async listDirectoryEntries(path: string) : Promise<Result<ExplorerDirectoryEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_directory_entries", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Returns metadata for a file or folder path.
+ */
+async getPathMetadata(path: string) : Promise<Result<ExplorerPathMetadata, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_path_metadata", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Simple greeting command for demonstration purposes.
  */
 async greet(name: string) : Promise<Result<string, string>> {
@@ -142,6 +164,17 @@ async updateQuickPaneShortcut(shortcut: string | null) : Promise<Result<null, st
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Opens a terminal in the specified folder.
+ */
+async openTerminalInCurrentFolder(path: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_terminal_in_current_folder", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -170,6 +203,8 @@ quick_pane_shortcut: string | null;
  * If None, uses system locale detection
  */
 language: string | null }
+export type ExplorerDirectoryEntry = { name: string; path: string; isDirectory: boolean; isFile: boolean; isSymlink: boolean; size: number; modifiedAt: number | null }
+export type ExplorerPathMetadata = { isDirectory: boolean; isFile: boolean; isSymlink: boolean; size: number; modifiedAt: number | null; accessedAt: number | null; createdAt: number | null; readonly: boolean; mode: number | null; uid: number | null; gid: number | null }
 export type JsonValue = null | boolean | number | string | JsonValue[] | Partial<{ [key in string]: JsonValue }>
 /**
  * Error types for recovery operations (typed for frontend matching)
