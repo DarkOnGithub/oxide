@@ -1,6 +1,8 @@
 [workspace]
 members = [
-    "crates/*",
+    "crates/oxide-cli",
+    "crates/oxide-core",
+    "crates/oxide-gui/src-tauri",
 ]
 resolver = "2"
 
