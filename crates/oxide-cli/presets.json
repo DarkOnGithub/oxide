@@ -24,14 +24,14 @@
         "compression": {
           "compressor": "lz4"
         },
-        "block_size": "1M",
+        "block_size": "2M",
         "workers": 0,
-        "pool_capacity": "1M",
+        "pool_capacity": "2M",
         "pool_buffers": 1024,
         "stream_read_buffer": "64M",
         "inflight_bytes": "2G",
         "inflight_blocks_per_worker": 64,
-        "producer_threads": 3,
+        "producer_threads": 1,
         "result_wait_ms": 1,
         "directory_mmap_threshold": "8M",
         "writer_queue_blocks": 1024,
@@ -55,46 +55,12 @@
         "result_wait_ms": 1,
         "dictionary_mode": "auto"
       },
-      "balanced-dict": {
-        "compression": {
-          "compressor": "zstd",
-          "level": 9
-        },
-        "block_size": "2M",
-        "pool_capacity": "2M",
-        "pool_buffers": 512,
-        "stream_read_buffer": "32M",
-        "directory_mmap_threshold": "8M",
-        "inflight_bytes": "1536M",
-        "inflight_blocks_per_worker": 24,
-        "producer_threads": 2,
-        "writer_queue_blocks": 384,
-        "result_wait_ms": 2,
-        "dictionary_mode": "auto"
-      },
-      "ratio": {
-        "compression": {
-          "compressor": "zstd",
-          "level": 12
-        },
-        "block_size": "4M",
-        "workers": 0,
-        "pool_capacity": "4M",
-        "pool_buffers": 256,
-        "stream_read_buffer": "16M",
-        "directory_mmap_threshold": "16M",
-        "inflight_bytes": "1G",
-        "inflight_blocks_per_worker": 12,
-        "producer_threads": 1,
-        "writer_queue_blocks": 128,
-        "result_wait_ms": 4,
-        "dictionary_mode": "auto"
-      },
       "ultra": {
         "compression": {
           "compressor": "lzma",
           "level": 7,
-          "extreme": false
+          "extreme": false,
+          "dictionary_size": "2M"
         },
         "block_size": "2M",
         "workers": 0,
@@ -113,7 +79,8 @@
         "compression": {
           "compressor": "lzma",
           "level": 9,
-          "extreme": true
+          "extreme": false,
+          "dictionary_size": "4M"
         },
         "block_size": "4M",
         "workers": 0,

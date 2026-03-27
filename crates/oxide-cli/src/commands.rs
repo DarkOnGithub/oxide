@@ -223,6 +223,7 @@ fn build_archive_pipeline(
     let mut performance = PipelinePerformanceOptions::default();
     performance.compression_level = settings.compression_level;
     performance.lzma_extreme = settings.compression_extreme;
+    performance.lzma_dictionary_size = settings.lzma_dictionary_size;
     performance.dictionary_mode = settings.dictionary_mode;
     performance.max_inflight_bytes = settings.inflight_bytes.max(1);
     performance.max_inflight_blocks_per_worker = settings.inflight_blocks_per_worker.max(1);
