@@ -1,8 +1,12 @@
-import { dirname, join } from '@tauri-apps/api/path'
+import { dirname } from '@tauri-apps/api/path'
 import { open } from '@tauri-apps/plugin-dialog'
-import { readDir, stat, type FileInfo } from '@tauri-apps/plugin-fs'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
+import {
+  getPathMetadata,
+  listDirectoryEntries,
+  type ExplorerPathMetadataValue,
+} from '@/lib/file-explorer'
 import { logger } from '@/lib/logger'
 
 export interface ExplorerEntry {
@@ -12,6 +16,8 @@ export interface ExplorerEntry {
   isDirectory: boolean
   isFile: boolean
   isSymlink: boolean
+  size: number
+  modifiedAt: Date | null
 }
 
 export interface ExplorerBreadcrumb {
@@ -92,7 +98,8 @@ export function useFileExplorer() {
   const [currentPath, setCurrentPath] = useState<string | null>(null)
   const [entries, setEntries] = useState<ExplorerEntry[]>([])
   const [selectedEntryPath, setSelectedEntryPath] = useState<string | null>(null)
-  const [selectedEntryInfo, setSelectedEntryInfo] = useState<FileInfo | null>(null)
+  const [selectedEntryInfo, setSelectedEntryInfo] =
+    useState<ExplorerPathMetadataValue | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isPickingFolder, setIsPickingFolder] = useState(false)
@@ -107,18 +114,18 @@ export function useFileExplorer() {
       setError(null)
 
       try {
-        const directoryEntries = await readDir(path)
+        const directoryEntries = await listDirectoryEntries(path)
 
-        const nextEntries = await Promise.all(
-          directoryEntries.map(async entry => ({
-            name: entry.name,
-            path: await join(path, entry.name),
-            extension: getExtension(entry.name),
-            isDirectory: entry.isDirectory,
-            isFile: entry.isFile,
-            isSymlink: entry.isSymlink,
-          }))
-        )
+        const nextEntries = directoryEntries.map(entry => ({
+          name: entry.name,
+          path: entry.path,
+          extension: getExtension(entry.name),
+          isDirectory: entry.isDirectory,
+          isFile: entry.isFile,
+          isSymlink: entry.isSymlink,
+          size: entry.size,
+          modifiedAt: entry.modifiedAt,
+        }))
 
         const sortedEntries = nextEntries.sort(sortEntries)
 
@@ -131,12 +138,12 @@ export function useFileExplorer() {
 
         setSelectedEntryPath(previousSelection => {
           if (!options.preserveSelection || !previousSelection) {
-            return null
+            return sortedEntries[0]?.path ?? null
           }
 
           return sortedEntries.some(entry => entry.path === previousSelection)
             ? previousSelection
-            : null
+            : (sortedEntries[0]?.path ?? null)
         })
       } catch (loadError) {
         const message =
@@ -225,14 +232,16 @@ export function useFileExplorer() {
   }, [currentPath, loadDirectory, rootPath])
 
   useEffect(() => {
-    if (!selectedEntryPath) {
+    const infoPath = selectedEntryPath ?? currentPath
+
+    if (!infoPath) {
       setSelectedEntryInfo(null)
       return
     }
 
     let isMounted = true
 
-    stat(selectedEntryPath)
+    getPathMetadata(infoPath)
       .then(fileInfo => {
         if (isMounted) {
           setSelectedEntryInfo(fileInfo)
@@ -241,7 +250,7 @@ export function useFileExplorer() {
       .catch(selectionError => {
         logger.warn('Failed to load selected entry details', {
           error: selectionError,
-          path: selectedEntryPath,
+          path: infoPath,
         })
 
         if (isMounted) {
@@ -252,7 +261,7 @@ export function useFileExplorer() {
     return () => {
       isMounted = false
     }
-  }, [selectedEntryPath])
+  }, [currentPath, selectedEntryPath])
 
   const selectedEntry = useMemo(
     () => entries.find(entry => entry.path === selectedEntryPath) ?? null,

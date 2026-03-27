@@ -3,11 +3,7 @@ import { cn } from '@/lib/utils'
 import { usePlatform, type AppPlatform } from '@/hooks/use-platform'
 import { MacOSWindowControls } from './MacOSWindowControls'
 import { WindowsWindowControls } from './WindowsWindowControls'
-import {
-  TitleBarLeftActions,
-  TitleBarRightActions,
-  TitleBarTitle,
-} from './TitleBarContent'
+import { TitleBarRightActions, TitleBarTitle } from './TitleBarContent'
 import { LinuxTitleBar } from './LinuxTitleBar'
 
 interface TitleBarProps {
@@ -54,11 +50,6 @@ export function TitleBar({ className, title, forcePlatform }: TitleBarProps) {
           className
         )}
       >
-        {/* Left side - Actions */}
-        <div className="flex items-center pl-2">
-          <TitleBarLeftActions />
-        </div>
-
         {/* Center - Title */}
         <TitleBarTitle title={displayTitle} />
 
@@ -80,10 +71,9 @@ export function TitleBar({ className, title, forcePlatform }: TitleBarProps) {
         className
       )}
     >
-      {/* Left side - Window Controls + Actions */}
+      {/* Left side - Window Controls */}
       <div className="flex items-center">
         <MacOSWindowControls />
-        <TitleBarLeftActions />
       </div>
 
       {/* Center - Title */}

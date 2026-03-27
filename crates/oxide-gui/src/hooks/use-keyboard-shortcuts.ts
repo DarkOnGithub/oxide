@@ -7,7 +7,6 @@ import type { CommandContext } from '@/lib/commands/types'
  *
  * Currently handles:
  * - Cmd/Ctrl+, : Open preferences
- * - Cmd/Ctrl+1 : Toggle left sidebar
  * - Cmd/Ctrl+2 : Toggle right sidebar
  */
 export function useKeyboardShortcuts(commandContext: CommandContext) {
@@ -18,13 +17,6 @@ export function useKeyboardShortcuts(commandContext: CommandContext) {
           case ',': {
             e.preventDefault()
             commandContext.openPreferences()
-            break
-          }
-          case '1': {
-            e.preventDefault()
-            const { leftSidebarVisible, setLeftSidebarVisible } =
-              useUIStore.getState()
-            setLeftSidebarVisible(!leftSidebarVisible)
             break
           }
           case '2': {
