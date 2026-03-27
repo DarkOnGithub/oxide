@@ -5,7 +5,8 @@
   "identifier": "com.tauri.dev",
   "build": {
     "frontendDist": "../oxide-gui/src",
-    "devUrl": "../oxide-gui/src"
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
   },
   "app": {
     "windows": [

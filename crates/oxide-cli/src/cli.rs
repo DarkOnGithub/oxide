@@ -12,7 +12,7 @@ use oxide_core::CompressionAlgo;
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]

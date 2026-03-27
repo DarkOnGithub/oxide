@@ -27,7 +27,7 @@ fn run() -> AppResult {
         Some(Commands::Archive(args)) => commands::archive(args)?,
         Some(Commands::Extract(args)) => commands::extract(args)?,
         Some(Commands::Tree(args)) => commands::tree(args)?,
-        None => oxide_gui::print_hello(),
+        _ => oxide_gui::lancement_interface(),
     }
 
     Ok(())
