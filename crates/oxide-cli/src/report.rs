@@ -189,6 +189,11 @@ pub fn print_archive_report_summary(summary: ArchiveReportSummary<'_>) {
         );
         push_optional_string_row(
             &mut runtime_rows,
+            "LZMA dict",
+            extension_u64(&report.extensions, "compression.lzma_dictionary_size").map(format_bytes),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
             "Max inflight blocks",
             extension_u64(&report.extensions, "pipeline.max_inflight_blocks")
                 .map(|value| value.to_string()),

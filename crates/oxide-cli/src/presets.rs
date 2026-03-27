@@ -20,6 +20,7 @@ pub struct ResolvedArchiveSettings {
     pub dictionary_mode: ArchiveDictionaryMode,
     pub compression_level: Option<i32>,
     pub compression_extreme: bool,
+    pub lzma_dictionary_size: Option<usize>,
     pub block_size: usize,
     pub workers: usize,
     pub pool_capacity: usize,
@@ -130,6 +131,7 @@ struct CompressionConfig {
     compressor: Option<String>,
     level: Option<i32>,
     extreme: Option<bool>,
+    dictionary_size: Option<SizeValue>,
 }
 
 impl ArchivePresetConfig {
@@ -190,6 +192,7 @@ impl ArchivePresetConfig {
             ),
             compression_level: compression.level,
             compression_extreme: compression.extreme,
+            lzma_dictionary_size: compression.lzma_dictionary_size,
             block_size: resolve_usize(overrides.block_size, self.block_size, "block_size")?,
             workers: resolve_number(overrides.workers, self.workers, "workers")?,
             pool_capacity: resolve_usize(
@@ -265,6 +268,7 @@ impl CompressionConfig {
         merge_option(&mut self.compressor, other.compressor.clone());
         merge_option(&mut self.level, other.level);
         merge_option(&mut self.extreme, other.extreme);
+        merge_option(&mut self.dictionary_size, other.dictionary_size.clone());
     }
 
     fn resolve(
@@ -283,12 +287,18 @@ impl CompressionConfig {
         };
         let level = override_level.or(self.level);
         let extreme = self.extreme.unwrap_or(false);
-        validate_compression_settings(algo, level, extreme)?;
+        let lzma_dictionary_size = self
+            .dictionary_size
+            .as_ref()
+            .map(|value| value.parse("compression.dictionary_size"))
+            .transpose()?;
+        validate_compression_settings(algo, level, extreme, lzma_dictionary_size)?;
 
         Ok(ResolvedCompressionSettings {
             algo,
             level,
             extreme,
+            lzma_dictionary_size,
         })
     }
 }
@@ -298,6 +308,7 @@ struct ResolvedCompressionSettings {
     algo: CompressionAlgo,
     level: Option<i32>,
     extreme: bool,
+    lzma_dictionary_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -354,11 +365,26 @@ fn validate_compression_settings(
     compression: CompressionAlgo,
     level: Option<i32>,
     extreme: bool,
+    lzma_dictionary_size: Option<usize>,
 ) -> Result<(), io::Error> {
     if extreme && compression != CompressionAlgo::Lzma {
         return Err(invalid_input(
             "compression.extreme is only supported when compression.compressor is 'lzma'",
         ));
+    }
+
+    if lzma_dictionary_size.is_some() && compression != CompressionAlgo::Lzma {
+        return Err(invalid_input(
+            "compression.dictionary_size is only supported when compression.compressor is 'lzma'",
+        ));
+    }
+
+    if let Some(dictionary_size) = lzma_dictionary_size
+        && dictionary_size < 4096
+    {
+        return Err(invalid_input(format!(
+            "invalid compression.dictionary_size '{dictionary_size}' for lzma: expected at least 4096"
+        )));
     }
 
     let Some(level) = level else {
@@ -497,11 +523,13 @@ mod tests {
         assert_eq!(ultra.compression, CompressionAlgo::Lzma);
         assert_eq!(ultra.compression_level, Some(7));
         assert!(!ultra.compression_extreme);
+        assert_eq!(ultra.lzma_dictionary_size, Some(2 * 1024 * 1024));
         assert_eq!(ultra.block_size, 2 * 1024 * 1024);
         assert_eq!(ultra.pool_capacity, 2 * 1024 * 1024);
         assert_eq!(extreme.compression, CompressionAlgo::Lzma);
         assert_eq!(extreme.compression_level, Some(9));
-        assert!(extreme.compression_extreme);
+        assert!(!extreme.compression_extreme);
+        assert_eq!(extreme.lzma_dictionary_size, Some(4 * 1024 * 1024));
         assert_eq!(extreme.block_size, 4 * 1024 * 1024);
         assert_eq!(extreme.pool_capacity, 4 * 1024 * 1024);
     }
