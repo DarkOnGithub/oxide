@@ -247,6 +247,8 @@ pub struct PipelinePerformanceOptions {
     pub compression_level: Option<i32>,
     /// Enables liblzma's extreme preset variant when using LZMA encoding.
     pub lzma_extreme: bool,
+    /// Optional explicit LZMA dictionary size used during encoding.
+    pub lzma_dictionary_size: Option<usize>,
     /// Maximum in-flight block payload bytes pending worker completion.
     pub max_inflight_bytes: usize,
     /// Maximum in-flight blocks scaled by worker count.
@@ -270,6 +272,7 @@ impl Default for PipelinePerformanceOptions {
             dictionary_mode: ArchiveDictionaryMode::Off,
             compression_level: None,
             lzma_extreme: false,
+            lzma_dictionary_size: None,
             max_inflight_bytes: 512 * 1024 * 1024,
             max_inflight_blocks_per_worker: 256,
             directory_stream_read_buffer_size: 16 * 1024 * 1024,

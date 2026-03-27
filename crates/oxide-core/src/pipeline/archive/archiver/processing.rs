@@ -13,7 +13,9 @@ use crate::types::{Batch, CompressedBlock, CompressedPayload, CompressionAlgo, R
 
 const INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN: usize = 32 * 1024;
 const INCOMPRESSIBLE_PROBE_SAMPLE_LEN: usize = 16 * 1024;
+#[cfg(test)]
 const LZMA_PROBE_MIN_SOURCE_LEN: usize = 256 * 1024;
+#[cfg(test)]
 const LZMA_EXTREME_PROBE_MIN_SOURCE_LEN: usize = 512 * 1024;
 const LZMA_PROBE_SAMPLE_LEN: usize = 8 * 1024;
 
@@ -26,16 +28,20 @@ struct CompressionProbeConfig {
 #[inline]
 fn compression_probe_config(plan: crate::types::ChunkEncodingPlan) -> CompressionProbeConfig {
     match plan.algo {
-        CompressionAlgo::Lz4 | CompressionAlgo::Zstd => CompressionProbeConfig {
+        CompressionAlgo::Lz4 => CompressionProbeConfig {
+            min_source_len: usize::MAX,
+            sample_len: INCOMPRESSIBLE_PROBE_SAMPLE_LEN,
+        },
+        CompressionAlgo::Zstd => CompressionProbeConfig {
             min_source_len: INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN,
             sample_len: INCOMPRESSIBLE_PROBE_SAMPLE_LEN,
         },
         CompressionAlgo::Lzma if plan.lzma_extreme => CompressionProbeConfig {
-            min_source_len: LZMA_EXTREME_PROBE_MIN_SOURCE_LEN,
+            min_source_len: usize::MAX,
             sample_len: LZMA_PROBE_SAMPLE_LEN,
         },
         CompressionAlgo::Lzma => CompressionProbeConfig {
-            min_source_len: LZMA_PROBE_MIN_SOURCE_LEN,
+            min_source_len: usize::MAX,
             sample_len: LZMA_PROBE_SAMPLE_LEN,
         },
     }
@@ -67,6 +73,7 @@ fn is_likely_incompressible_sample(
             algo: plan.algo,
             level: plan.level,
             lzma_extreme: plan.lzma_extreme,
+            lzma_dictionary_size: plan.lzma_dictionary_size,
             dictionary_id: selected_dictionary
                 .map(|dictionary| dictionary.id)
                 .unwrap_or(0),
@@ -135,6 +142,7 @@ pub fn process_batch(
         algo: plan.algo,
         level: plan.level,
         lzma_extreme: plan.lzma_extreme,
+        lzma_dictionary_size: plan.lzma_dictionary_size,
         dictionary_id,
         dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
     };
@@ -331,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn lzma_probe_uses_higher_thresholds_and_smaller_samples() {
+    fn lzma_probe_is_effectively_disabled() {
         let regular = crate::types::ChunkEncodingPlan::new(CompressionAlgo::Lzma)
             .with_level(Some(7))
             .with_lzma_extreme(false);
@@ -342,26 +350,15 @@ mod tests {
         let regular_config = compression_probe_config(regular);
         let extreme_config = compression_probe_config(extreme);
 
-        assert_eq!(regular_config.min_source_len, LZMA_PROBE_MIN_SOURCE_LEN);
-        assert_eq!(
-            extreme_config.min_source_len,
-            LZMA_EXTREME_PROBE_MIN_SOURCE_LEN
-        );
+        assert_eq!(regular_config.min_source_len, usize::MAX);
+        assert_eq!(extreme_config.min_source_len, usize::MAX);
         assert!(regular_config.sample_len < INCOMPRESSIBLE_PROBE_SAMPLE_LEN);
         assert_eq!(regular_config.sample_len, extreme_config.sample_len);
         assert!(!should_skip_full_compression_probe(
-            LZMA_PROBE_MIN_SOURCE_LEN - 1,
-            regular
-        ));
-        assert!(should_skip_full_compression_probe(
             LZMA_PROBE_MIN_SOURCE_LEN,
             regular
         ));
         assert!(!should_skip_full_compression_probe(
-            LZMA_EXTREME_PROBE_MIN_SOURCE_LEN - 1,
-            extreme,
-        ));
-        assert!(should_skip_full_compression_probe(
             LZMA_EXTREME_PROBE_MIN_SOURCE_LEN,
             extreme,
         ));
