@@ -29,7 +29,9 @@ use super::types::*;
 
 const DECODE_QUEUE_MULTIPLIER: usize = 4;
 const ORDERED_WRITE_QUEUE_MULTIPLIER: usize = 8;
-const REORDER_PENDING_MULTIPLIER: usize = 3;
+// Large archives can have substantial decode skew; keep enough headroom for
+// late blocks without failing the extraction outright.
+const REORDER_PENDING_MULTIPLIER: usize = 8;
 const MIN_DECODE_QUEUE_CAPACITY: usize = 8;
 const MIN_ORDERED_WRITE_QUEUE_CAPACITY: usize = 16;
 const RESULT_DRAIN_BUDGET: usize = 64;
@@ -1309,7 +1311,7 @@ mod tests {
 
     #[test]
     fn reorder_limit_is_derived_from_ordered_queue_and_capped_by_blocks() {
-        assert_eq!(reorder_pending_limit(16, 128), 48);
+        assert_eq!(reorder_pending_limit(16, 128), 128);
         assert_eq!(reorder_pending_limit(64, 96), 96);
     }
 }
