@@ -39,7 +39,10 @@ function formatDate(date: Date | null) {
   }).format(date)
 }
 
-function formatPermissions(mode: number | null, readonly: boolean | undefined) {
+function formatPermissions(
+  mode: number | null,
+  readonly: boolean | null | undefined
+) {
   if (mode !== null) {
     const bits = [
       0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001,
@@ -63,12 +66,12 @@ function formatPermissions(mode: number | null, readonly: boolean | undefined) {
 export function ExplorerDetails({ explorer }: ExplorerDetailsProps) {
   const { t } = useTranslation()
   const setPreferencesOpen = useUIStore(state => state.setPreferencesOpen)
-  const terminalPath = explorer.currentPath ?? explorer.rootPath
+  const terminalPath = explorer.terminalPath
   const info = explorer.selectedEntryInfo
   const isCurrentFolder = !explorer.selectedEntry && Boolean(explorer.currentPath)
 
   const selectedName = explorer.selectedEntry?.name ?? explorer.currentName ?? 'No selection'
-  const selectedPath = explorer.selectedEntry?.path ?? explorer.currentPath ?? '—'
+  const selectedPath = explorer.selectedDisplayPath
   const selectedIsDirectory = explorer.selectedEntry?.isDirectory ?? true
   const modifiedAt = info?.modifiedAt ?? explorer.selectedEntry?.modifiedAt ?? null
   const createdAt = info?.createdAt ?? null
@@ -156,9 +159,14 @@ export function ExplorerDetails({ explorer }: ExplorerDetailsProps) {
               <Row
                 label="Read only"
                 value={
-                  info?.readonly === undefined ? '—' : info.readonly ? 'Yes' : 'No'
+                  info?.readonly === null || info?.readonly === undefined
+                    ? '—'
+                    : info.readonly
+                      ? 'Yes'
+                      : 'No'
                 }
               />
+              {info?.target && <Row label="Target" value={info.target} />}
             </div>
           </section>
 

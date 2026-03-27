@@ -31,6 +31,50 @@ async getPathMetadata(path: string) : Promise<Result<ExplorerPathMetadata, strin
 }
 },
 /**
+ * Returns whether a path is an Oxide archive.
+ */
+async isOxideArchive(path: string) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("is_oxide_archive", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Reads the metadata index of an Oxide archive without extracting payloads.
+ */
+async readOxideArchiveIndex(path: string) : Promise<Result<ExplorerArchiveIndex, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_oxide_archive_index", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Creates an Oxide archive from a folder.
+ */
+async createOxideArchive(sourcePath: string, outputPath: string, options: CreateArchiveOptions) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_oxide_archive", { sourcePath, outputPath, options }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Extracts an Oxide archive.
+ */
+async extractOxideArchive(archivePath: string, outputDirectory: string, deleteSource: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("extract_oxide_archive", { archivePath, outputDirectory, deleteSource }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Simple greeting command for demonstration purposes.
  */
 async greet(name: string) : Promise<Result<string, string>> {
@@ -203,7 +247,15 @@ quick_pane_shortcut: string | null;
  * If None, uses system locale detection
  */
 language: string | null }
-export type ExplorerDirectoryEntry = { name: string; path: string; isDirectory: boolean; isFile: boolean; isSymlink: boolean; size: number; modifiedAt: number | null }
+export type ArchiveCompressionAlgo = "Lz4" | "Zstd" | "Lzma"
+export type ArchiveDictionaryModeOption = "Off" | "Auto"
+export type ArchivePreset = "Fast" | "Balanced" | "Ultra" | "Extreme"
+export type CreateArchiveOptions = { preset: ArchivePreset; compressionAlgo: ArchiveCompressionAlgo; compressionLevel: number | null; dictionaryMode: ArchiveDictionaryModeOption; blockSize: number; workers: number; producerThreads: number; lzmaExtreme: boolean; lzmaDictionarySize: number | null }
+export type ExplorerArchiveEntry = { path: string; kind: ExplorerArchiveEntryKind; target: string | null; size: number; modifiedAt: number | null; mode: number | null; uid: number | null; gid: number | null }
+export type ExplorerArchiveEntryKind = "File" | "Directory" | "Symlink"
+export type ExplorerArchiveIndex = { sourceKind: ExplorerArchiveSourceKind; entries: ExplorerArchiveEntry[] }
+export type ExplorerArchiveSourceKind = "File" | "Directory"
+export type ExplorerDirectoryEntry = { name: string; path: string; isDirectory: boolean; isFile: boolean; isSymlink: boolean; size: number; modifiedAt: number | null; isOxideArchive: boolean }
 export type ExplorerPathMetadata = { isDirectory: boolean; isFile: boolean; isSymlink: boolean; size: number; modifiedAt: number | null; accessedAt: number | null; createdAt: number | null; readonly: boolean; mode: number | null; uid: number | null; gid: number | null }
 export type JsonValue = null | boolean | number | string | JsonValue[] | Partial<{ [key in string]: JsonValue }>
 /**
