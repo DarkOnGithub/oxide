@@ -1,7 +1,14 @@
 import { useEffect, useLayoutEffect, useState, useRef } from 'react'
 import { emit } from '@tauri-apps/api/event'
-import { ThemeProviderContext, type Theme } from '@/lib/theme-context'
+import { ThemeProviderContext } from '@/lib/theme-context'
 import { usePreferences } from '@/services/preferences'
+import {
+  isTheme,
+  resolveAppliedTheme,
+  resolveThemeMode,
+  type ResolvedThemeMode,
+  type Theme,
+} from '@/lib/theme'
 
 interface ThemeProviderProps {
   children: React.ReactNode
@@ -16,8 +23,13 @@ export function ThemeProvider({
   ...props
 }: ThemeProviderProps) {
   const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem(storageKey) as Theme) || defaultTheme
+    () => {
+      const storedTheme = localStorage.getItem(storageKey)
+      return isTheme(storedTheme) ? storedTheme : defaultTheme
+    }
   )
+  const [resolvedTheme, setResolvedTheme] =
+    useState<ResolvedThemeMode>('light')
 
   // Load theme from persistent preferences
   const { data: preferences } = usePreferences()
@@ -27,10 +39,14 @@ export function ThemeProvider({
   // This is a legitimate case of syncing with external async state (persistent preferences)
   // The ref ensures this only happens once when preferences first load
   useLayoutEffect(() => {
-    if (preferences?.theme && !hasSyncedPreferences.current) {
+    if (
+      preferences?.theme &&
+      isTheme(preferences.theme) &&
+      !hasSyncedPreferences.current
+    ) {
       hasSyncedPreferences.current = true
       // eslint-disable-next-line react-hooks/set-state-in-effect -- Syncing with external async preferences on initial load
-      setTheme(preferences.theme as Theme)
+      setTheme(preferences.theme)
     }
   }, [preferences?.theme])
 
@@ -38,9 +54,15 @@ export function ThemeProvider({
     const root = window.document.documentElement
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
 
-    const applyTheme = (isDark: boolean) => {
+    const applyTheme = (prefersDark: boolean) => {
+      const appliedTheme = resolveAppliedTheme(theme, prefersDark)
+      const nextResolvedTheme = resolveThemeMode(theme, prefersDark)
+
       root.classList.remove('light', 'dark')
-      root.classList.add(isDark ? 'dark' : 'light')
+      root.classList.add(nextResolvedTheme)
+      root.dataset.theme = appliedTheme
+      root.style.colorScheme = nextResolvedTheme
+      setResolvedTheme(nextResolvedTheme)
     }
 
     if (theme === 'system') {
@@ -51,11 +73,12 @@ export function ThemeProvider({
       return () => mediaQuery.removeEventListener('change', handleChange)
     }
 
-    applyTheme(theme === 'dark')
+    applyTheme(false)
   }, [theme])
 
   const value = {
     theme,
+    resolvedTheme,
     setTheme: (newTheme: Theme) => {
       localStorage.setItem(storageKey, newTheme)
       setTheme(newTheme)

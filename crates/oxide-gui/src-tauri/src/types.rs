@@ -116,7 +116,12 @@ pub fn validate_string_input(input: &str, max_len: usize, field_name: &str) -> R
 /// Validates theme value.
 pub fn validate_theme(theme: &str) -> Result<(), String> {
     match theme {
-        "light" | "dark" | "system" => Ok(()),
-        _ => Err("Invalid theme: must be 'light', 'dark', or 'system'".to_string()),
+        "light" | "dark" | "latte" | "frappe" | "macchiato" | "mocha" | "system" => {
+            Ok(())
+        }
+        _ => Err(
+            "Invalid theme: must be 'light', 'dark', 'latte', 'frappe', 'macchiato', 'mocha', or 'system'"
+                .to_string(),
+        ),
     }
 }

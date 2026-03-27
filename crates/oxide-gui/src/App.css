@@ -13,6 +13,13 @@
 
   body {
     @apply text-foreground;
+    background:
+      radial-gradient(
+        circle at top,
+        color-mix(in oklab, var(--primary) 12%, var(--background)) 0%,
+        var(--background) 44%,
+        var(--surface) 100%
+      );
     font-family: -apple-system, 'Segoe UI', 'Roboto', sans-serif;
     font-size: 16px;
     line-height: 1.6;
@@ -27,6 +34,10 @@
     min-width: 100vw;
     overflow: hidden;
     position: relative;
+    transition:
+      background 180ms ease,
+      color 180ms ease,
+      border-color 180ms ease;
   }
 
   svg {

@@ -5,9 +5,9 @@ import { I18nextProvider } from 'react-i18next'
 import i18n from '@/i18n/config'
 import {
   ThemeProviderContext,
-  type Theme,
   type ThemeProviderState,
 } from '@/lib/theme-context'
+import type { Theme } from '@/lib/theme'
 
 const createTestQueryClient = () =>
   new QueryClient({
@@ -33,6 +33,7 @@ function MockThemeProvider({ children }: { children: React.ReactNode }) {
 
   const value: ThemeProviderState = {
     theme,
+    resolvedTheme: theme === 'dark' ? 'dark' : 'light',
     setTheme,
   }
 
