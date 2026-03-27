@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -25,19 +26,35 @@ const MAX_METADATA_WORKERS: usize = 8;
 pub(crate) struct DirectoryRestoreStats {
     pub(crate) directory_decode: Duration,
     pub(crate) ordered_write_time: Duration,
+    pub(crate) output_prepare_directories: Duration,
     pub(crate) output_write: Duration,
     pub(crate) output_create: Duration,
+    pub(crate) output_create_directories: Duration,
+    pub(crate) output_create_files: Duration,
     pub(crate) output_data: Duration,
     pub(crate) output_flush: Duration,
     pub(crate) output_metadata: Duration,
+    pub(crate) output_metadata_files: Duration,
+    pub(crate) output_metadata_directories: Duration,
     pub(crate) output_bytes_total: u64,
     pub(crate) entry_count: u64,
 }
 
 impl DirectoryRestoreStats {
-    fn record_output_create(&mut self, elapsed: Duration) {
+    fn record_output_prepare_directories(&mut self, elapsed: Duration) {
+        self.output_prepare_directories += elapsed;
+    }
+
+    fn record_output_create_directory(&mut self, elapsed: Duration) {
         self.output_write += elapsed;
         self.output_create += elapsed;
+        self.output_create_directories += elapsed;
+    }
+
+    fn record_output_create_file(&mut self, elapsed: Duration) {
+        self.output_write += elapsed;
+        self.output_create += elapsed;
+        self.output_create_files += elapsed;
     }
 
     fn record_output_data(&mut self, elapsed: Duration) {
@@ -50,10 +67,23 @@ impl DirectoryRestoreStats {
         self.output_flush += elapsed;
     }
 
-    fn record_output_metadata(&mut self, elapsed: Duration) {
+    fn record_output_metadata_file(&mut self, elapsed: Duration) {
         self.output_write += elapsed;
         self.output_metadata += elapsed;
+        self.output_metadata_files += elapsed;
     }
+
+    fn record_output_metadata_directory(&mut self, elapsed: Duration) {
+        self.output_write += elapsed;
+        self.output_metadata += elapsed;
+        self.output_metadata_directories += elapsed;
+    }
+}
+
+#[derive(Debug)]
+struct RestoreEntry {
+    path: PathBuf,
+    entry: crate::ArchiveListingEntry,
 }
 
 #[derive(Debug)]
@@ -120,26 +150,21 @@ struct PendingFile {
 }
 
 #[derive(Debug)]
-struct PendingDirectory {
-    path: PathBuf,
-    entry: crate::ArchiveListingEntry,
-}
-
-#[derive(Debug)]
 struct PendingMetadata {
     path: PathBuf,
     entry: crate::ArchiveListingEntry,
+    depth: usize,
 }
 
 #[derive(Debug)]
 pub(crate) struct DirectoryRestoreWriter {
     root: PathBuf,
-    entries: Vec<crate::ArchiveListingEntry>,
+    entries: Vec<RestoreEntry>,
     next_entry: usize,
     pending_file: Option<PendingFile>,
     created_directories: HashSet<PathBuf>,
-    pending_metadata: Vec<PendingMetadata>,
-    pending_directories: Vec<PendingDirectory>,
+    pending_file_metadata: Vec<PendingMetadata>,
+    pending_directory_metadata: Vec<PendingMetadata>,
     stats: DirectoryRestoreStats,
 }
 
@@ -153,14 +178,15 @@ pub(crate) struct FilteredDirectoryRestoreWriter {
 
 impl DirectoryRestoreWriter {
     pub(crate) fn create(root: &Path, manifest: ArchiveManifest) -> Result<Self> {
+        let entries = build_restore_entries(root, manifest)?;
         let mut writer = Self {
             root: root.to_path_buf(),
-            entries: manifest.entries().to_vec(),
+            entries,
             next_entry: 0,
             pending_file: None,
             created_directories: HashSet::new(),
-            pending_metadata: Vec::new(),
-            pending_directories: Vec::new(),
+            pending_file_metadata: Vec::new(),
+            pending_directory_metadata: Vec::new(),
             stats: DirectoryRestoreStats::default(),
         };
         writer.ensure_directory_exists(root)?;
@@ -182,7 +208,7 @@ impl DirectoryRestoreWriter {
                 "directory restore ended before all entries completed",
             ));
         }
-        self.finalize_files()?;
+        self.finalize_file_metadata()?;
         self.finalize_directories()?;
         Ok(self.stats)
     }
@@ -194,7 +220,7 @@ impl DirectoryRestoreWriter {
 
         let started = Instant::now();
         fs::create_dir_all(path)?;
-        self.stats.record_output_create(started.elapsed());
+        self.stats.record_output_create_directory(started.elapsed());
 
         let mut current = Some(path);
         while let Some(directory) = current {
@@ -210,52 +236,66 @@ impl DirectoryRestoreWriter {
         Ok(())
     }
 
-    fn defer_metadata(&mut self, path: PathBuf, entry: crate::ArchiveListingEntry) {
-        self.pending_metadata.push(PendingMetadata { path, entry });
+    fn defer_file_metadata(&mut self, path: PathBuf, entry: crate::ArchiveListingEntry) {
+        self.pending_file_metadata.push(PendingMetadata {
+            depth: path_depth(&path),
+            path,
+            entry,
+        });
+    }
+
+    fn defer_directory_metadata(&mut self, path: PathBuf, entry: crate::ArchiveListingEntry) {
+        self.pending_directory_metadata.push(PendingMetadata {
+            depth: path_depth(&path),
+            path,
+            entry,
+        });
     }
 
     fn prepare_output_directories(&mut self) -> Result<()> {
-        for entry in self.entries.clone() {
-            let out_path = directory::join_safe(&self.root, &entry.path)?;
-            match entry.kind {
-                crate::ArchiveEntryKind::Directory => self.ensure_directory_exists(&out_path)?,
-                crate::ArchiveEntryKind::File | crate::ArchiveEntryKind::Symlink => {
-                    if let Some(parent) = out_path.parent() {
-                        self.ensure_directory_exists(parent)?;
-                    }
-                }
-            }
+        let started = Instant::now();
+        let directories = self
+            .entries
+            .iter()
+            .filter_map(|restore_entry| match restore_entry.entry.kind {
+                crate::ArchiveEntryKind::Directory => Some(restore_entry.path.clone()),
+                crate::ArchiveEntryKind::File | crate::ArchiveEntryKind::Symlink => restore_entry
+                    .path
+                    .parent()
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .map(Path::to_path_buf),
+            })
+            .collect::<Vec<_>>();
+
+        for directory in directories {
+            self.ensure_directory_exists(&directory)?;
         }
+
+        self.stats
+            .record_output_prepare_directories(started.elapsed());
         Ok(())
     }
 
     fn advance_entries(&mut self) -> Result<()> {
         while self.pending_file.is_none() && self.next_entry < self.entries.len() {
-            let entry = self.entries[self.next_entry].clone();
+            let restore_entry = &self.entries[self.next_entry];
+            let entry = restore_entry.entry.clone();
+            let out_path = restore_entry.path.clone();
             self.next_entry += 1;
             self.stats.entry_count = self.stats.entry_count.saturating_add(1);
 
             match entry.kind {
                 crate::ArchiveEntryKind::Directory => {
-                    let out_path = directory::join_safe(&self.root, &entry.path)?;
-                    self.ensure_directory_exists(&out_path)?;
-                    self.pending_directories.push(PendingDirectory {
-                        path: out_path,
-                        entry,
-                    });
+                    self.defer_directory_metadata(out_path, entry);
                 }
                 crate::ArchiveEntryKind::File => {
-                    let out_path = directory::join_safe(&self.root, &entry.path)?;
-                    if let Some(parent) = out_path.parent() {
-                        self.ensure_directory_exists(parent)?;
-                    }
-
                     let output_started = Instant::now();
                     let file = fs::File::create(&out_path)?;
-                    self.stats.record_output_create(output_started.elapsed());
+                    self.stats
+                        .record_output_create_file(output_started.elapsed());
 
                     if entry.size == 0 {
-                        self.defer_metadata(out_path, entry);
+                        self.defer_file_metadata(out_path, entry);
                         continue;
                     }
 
@@ -267,16 +307,14 @@ impl DirectoryRestoreWriter {
                     });
                 }
                 crate::ArchiveEntryKind::Symlink => {
-                    let out_path = directory::join_safe(&self.root, &entry.path)?;
-                    if let Some(parent) = out_path.parent() {
-                        self.ensure_directory_exists(parent)?;
-                    }
-
                     let target = entry.target.as_deref().ok_or(OxideError::InvalidFormat(
                         "symlink manifest entry missing target",
                     ))?;
+                    let output_started = Instant::now();
                     create_symlink(&out_path, target)?;
-                    self.defer_metadata(out_path, entry);
+                    self.stats
+                        .record_output_create_file(output_started.elapsed());
+                    self.defer_file_metadata(out_path, entry);
                 }
             }
         }
@@ -298,30 +336,69 @@ impl DirectoryRestoreWriter {
         } = pending;
         let _file = writer.into_inner().map_err(|error| error.into_error())?;
         self.stats.record_output_flush(output_started.elapsed());
-        self.defer_metadata(path, entry);
+        self.defer_file_metadata(path, entry);
         Ok(())
     }
 
-    fn finalize_files(&mut self) -> Result<()> {
-        let pending = self.pending_metadata.drain(..).collect::<Vec<_>>();
+    fn finalize_file_metadata(&mut self) -> Result<()> {
+        let pending = self.pending_file_metadata.drain(..).collect::<Vec<_>>();
         if pending.is_empty() {
             return Ok(());
         }
 
         let started = Instant::now();
         apply_pending_metadata_in_parallel(&pending)?;
-        self.stats.record_output_metadata(started.elapsed());
+        self.stats.record_output_metadata_file(started.elapsed());
         Ok(())
     }
 
     fn finalize_directories(&mut self) -> Result<()> {
-        while let Some(directory) = self.pending_directories.pop() {
-            let started = Instant::now();
-            apply_entry_metadata(&directory.path, &directory.entry)?;
-            self.stats.record_output_metadata(started.elapsed());
+        if self.pending_directory_metadata.is_empty() {
+            return Ok(());
         }
+
+        self.pending_directory_metadata
+            .sort_unstable_by_key(|directory| Reverse(directory.depth));
+
+        let started = Instant::now();
+        let mut range_start = 0usize;
+        while range_start < self.pending_directory_metadata.len() {
+            let depth = self.pending_directory_metadata[range_start].depth;
+            let mut range_end = range_start + 1;
+            while range_end < self.pending_directory_metadata.len()
+                && self.pending_directory_metadata[range_end].depth == depth
+            {
+                range_end += 1;
+            }
+
+            apply_pending_metadata_in_parallel(
+                &self.pending_directory_metadata[range_start..range_end],
+            )?;
+            range_start = range_end;
+        }
+
+        self.pending_directory_metadata.clear();
+        self.stats
+            .record_output_metadata_directory(started.elapsed());
         Ok(())
     }
+}
+
+fn build_restore_entries(root: &Path, manifest: ArchiveManifest) -> Result<Vec<RestoreEntry>> {
+    manifest
+        .entries()
+        .iter()
+        .map(|entry| {
+            Ok(RestoreEntry {
+                path: directory::join_safe(root, &entry.path)?,
+                entry: entry.clone(),
+            })
+        })
+        .collect()
+}
+
+fn path_depth(path: &Path) -> usize {
+    path.components().count()
 }
 
 fn apply_pending_metadata_in_parallel(entries: &[PendingMetadata]) -> Result<()> {

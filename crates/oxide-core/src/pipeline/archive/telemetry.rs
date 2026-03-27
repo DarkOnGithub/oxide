@@ -518,6 +518,13 @@ pub fn build_extract_report(
             .min(u64::MAX as u128) as u64,
     );
     main_thread.stage_us.insert(
+        "output_prepare_directories".to_string(),
+        stage_timings
+            .output_prepare_directories
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
         "output_write".to_string(),
         stage_timings.output_write.as_micros().min(u64::MAX as u128) as u64,
     );
@@ -525,6 +532,20 @@ pub fn build_extract_report(
         "output_create".to_string(),
         stage_timings
             .output_create
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
+        "output_create_directories".to_string(),
+        stage_timings
+            .output_create_directories
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
+        "output_create_files".to_string(),
+        stage_timings
+            .output_create_files
             .as_micros()
             .min(u64::MAX as u128) as u64,
     );
@@ -540,6 +561,20 @@ pub fn build_extract_report(
         "output_metadata".to_string(),
         stage_timings
             .output_metadata
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
+        "output_metadata_files".to_string(),
+        stage_timings
+            .output_metadata_files
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
+        "output_metadata_directories".to_string(),
+        stage_timings
+            .output_metadata_directories
             .as_micros()
             .min(u64::MAX as u128) as u64,
     );
