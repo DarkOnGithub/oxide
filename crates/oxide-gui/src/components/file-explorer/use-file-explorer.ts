@@ -2,6 +2,7 @@ import { dirname, join } from '@tauri-apps/api/path'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
+import { useUIStore } from '@/store/ui-store'
 import {
   getArchivePresetDefaults,
   normalizeArchiveName,
@@ -41,12 +42,19 @@ export interface ExplorerBreadcrumb {
   path: string
 }
 
+interface ArchiveIndex {
+  entriesByPath: Map<string, ArchiveEntryRecord>
+  childrenByParent: Map<string, ExplorerEntry[]>
+  allEntries: ExplorerEntry[]
+}
+
 interface ArchiveContext {
   archivePath: string
   archiveName: string
   currentArchivePath: string
   hostDirectoryPath: string | null
   manifestEntries: ArchiveEntryRecord[]
+  index: ArchiveIndex
 }
 
 interface ExplorerOperation {
@@ -148,11 +156,15 @@ function sortEntries(a: ExplorerEntry, b: ExplorerEntry) {
     return a.isDirectory ? -1 : 1
   }
 
-  return a.name.localeCompare(b.name, undefined, {
-    numeric: true,
-    sensitivity: 'base',
-  })
+  return ENTRY_COLLATOR.compare(a.name, b.name)
 }
+
+const ENTRY_COLLATOR = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: 'base',
+})
+
+const METADATA_CACHE = new Map<string, ExplorerEntryMetadata>()
 
 function archiveDisplayPath(archiveName: string, path: string) {
   return path ? `${archiveName}/${path}` : archiveName
@@ -207,63 +219,112 @@ function mapArchiveRecordToEntry(
   }
 }
 
-function buildArchiveVisibleEntries(
+function buildArchiveIndex(
   archiveName: string,
-  manifestEntries: ArchiveEntryRecord[],
-  currentArchivePath: string
-) {
-  const prefix = currentArchivePath ? `${currentArchivePath}/` : ''
-  const entries = new Map<string, ExplorerEntry>()
+  manifestEntries: ArchiveEntryRecord[]
+): ArchiveIndex {
+  const entriesByPath = new Map<string, ArchiveEntryRecord>()
+  const childrenByParent = new Map<string, ExplorerEntry[]>()
+  const allEntries: ExplorerEntry[] = []
 
   for (const record of manifestEntries) {
-    if (currentArchivePath && record.path === currentArchivePath) {
-      continue
+    entriesByPath.set(record.path, record)
+  }
+
+  for (const record of manifestEntries) {
+    const entry = mapArchiveRecordToEntry(archiveName, record)
+    allEntries.push(entry)
+
+    const parentPath = record.path.includes('/')
+      ? record.path.slice(0, record.path.lastIndexOf('/'))
+      : ''
+
+    let children = childrenByParent.get(parentPath)
+    if (!children) {
+      children = []
+      childrenByParent.set(parentPath, children)
+    }
+    children.push(entry)
+  }
+
+  for (const [parentPath, children] of childrenByParent) {
+    const uniqueChildren = new Map<string, ExplorerEntry>()
+
+    for (const child of children) {
+      if (!uniqueChildren.has(child.path)) {
+        uniqueChildren.set(child.path, child)
+      }
     }
 
-    if (prefix && !record.path.startsWith(prefix)) {
-      continue
-    }
+    const sortedChildren = Array.from(uniqueChildren.values()).sort(sortEntries)
+    childrenByParent.set(parentPath, sortedChildren)
+  }
 
-    const remainingPath = prefix ? record.path.slice(prefix.length) : record.path
+  const virtualDirs = new Set<string>()
+  for (const record of manifestEntries) {
+    let currentPath = ''
+    const parts = record.path.split('/')
 
-    if (!remainingPath) {
-      continue
-    }
+    for (let i = 0; i < parts.length - 1; i++) {
+      currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i]!
 
-    const separatorIndex = remainingPath.indexOf('/')
-
-    if (separatorIndex === -1) {
-      entries.set(record.path, mapArchiveRecordToEntry(archiveName, record))
-      continue
-    }
-
-    const childName = remainingPath.slice(0, separatorIndex)
-    const childPath = currentArchivePath
-      ? `${currentArchivePath}/${childName}`
-      : childName
-
-    if (!entries.has(childPath)) {
-      entries.set(childPath, {
-        name: childName,
-        path: childPath,
-        displayPath: archiveDisplayPath(archiveName, childPath),
-        extension: null,
-        isDirectory: true,
-        isFile: false,
-        isSymlink: false,
-        isOxideArchive: false,
-        size: 0,
-        modifiedAt: null,
-        mode: null,
-        uid: null,
-        gid: null,
-        target: null,
-        readonly: null,
-      })
+      if (!entriesByPath.has(currentPath)) {
+        virtualDirs.add(currentPath)
+      }
     }
   }
 
-  return Array.from(entries.values()).sort(sortEntries)
+  for (const virtualPath of virtualDirs) {
+    const name = getLeafName(virtualPath) ?? virtualPath
+    const virtualEntry: ExplorerEntry = {
+      name,
+      path: virtualPath,
+      displayPath: archiveDisplayPath(archiveName, virtualPath),
+      extension: null,
+      isDirectory: true,
+      isFile: false,
+      isSymlink: false,
+      isOxideArchive: false,
+      size: 0,
+      modifiedAt: null,
+      mode: null,
+      uid: null,
+      gid: null,
+      target: null,
+      readonly: null,
+    }
+
+    const parentPath = virtualPath.includes('/')
+      ? virtualPath.slice(0, virtualPath.lastIndexOf('/'))
+      : ''
+
+    let children = childrenByParent.get(parentPath)
+    if (!children) {
+      children = []
+      childrenByParent.set(parentPath, children)
+    }
+
+    if (!children.some(e => e.path === virtualPath)) {
+      children.push(virtualEntry)
+    }
+
+    let virtualChildren = childrenByParent.get(virtualPath)
+    if (!virtualChildren) {
+      virtualChildren = []
+      childrenByParent.set(virtualPath, virtualChildren)
+    }
+  }
+
+  for (const [parentPath, children] of childrenByParent) {
+    const sortedChildren = children.sort(sortEntries)
+    childrenByParent.set(parentPath, sortedChildren)
+  }
+
+  return { entriesByPath, childrenByParent, allEntries }
+}
+
+function getArchiveVisibleEntries(index: ArchiveIndex, currentArchivePath: string): ExplorerEntry[] {
+  return index.childrenByParent.get(currentArchivePath) ?? []
 }
 
 function archiveEntryToMetadata(entry: ExplorerEntry): ExplorerEntryMetadata {
@@ -287,9 +348,7 @@ function archiveDirectoryMetadata(
   context: ArchiveContext,
   currentArchivePath: string
 ): ExplorerEntryMetadata {
-  const currentEntry = context.manifestEntries.find(
-    entry => entry.path === currentArchivePath
-  )
+  const currentEntry = context.index.entriesByPath.get(currentArchivePath)
 
   if (currentEntry) {
     return archiveEntryToMetadata(
@@ -314,6 +373,7 @@ function archiveDirectoryMetadata(
 }
 
 export function useFileExplorer() {
+  const rightSidebarVisible = useUIStore(state => state.rightSidebarVisible)
   const [rootPath, setRootPath] = useState<string | null>(null)
   const [currentPath, setCurrentPath] = useState<string | null>(null)
   const [filesystemEntries, setFilesystemEntries] = useState<ExplorerEntry[]>([])
@@ -488,11 +548,7 @@ export function useFileExplorer() {
 
   const navigateArchive = useCallback(
     (context: ArchiveContext, nextArchivePath: string, preserveSelection = false) => {
-      const visibleEntries = buildArchiveVisibleEntries(
-        context.archiveName,
-        context.manifestEntries,
-        nextArchivePath
-      )
+      const visibleEntries = getArchiveVisibleEntries(context.index, nextArchivePath)
 
       setArchiveContext({ ...context, currentArchivePath: nextArchivePath })
       setSelectedEntryPath(previousSelection => {
@@ -515,12 +571,16 @@ export function useFileExplorer() {
 
       try {
         const index = await readOxideArchiveIndex(archivePath)
+        const archiveName = archiveNameFromPath(archivePath)
+        const archiveIndex = buildArchiveIndex(archiveName, index.entries)
+
         const context: ArchiveContext = {
           archivePath,
-          archiveName: archiveNameFromPath(archivePath),
+          archiveName,
           currentArchivePath: '',
           hostDirectoryPath: currentPath,
           manifestEntries: index.entries,
+          index: archiveIndex,
         }
 
         navigateArchive(context, '')
@@ -606,10 +666,13 @@ export function useFileExplorer() {
 
       try {
         const index = await readOxideArchiveIndex(archiveContext.archivePath)
+        const archiveIndex = buildArchiveIndex(archiveContext.archiveName, index.entries)
+
         navigateArchive(
           {
             ...archiveContext,
             manifestEntries: index.entries,
+            index: archiveIndex,
           },
           archiveContext.currentArchivePath,
           true
@@ -784,7 +847,7 @@ export function useFileExplorer() {
   )
 
   useEffect(() => {
-    if (archiveContext) {
+    if (archiveContext || !rightSidebarVisible) {
       setFilesystemSelectedEntryInfo(null)
       return
     }
@@ -796,38 +859,43 @@ export function useFileExplorer() {
       return
     }
 
+    const cached = METADATA_CACHE.get(infoPath)
+    if (cached) {
+      setFilesystemSelectedEntryInfo(cached)
+      return
+    }
+
     let isMounted = true
-
-    getPathMetadata(infoPath)
-      .then(fileInfo => {
-        if (isMounted) {
-          setFilesystemSelectedEntryInfo(fileInfo)
-        }
-      })
-      .catch(selectionError => {
-        logger.warn('Failed to load selected entry details', {
-          error: selectionError,
-          path: infoPath,
+    const timer = window.setTimeout(() => {
+      getPathMetadata(infoPath)
+        .then(fileInfo => {
+          if (isMounted) {
+            METADATA_CACHE.set(infoPath, fileInfo)
+            setFilesystemSelectedEntryInfo(fileInfo)
+          }
         })
+        .catch(selectionError => {
+          logger.warn('Failed to load selected entry details', {
+            error: selectionError,
+            path: infoPath,
+          })
 
-        if (isMounted) {
-          setFilesystemSelectedEntryInfo(null)
-        }
-      })
+          if (isMounted) {
+            setFilesystemSelectedEntryInfo(null)
+          }
+        })
+    }, 150)
 
     return () => {
       isMounted = false
+      window.clearTimeout(timer)
     }
-  }, [archiveContext, currentPath, selectedEntryPath])
+  }, [archiveContext, currentPath, rightSidebarVisible, selectedEntryPath])
 
   const entries = useMemo(
     () =>
       archiveContext
-        ? buildArchiveVisibleEntries(
-            archiveContext.archiveName,
-            archiveContext.manifestEntries,
-            archiveContext.currentArchivePath
-          )
+        ? getArchiveVisibleEntries(archiveContext.index, archiveContext.currentArchivePath)
         : filesystemEntries,
     [archiveContext, filesystemEntries]
   )

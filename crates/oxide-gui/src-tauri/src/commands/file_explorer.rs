@@ -12,6 +12,37 @@ use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+const OXZ_EXTENSION: &str = "oxz";
+
+/// Checks if a file is likely an Oxide archive based on its extension.
+/// This is a cheap prefilter that avoids opening the file.
+fn has_oxide_archive_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case(OXZ_EXTENSION))
+        .unwrap_or(false)
+}
+
+/// Verifies that a file is an Oxide archive by checking magic bytes.
+/// This requires opening and reading from the file.
+fn is_oxide_archive_path(path: &Path) -> Result<bool, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("Failed to read metadata for {}: {e}", path.display()))?;
+
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+
+    let mut file =
+        File::open(path).map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
+    let mut magic = [0u8; 4];
+    let bytes_read = file
+        .read(&mut magic)
+        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+
+    Ok(bytes_read == OXZ_MAGIC.len() && magic == OXZ_MAGIC)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplorerDirectoryEntry {
@@ -180,24 +211,6 @@ fn path_metadata(path: &Path) -> Result<ExplorerPathMetadata, String> {
         uid: metadata_uid(&metadata),
         gid: metadata_gid(&metadata),
     })
-}
-
-fn is_oxide_archive_path(path: &Path) -> Result<bool, String> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|e| format!("Failed to read metadata for {}: {e}", path.display()))?;
-
-    if !metadata.is_file() {
-        return Ok(false);
-    }
-
-    let mut file =
-        File::open(path).map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
-    let mut magic = [0u8; 4];
-    let bytes_read = file
-        .read(&mut magic)
-        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-
-    Ok(bytes_read == OXZ_MAGIC.len() && magic == OXZ_MAGIC)
 }
 
 fn default_workers() -> usize {
@@ -443,11 +456,7 @@ pub async fn list_directory_entries(path: String) -> Result<Vec<ExplorerDirector
         };
 
         let file_type = metadata.file_type();
-        let is_oxide_archive = if file_type.is_file() {
-            is_oxide_archive_path(&entry_path).unwrap_or(false)
-        } else {
-            false
-        };
+        let is_oxide_archive = file_type.is_file() && has_oxide_archive_extension(&entry_path);
 
         result.push(ExplorerDirectoryEntry {
             name,
