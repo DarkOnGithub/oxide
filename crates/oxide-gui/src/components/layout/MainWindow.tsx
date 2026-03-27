@@ -3,7 +3,6 @@ import {
   ResizablePanel,
   ResizableHandle,
 } from '@/components/ui/resizable'
-import { TitleBar } from '@/components/titlebar/TitleBar'
 import { RightSideBar } from './RightSideBar'
 import { MainWindowContent } from './MainWindowContent'
 import { CommandPalette } from '@/components/command-palette/CommandPalette'
@@ -39,8 +38,6 @@ export function MainWindow() {
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden bg-background/95">
-      <TitleBar />
-
       <div className="flex flex-1 overflow-hidden">
         {rightSidebarVisible ? (
           <ResizablePanelGroup direction="horizontal">

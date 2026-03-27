@@ -738,7 +738,10 @@ export function useFileExplorer() {
             title: 'Extract archive to',
           })
 
-          outputDirectory = typeof selectedDirectory === 'string' ? selectedDirectory : null
+          outputDirectory =
+            typeof selectedDirectory === 'string'
+              ? await join(selectedDirectory, archiveNameFromPath(entry.path))
+              : null
         } else {
           const parentDirectory = await dirname(entry.path)
           outputDirectory = await join(
