@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::buffer::BufferPool;
-use crate::io::InputScanner;
+use crate::io::{ChunkingPolicy, InputScanner};
 use crate::telemetry::{
     ArchiveRun, ExtractReport, RunTelemetryOptions, TelemetryEvent, TelemetrySink,
 };
@@ -28,6 +28,7 @@ impl TelemetrySink for NoopTelemetrySink {
 /// the metadata and ordering guarantees needed by the archive format.
 pub struct ArchivePipeline {
     pub(crate) scanner: InputScanner,
+    pub(crate) chunking_policy: ChunkingPolicy,
     pub(crate) num_workers: usize,
     pub(crate) compression_algo: CompressionAlgo,
     pub(crate) skip_compression: bool,
@@ -39,7 +40,8 @@ impl ArchivePipeline {
     /// Creates a new archive pipeline.
     pub fn new(config: ArchivePipelineConfig) -> Self {
         Self {
-            scanner: InputScanner::new(config.target_block_size),
+            scanner: InputScanner::with_chunking_policy(config.chunking_policy),
+            chunking_policy: config.chunking_policy,
             num_workers: config.workers.max(1),
             compression_algo: config.compression_algo,
             skip_compression: config.skip_compression,
@@ -51,6 +53,7 @@ impl ArchivePipeline {
     fn config(&self) -> ArchivePipelineConfig {
         ArchivePipelineConfig {
             target_block_size: self.scanner.target_block_size(),
+            chunking_policy: self.chunking_policy,
             workers: self.num_workers,
             compression_algo: self.compression_algo,
             skip_compression: self.skip_compression,

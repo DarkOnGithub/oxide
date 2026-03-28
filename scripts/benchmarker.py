@@ -50,7 +50,6 @@ except ImportError as exc:
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OXIDE_PRESETS_PATH = BASE_DIR / "crates" / "oxide-cli" / "presets.json"
-SEVENZIP_EQUIVALENT_SOLID = False
 BENCHMARK_BLOCK_SIZE_OVERRIDES: dict[str, str] = {
     "fast": "1M",
     "balanced": "1M",
@@ -63,8 +62,12 @@ BENCHMARK_BLOCK_SIZE_OVERRIDES: dict[str, str] = {
 class ModeConfig:
     compression: str
     compression_level: str | None
-    block_size: str = "1M"
+    oxide_block_size: str = "1M"
+    baseline_block_size: str = "1M"
     lzma_dictionary_size: str | None = None
+    dictionary_mode: str | None = None
+    chunking: dict[str, object] | None = None
+    zstd_parameters: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,7 @@ class Settings:
     squashfs_block_size: str | None
     telemetry_dir: Path
     shuffle_seed: int
+    sevenzip_solid: bool
 
 
 @dataclass(frozen=True)
@@ -176,10 +180,17 @@ def merge_archive_preset(
     defaults: dict[str, object], preset: dict[str, object]
 ) -> dict[str, object]:
     merged = dict(defaults)
-    merged_compression = dict(defaults.get("compression", {}))
-    merged_compression.update(preset.get("compression", {}))
-    merged.update(preset)
-    merged["compression"] = merged_compression
+    for nested_key in ("compression", "chunking"):
+        merged_nested = dict(defaults.get(nested_key, {}))
+        preset_nested = preset.get(nested_key, {})
+        if isinstance(preset_nested, dict):
+            merged_nested.update(preset_nested)
+        merged[nested_key] = merged_nested
+
+    for key, value in preset.items():
+        if key not in {"compression", "chunking"}:
+            merged[key] = value
+
     return merged
 
 
@@ -237,13 +248,45 @@ def load_mode_configs_from_oxide_presets() -> dict[str, ModeConfig]:
                 f"Invalid Oxide preset payload: missing block_size for '{mode}' in {OXIDE_PRESETS_PATH}"
             )
 
+        chunking = merged.get("chunking")
+        if chunking is not None and not isinstance(chunking, dict):
+            raise SystemExit(
+                f"Invalid Oxide preset payload: malformed chunking settings for '{mode}' in {OXIDE_PRESETS_PATH}"
+            )
+
+        zstd_parameters = {
+            key: value
+            for key in (
+                "window_log",
+                "strategy",
+                "long_distance_matching",
+                "ldm_hash_log",
+                "ldm_min_match",
+                "ldm_bucket_size_log",
+                "ldm_hash_rate_log",
+                "job_size",
+                "overlap_log",
+            )
+            if (value := compression.get(key)) is not None
+        }
+
         mode_configs[mode] = ModeConfig(
             compression=compressor,
             compression_level=None if level is None else str(level),
-            block_size=BENCHMARK_BLOCK_SIZE_OVERRIDES.get(mode, str(block_size)),
+            oxide_block_size=str(block_size),
+            baseline_block_size=BENCHMARK_BLOCK_SIZE_OVERRIDES.get(
+                mode, str(block_size)
+            ),
             lzma_dictionary_size=(
                 None if dictionary_size is None else str(dictionary_size)
             ),
+            dictionary_mode=(
+                merged.get("dictionary_mode")
+                if isinstance(merged.get("dictionary_mode"), str)
+                else None
+            ),
+            chunking=dict(chunking) if isinstance(chunking, dict) else None,
+            zstd_parameters=zstd_parameters or None,
         )
 
     return mode_configs
@@ -393,6 +436,12 @@ def parse_args() -> Settings:
         ),
         help="Directory where JSONL/CSV telemetry for each run is written.",
     )
+    parser.add_argument(
+        "--sevenzip-solid",
+        choices=("on", "off"),
+        default=env_value("BENCHMARK_7Z_SOLID", "on"),
+        help="Solid mode to use for 7z baselines.",
+    )
 
     args = parser.parse_args()
 
@@ -422,6 +471,7 @@ def parse_args() -> Settings:
         squashfs_block_size=squashfs_block_size,
         telemetry_dir=Path(args.telemetry_dir),
         shuffle_seed=shuffle_seed,
+        sevenzip_solid=args.sevenzip_solid == "on",
     )
 
 
@@ -1347,7 +1397,7 @@ def print_run_header(
             f"passes: [cyan]{settings.passes}[/cyan]  explicit threads: [cyan]{settings.threads}[/cyan]  auto threads: [cyan]{settings.logical_threads}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
             f"oxide presets: [cyan]{OXIDE_PRESETS_PATH}[/cyan]\n"
-            f"7z solid mode: [cyan]{'on' if SEVENZIP_EQUIVALENT_SOLID else 'off'}[/cyan]\n"
+            f"7z solid mode: [cyan]{'on' if settings.sevenzip_solid else 'off'}[/cyan]\n"
             f"drop caches: [cyan]{'yes' if settings.drop_caches else 'no'}[/cyan]\n"
             f"shuffle seed: [cyan]{settings.shuffle_seed}[/cyan]\n"
             f"telemetry: [cyan]{telemetry_run_dir}[/cyan]"
@@ -1609,7 +1659,7 @@ def oxide_archive_command(
         "--preset",
         mode,
         "--block-size",
-        config.block_size,
+        config.oxide_block_size,
     ]
     if workers != "auto":
         command.extend(["--workers", workers])
@@ -1650,7 +1700,7 @@ def unsquashfs_extract_command(
 def mksquashfs_command(
     settings: Settings, mode: str, config: ModeConfig, workers: str
 ) -> list[str]:
-    block_size = settings.squashfs_block_size or config.block_size
+    block_size = settings.squashfs_block_size or config.baseline_block_size
     validate_mksquashfs_block_size(block_size)
     command = [
         resolve_tool("mksquashfs"),
@@ -1672,8 +1722,8 @@ def sevenzip_archive_command(
     settings: Settings, mode: str, config: ModeConfig, workers: str
 ) -> list[str]:
     mmt = resolved_thread_count(settings, workers)
-    dictionary_size = config.lzma_dictionary_size or config.block_size
-    solid_mode = "on" if SEVENZIP_EQUIVALENT_SOLID else "off"
+    dictionary_size = config.lzma_dictionary_size or config.oxide_block_size
+    solid_mode = "on" if settings.sevenzip_solid else "off"
     return [
         resolve_tool("7zz", "7z"),
         "a",
@@ -2071,8 +2121,12 @@ def run_bench_with_telemetry(
                 mode: {
                     "compression": MODE_CONFIGS[mode].compression,
                     "compression_level": MODE_CONFIGS[mode].compression_level,
-                    "block_size": MODE_CONFIGS[mode].block_size,
+                    "oxide_block_size": MODE_CONFIGS[mode].oxide_block_size,
+                    "baseline_block_size": MODE_CONFIGS[mode].baseline_block_size,
                     "lzma_dictionary_size": MODE_CONFIGS[mode].lzma_dictionary_size,
+                    "dictionary_mode": MODE_CONFIGS[mode].dictionary_mode,
+                    "chunking": MODE_CONFIGS[mode].chunking,
+                    "zstd_parameters": MODE_CONFIGS[mode].zstd_parameters,
                 }
                 for mode in settings.modes
             },

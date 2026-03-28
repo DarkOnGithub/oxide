@@ -43,34 +43,43 @@ pub struct ChunkEncodingPlan {
     pub lzma_extreme: bool,
     /// Optional explicit LZMA dictionary size used during encoding.
     pub lzma_dictionary_size: Option<usize>,
+    /// Optional advanced Zstd compression parameters used during encoding.
+    pub zstd_parameters: ZstdCompressionParameters,
 }
 
 impl ChunkEncodingPlan {
     /// Creates a new chunk encoding plan.
-    pub const fn new(algo: CompressionAlgo) -> Self {
+    pub fn new(algo: CompressionAlgo) -> Self {
         Self {
             algo,
             level: None,
             lzma_extreme: false,
             lzma_dictionary_size: None,
+            zstd_parameters: ZstdCompressionParameters::default(),
         }
     }
 
     /// Attaches an explicit codec-specific compression level override for encoding.
-    pub const fn with_level(mut self, level: Option<i32>) -> Self {
+    pub fn with_level(mut self, level: Option<i32>) -> Self {
         self.level = level;
         self
     }
 
     /// Enables or disables liblzma's extreme preset variant for LZMA encoding.
-    pub const fn with_lzma_extreme(mut self, lzma_extreme: bool) -> Self {
+    pub fn with_lzma_extreme(mut self, lzma_extreme: bool) -> Self {
         self.lzma_extreme = lzma_extreme;
         self
     }
 
     /// Attaches an explicit LZMA dictionary size override for encoding.
-    pub const fn with_lzma_dictionary_size(mut self, lzma_dictionary_size: Option<usize>) -> Self {
+    pub fn with_lzma_dictionary_size(mut self, lzma_dictionary_size: Option<usize>) -> Self {
         self.lzma_dictionary_size = lzma_dictionary_size;
+        self
+    }
+
+    /// Attaches advanced Zstd compression parameters for encoding.
+    pub fn with_zstd_parameters(mut self, zstd_parameters: ZstdCompressionParameters) -> Self {
+        self.zstd_parameters = zstd_parameters;
         self
     }
 
@@ -83,6 +92,48 @@ impl ChunkEncodingPlan {
 impl Default for ChunkEncodingPlan {
     fn default() -> Self {
         Self::new(CompressionAlgo::Lz4)
+    }
+}
+
+/// Zstd strategy preset used for advanced encoder tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ZstdStrategy {
+    Fast,
+    Dfast,
+    Greedy,
+    Lazy,
+    Lazy2,
+    Btlazy2,
+    Btopt,
+    Btultra,
+    Btultra2,
+}
+
+/// Optional advanced Zstd encoder parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ZstdCompressionParameters {
+    pub window_log: Option<u32>,
+    pub strategy: Option<ZstdStrategy>,
+    pub enable_long_distance_matching: Option<bool>,
+    pub ldm_hash_log: Option<u32>,
+    pub ldm_min_match: Option<u32>,
+    pub ldm_bucket_size_log: Option<u32>,
+    pub ldm_hash_rate_log: Option<u32>,
+    pub job_size: Option<u32>,
+    pub overlap_log: Option<u32>,
+}
+
+impl ZstdCompressionParameters {
+    pub const fn is_default(self) -> bool {
+        self.window_log.is_none()
+            && self.strategy.is_none()
+            && self.enable_long_distance_matching.is_none()
+            && self.ldm_hash_log.is_none()
+            && self.ldm_min_match.is_none()
+            && self.ldm_bucket_size_log.is_none()
+            && self.ldm_hash_rate_log.is_none()
+            && self.job_size.is_none()
+            && self.overlap_log.is_none()
     }
 }
 

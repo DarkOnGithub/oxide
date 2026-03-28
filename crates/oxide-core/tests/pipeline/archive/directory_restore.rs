@@ -94,3 +94,23 @@ fn restore_multiple_files_completes_metadata_finalization() {
         );
     }
 }
+
+#[test]
+fn writer_creation_does_not_eagerly_open_and_create_future_files() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    let manifest = ArchiveManifest::new(vec![ArchiveListingEntry::file(
+        "nested/deeper/file.txt".to_string(),
+        4,
+        0o644,
+        ArchiveTimestamp::default(),
+        0,
+        0,
+        0,
+    )]);
+
+    let _writer = DirectoryRestoreWriter::create(root, manifest).expect("create writer");
+
+    assert!(root.join("nested").is_dir());
+    assert!(!root.join("nested/deeper/file.txt").exists());
+}

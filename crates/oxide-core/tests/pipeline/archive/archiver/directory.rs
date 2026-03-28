@@ -128,3 +128,10 @@ fn submission_drain_budget_scales_with_pipeline_but_stays_bounded() {
     assert_eq!(submission_drain_budget(512, 64), 128);
     assert_eq!(submission_drain_budget(512, 512), 256);
 }
+
+#[test]
+fn prefetch_skips_mmap_sized_files() {
+    assert!(should_prefetch_owned(1024, 8 * 1024 * 1024));
+    assert!(!should_prefetch_owned(8 * 1024 * 1024, 8 * 1024 * 1024));
+    assert!(!should_prefetch_owned(16 * 1024 * 1024, 8 * 1024 * 1024));
+}

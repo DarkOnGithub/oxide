@@ -3,7 +3,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use oxide_core::{ArchiveDictionaryMode, CompressionAlgo};
+use oxide_core::{
+    ArchiveDictionaryMode, ChunkingMode, ChunkingPolicy, CompressionAlgo,
+    ZstdCompressionParameters, ZstdStrategy,
+};
 use serde::Deserialize;
 
 use crate::AppResult;
@@ -21,6 +24,8 @@ pub struct ResolvedArchiveSettings {
     pub compression_level: Option<i32>,
     pub compression_extreme: bool,
     pub lzma_dictionary_size: Option<usize>,
+    pub zstd_parameters: ZstdCompressionParameters,
+    pub chunking_policy: ChunkingPolicy,
     pub block_size: usize,
     pub workers: usize,
     pub pool_capacity: usize,
@@ -110,6 +115,7 @@ struct ArchivePresetRegistry {
 #[serde(default, deny_unknown_fields)]
 struct ArchivePresetConfig {
     compression: Option<CompressionConfig>,
+    chunking: Option<ChunkingConfig>,
     dictionary_mode: Option<String>,
     block_size: Option<SizeValue>,
     workers: Option<usize>,
@@ -132,6 +138,25 @@ struct CompressionConfig {
     level: Option<i32>,
     extreme: Option<bool>,
     dictionary_size: Option<SizeValue>,
+    window_log: Option<u32>,
+    strategy: Option<String>,
+    long_distance_matching: Option<bool>,
+    ldm_hash_log: Option<u32>,
+    ldm_min_match: Option<u32>,
+    ldm_bucket_size_log: Option<u32>,
+    ldm_hash_rate_log: Option<u32>,
+    job_size: Option<u32>,
+    overlap_log: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ChunkingConfig {
+    mode: Option<String>,
+    min_size: Option<SizeValue>,
+    max_size: Option<SizeValue>,
+    superchunk_size: Option<SizeValue>,
+    cdc_mask_bits: Option<u32>,
 }
 
 impl ArchivePresetConfig {
@@ -139,6 +164,13 @@ impl ArchivePresetConfig {
         merge_nested_option(
             &mut self.compression,
             other.compression.clone(),
+            |current, incoming| {
+                current.merge_from(&incoming);
+            },
+        );
+        merge_nested_option(
+            &mut self.chunking,
+            other.chunking.clone(),
             |current, incoming| {
                 current.merge_from(&incoming);
             },
@@ -177,6 +209,13 @@ impl ArchivePresetConfig {
             .compression
             .ok_or_else(|| invalid_input("archive preset is missing compression"))?
             .resolve(overrides.compression, overrides.compression_level)?;
+        let block_size = resolve_usize(overrides.block_size, self.block_size, "block_size")?;
+        let chunking_policy = self
+            .chunking
+            .as_ref()
+            .map(|chunking| chunking.resolve(block_size))
+            .transpose()?
+            .unwrap_or_else(|| ChunkingPolicy::fixed_for_target(block_size));
 
         Ok(ResolvedArchiveSettings {
             profile_name: preset_name.to_string(),
@@ -193,7 +232,9 @@ impl ArchivePresetConfig {
             compression_level: compression.level,
             compression_extreme: compression.extreme,
             lzma_dictionary_size: compression.lzma_dictionary_size,
-            block_size: resolve_usize(overrides.block_size, self.block_size, "block_size")?,
+            zstd_parameters: compression.zstd_parameters,
+            chunking_policy,
+            block_size,
             workers: resolve_number(overrides.workers, self.workers, "workers")?,
             pool_capacity: resolve_usize(
                 overrides.pool_capacity,
@@ -269,6 +310,18 @@ impl CompressionConfig {
         merge_option(&mut self.level, other.level);
         merge_option(&mut self.extreme, other.extreme);
         merge_option(&mut self.dictionary_size, other.dictionary_size.clone());
+        merge_option(&mut self.window_log, other.window_log);
+        merge_option(&mut self.strategy, other.strategy.clone());
+        merge_option(
+            &mut self.long_distance_matching,
+            other.long_distance_matching,
+        );
+        merge_option(&mut self.ldm_hash_log, other.ldm_hash_log);
+        merge_option(&mut self.ldm_min_match, other.ldm_min_match);
+        merge_option(&mut self.ldm_bucket_size_log, other.ldm_bucket_size_log);
+        merge_option(&mut self.ldm_hash_rate_log, other.ldm_hash_rate_log);
+        merge_option(&mut self.job_size, other.job_size);
+        merge_option(&mut self.overlap_log, other.overlap_log);
     }
 
     fn resolve(
@@ -292,14 +345,111 @@ impl CompressionConfig {
             .as_ref()
             .map(|value| value.parse("compression.dictionary_size"))
             .transpose()?;
-        validate_compression_settings(algo, level, extreme, lzma_dictionary_size)?;
+        let zstd_parameters = ZstdCompressionParameters {
+            window_log: self.window_log,
+            strategy: self
+                .strategy
+                .as_deref()
+                .map(parse_zstd_strategy)
+                .transpose()?,
+            enable_long_distance_matching: self.long_distance_matching,
+            ldm_hash_log: self.ldm_hash_log,
+            ldm_min_match: self.ldm_min_match,
+            ldm_bucket_size_log: self.ldm_bucket_size_log,
+            ldm_hash_rate_log: self.ldm_hash_rate_log,
+            job_size: self.job_size,
+            overlap_log: self.overlap_log,
+        };
+        validate_compression_settings(algo, level, extreme, lzma_dictionary_size, zstd_parameters)?;
 
         Ok(ResolvedCompressionSettings {
             algo,
             level,
             extreme,
             lzma_dictionary_size,
+            zstd_parameters,
         })
+    }
+}
+
+impl ChunkingConfig {
+    fn merge_from(&mut self, other: &Self) {
+        merge_option(&mut self.mode, other.mode.clone());
+        merge_option(&mut self.min_size, other.min_size.clone());
+        merge_option(&mut self.max_size, other.max_size.clone());
+        merge_option(&mut self.superchunk_size, other.superchunk_size.clone());
+        merge_option(&mut self.cdc_mask_bits, other.cdc_mask_bits);
+    }
+
+    fn resolve(&self, block_size: usize) -> Result<ChunkingPolicy, io::Error> {
+        let mode = match self
+            .mode
+            .as_deref()
+            .unwrap_or("fixed")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "fixed" => ChunkingMode::Fixed,
+            "cdc" | "content_defined" | "content-defined" => ChunkingMode::ContentDefined,
+            other => {
+                return Err(invalid_input(format!(
+                    "unknown chunking.mode '{other}': expected fixed or cdc"
+                )));
+            }
+        };
+
+        let min_size = self
+            .min_size
+            .as_ref()
+            .map(|value| value.parse("chunking.min_size"))
+            .transpose()?;
+        let max_size = self
+            .max_size
+            .as_ref()
+            .map(|value| value.parse("chunking.max_size"))
+            .transpose()?;
+        let superchunk_size = self
+            .superchunk_size
+            .as_ref()
+            .map(|value| value.parse("chunking.superchunk_size"))
+            .transpose()?;
+
+        let mut policy = match mode {
+            ChunkingMode::Fixed => ChunkingPolicy::fixed_for_target(block_size),
+            ChunkingMode::ContentDefined => ChunkingPolicy::content_defined_for_target(block_size),
+        };
+
+        if let Some(min_size) = min_size {
+            policy.min_size = min_size.max(1);
+        }
+        if let Some(max_size) = max_size {
+            policy.max_size = max_size.max(policy.min_size).max(block_size.max(1));
+        }
+        if let Some(superchunk_size) = superchunk_size {
+            policy.superchunk_size = superchunk_size.max(policy.max_size);
+        }
+        if let Some(mask_bits) = self.cdc_mask_bits {
+            if mode != ChunkingMode::ContentDefined {
+                return Err(invalid_input(
+                    "chunking.cdc_mask_bits is only supported when chunking.mode is 'cdc'",
+                ));
+            }
+            policy = policy.with_cdc_mask_bits(mask_bits);
+        }
+
+        if policy.min_size > policy.target_size {
+            return Err(invalid_input(
+                "chunking.min_size must be less than or equal to block_size",
+            ));
+        }
+        if policy.max_size < policy.target_size {
+            return Err(invalid_input(
+                "chunking.max_size must be greater than or equal to block_size",
+            ));
+        }
+
+        Ok(policy)
     }
 }
 
@@ -309,6 +459,24 @@ struct ResolvedCompressionSettings {
     level: Option<i32>,
     extreme: bool,
     lzma_dictionary_size: Option<usize>,
+    zstd_parameters: ZstdCompressionParameters,
+}
+
+fn parse_zstd_strategy(value: &str) -> Result<ZstdStrategy, io::Error> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "fast" => Ok(ZstdStrategy::Fast),
+        "dfast" => Ok(ZstdStrategy::Dfast),
+        "greedy" => Ok(ZstdStrategy::Greedy),
+        "lazy" => Ok(ZstdStrategy::Lazy),
+        "lazy2" => Ok(ZstdStrategy::Lazy2),
+        "btlazy2" => Ok(ZstdStrategy::Btlazy2),
+        "btopt" => Ok(ZstdStrategy::Btopt),
+        "btultra" => Ok(ZstdStrategy::Btultra),
+        "btultra2" => Ok(ZstdStrategy::Btultra2),
+        other => Err(invalid_input(format!(
+            "unknown compression.strategy '{other}' for zstd"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -366,6 +534,7 @@ fn validate_compression_settings(
     level: Option<i32>,
     extreme: bool,
     lzma_dictionary_size: Option<usize>,
+    zstd_parameters: ZstdCompressionParameters,
 ) -> Result<(), io::Error> {
     if extreme && compression != CompressionAlgo::Lzma {
         return Err(invalid_input(
@@ -376,6 +545,12 @@ fn validate_compression_settings(
     if lzma_dictionary_size.is_some() && compression != CompressionAlgo::Lzma {
         return Err(invalid_input(
             "compression.dictionary_size is only supported when compression.compressor is 'lzma'",
+        ));
+    }
+
+    if !zstd_parameters.is_default() && compression != CompressionAlgo::Zstd {
+        return Err(invalid_input(
+            "advanced zstd compression settings are only supported when compression.compressor is 'zstd'",
         ));
     }
 

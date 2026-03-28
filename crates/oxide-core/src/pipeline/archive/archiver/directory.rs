@@ -1,7 +1,7 @@
 use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, bounded, select};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::core::WorkerPool;
 use crate::dictionary::{ArchiveDictionaryBank, ArchiveDictionaryMode, DictionaryTrainer};
 use crate::format::{ArchiveBlockWriter, ArchiveManifest, ReorderBuffer};
-use crate::io::MmapInput;
+use crate::io::{ChunkingMode, MmapInput};
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{
@@ -51,8 +51,11 @@ where
         .map(|plan| plan.force_raw_storage)
         .collect::<Vec<_>>();
 
-    let block_count =
-        directory::estimate_directory_block_count(&discovery, &file_force_raw_storage, block_size)?;
+    let block_count = directory::estimate_directory_block_count(
+        &discovery,
+        &file_force_raw_storage,
+        config.chunking_policy,
+    )?;
     let dictionary_bank = train_directory_dictionary_bank(config, &discovery)?;
     let manifest = directory::manifest_from_discovery(&discovery)?
         .with_dictionary_bank(dictionary_bank.clone());
@@ -174,11 +177,12 @@ where
     let producer_root = discovery.root.clone();
     let producer_files = discovery.files.clone();
     let producer_force_raw_storage = file_force_raw_storage;
-    let producer_block_size = block_size;
+    let producer_chunking_policy = config.chunking_policy;
     let producer_compression_plan = ChunkEncodingPlan::new(config.compression_algo)
         .with_level(config.performance.compression_level)
         .with_lzma_extreme(config.performance.lzma_extreme)
-        .with_lzma_dictionary_size(config.performance.lzma_dictionary_size);
+        .with_lzma_dictionary_size(config.performance.lzma_dictionary_size)
+        .with_zstd_parameters(config.performance.zstd_parameters);
     let stream_read_buffer_size = config.performance.directory_stream_read_buffer_size.max(1);
     let producer_threads = config.performance.producer_threads.max(1);
     let mmap_threshold = config.performance.directory_mmap_threshold_bytes.max(1);
@@ -186,7 +190,7 @@ where
     let producer_handle = thread::spawn(move || -> Result<DirectoryProducerOutcome> {
         let mut submitter = DirectoryBatchSubmitter::new_with_plan(
             producer_root,
-            producer_block_size,
+            producer_chunking_policy,
             producer_compression_plan,
         );
         let mut producer_read = Duration::ZERO;
@@ -221,11 +225,8 @@ where
                     while let Ok(request) = worker_prefetch_rx.recv() {
                         let read_started = Instant::now();
                         let file_size = usize::try_from(request.file.size).unwrap_or(usize::MAX);
-                        let payload = if file_size >= worker_mmap_threshold {
-                            PrefetchPayload::Mapped(MmapInput::open(&request.file.full_path)?)
-                        } else {
-                            PrefetchPayload::Owned(fs::read(&request.file.full_path)?)
-                        };
+                        debug_assert!(should_prefetch_owned(file_size, worker_mmap_threshold));
+                        let payload = PrefetchPayload::Owned(fs::read(&request.file.full_path)?);
                         let read_elapsed = read_started.elapsed();
                         worker_result_tx
                             .send(PrefetchResult {
@@ -258,7 +259,8 @@ where
                     && next_prefetch <= file_index.saturating_add(prefetch_window)
                 {
                     let candidate = &producer_files[next_prefetch];
-                    if candidate.size > 0 {
+                    let candidate_size = usize::try_from(candidate.size).unwrap_or(usize::MAX);
+                    if should_prefetch_owned(candidate_size, mmap_threshold) {
                         prefetch_tx
                             .send(PrefetchRequest {
                                 index: next_prefetch,
@@ -275,7 +277,7 @@ where
             }
 
             let file_size = usize::try_from(file.size).unwrap_or(usize::MAX);
-            if prefetch_request_tx.is_some() && file_size > 0 {
+            if prefetch_request_tx.is_some() && should_prefetch_owned(file_size, mmap_threshold) {
                 let prefetched_file = if let Some(result) = prefetched.remove(&file_index) {
                     result
                 } else {
@@ -299,17 +301,6 @@ where
                     PrefetchPayload::Owned(data) => {
                         submitter
                             .push_bytes(&data, force_raw_storage, |batch| submit_batch(batch))?;
-                    }
-                    PrefetchPayload::Mapped(mmap) => {
-                        if let Some(map) = mmap.mapping() {
-                            submitter.push_mapped(
-                                map,
-                                0,
-                                mmap.len(),
-                                force_raw_storage,
-                                |batch| submit_batch(batch),
-                            )?;
-                        }
                     }
                 }
             } else if file_size >= mmap_threshold {
@@ -335,6 +326,10 @@ where
                         submit_batch(batch)
                     })?;
                 }
+            }
+
+            if producer_chunking_policy.mode == ChunkingMode::ContentDefined {
+                submitter.finish(|batch| submit_batch(batch))?;
             }
 
             if let Some(result_rx) = prefetch_result_rx.as_ref() {
@@ -723,6 +718,11 @@ where
 }
 
 #[inline]
+fn should_prefetch_owned(file_size: usize, mmap_threshold: usize) -> bool {
+    file_size > 0 && file_size < mmap_threshold.max(1)
+}
+
+#[inline]
 fn can_submit_more_work(
     submitted_count: usize,
     received_count: usize,
@@ -915,18 +915,53 @@ fn train_directory_dictionary_bank(
             Err(_) => continue,
         };
 
-        let mut sample = vec![0u8; 16 * 1024];
-        let read = match handle.read(sample.as_mut_slice()) {
-            Ok(read) => read,
-            Err(_) => continue,
-        };
-        trainer.observe(&sample[..read]);
+        sample_file_for_dictionary(&mut handle, file.size, &mut trainer);
     }
 
     trainer.build(
         config.compression_algo,
         config.performance.compression_level,
     )
+}
+
+const DIRECTORY_DICTIONARY_SAMPLE_SIZE: usize = 32 * 1024;
+
+fn sample_file_for_dictionary(
+    handle: &mut fs::File,
+    file_size: u64,
+    trainer: &mut DictionaryTrainer,
+) {
+    let file_size = usize::try_from(file_size).unwrap_or(usize::MAX);
+    if file_size == 0 {
+        return;
+    }
+
+    if file_size <= DIRECTORY_DICTIONARY_SAMPLE_SIZE {
+        let mut sample = vec![0u8; file_size];
+        if let Ok(read) = handle.read(sample.as_mut_slice())
+            && read > 0
+        {
+            trainer.observe(&sample[..read]);
+        }
+        return;
+    }
+
+    let suffix_start = file_size.saturating_sub(DIRECTORY_DICTIONARY_SAMPLE_SIZE);
+    let middle_start = file_size
+        .saturating_sub(DIRECTORY_DICTIONARY_SAMPLE_SIZE)
+        .saturating_div(2);
+
+    for start in [0usize, middle_start, suffix_start] {
+        if handle.seek(SeekFrom::Start(start as u64)).is_err() {
+            continue;
+        }
+        let mut sample = vec![0u8; DIRECTORY_DICTIONARY_SAMPLE_SIZE];
+        if let Ok(read) = handle.read(sample.as_mut_slice())
+            && read > 0
+        {
+            trainer.observe(&sample[..read]);
+        }
+    }
 }
 
 #[cfg(test)]

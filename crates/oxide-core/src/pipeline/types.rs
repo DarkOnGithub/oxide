@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::buffer::BufferPool;
 use crate::dictionary::ArchiveDictionaryMode;
-use crate::types::CompressionAlgo;
+use crate::io::ChunkingPolicy;
+use crate::types::{CompressionAlgo, ZstdCompressionParameters};
 
 /// Indicates whether the archive source is a single file or a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +250,8 @@ pub struct PipelinePerformanceOptions {
     pub lzma_extreme: bool,
     /// Optional explicit LZMA dictionary size used during encoding.
     pub lzma_dictionary_size: Option<usize>,
+    /// Optional advanced Zstd encoder parameters used during encoding.
+    pub zstd_parameters: ZstdCompressionParameters,
     /// Maximum in-flight block payload bytes pending worker completion.
     pub max_inflight_bytes: usize,
     /// Maximum in-flight blocks scaled by worker count.
@@ -273,6 +276,7 @@ impl Default for PipelinePerformanceOptions {
             compression_level: None,
             lzma_extreme: false,
             lzma_dictionary_size: None,
+            zstd_parameters: ZstdCompressionParameters::default(),
             max_inflight_bytes: 512 * 1024 * 1024,
             max_inflight_blocks_per_worker: 256,
             directory_stream_read_buffer_size: 16 * 1024 * 1024,
@@ -289,6 +293,8 @@ impl Default for PipelinePerformanceOptions {
 pub struct ArchivePipelineConfig {
     /// Target size for data blocks.
     pub target_block_size: usize,
+    /// Chunking policy used for scanning/archive batching.
+    pub chunking_policy: ChunkingPolicy,
     /// Number of parallel workers.
     pub workers: usize,
     /// Shared buffer pool for memory management.
@@ -311,6 +317,7 @@ impl ArchivePipelineConfig {
     ) -> Self {
         Self {
             target_block_size,
+            chunking_policy: ChunkingPolicy::fixed_for_target(target_block_size),
             workers,
             buffer_pool,
             compression_algo,

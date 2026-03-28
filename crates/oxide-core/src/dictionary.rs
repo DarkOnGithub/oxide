@@ -2,11 +2,13 @@ use std::collections::BTreeMap;
 
 use crate::{CompressionAlgo, OxideError, Result};
 
-const DEFAULT_DICT_SIZE: usize = 64 * 1024;
-const DEFAULT_SAMPLE_SIZE: usize = 16 * 1024;
+const DEFAULT_DICT_SIZE: usize = 128 * 1024;
+const DEFAULT_SAMPLE_SIZE: usize = 32 * 1024;
 const MAX_SAMPLES_PER_CLASS: usize = 256;
-const MAX_SAMPLE_BYTES_PER_CLASS: usize = 4 * 1024 * 1024;
+const MAX_SAMPLE_BYTES_PER_CLASS: usize = 8 * 1024 * 1024;
 const MIN_SAMPLES_PER_CLASS: usize = 8;
+const MULTI_WINDOW_THRESHOLD: usize = DEFAULT_SAMPLE_SIZE * 2;
+const MAX_WINDOWS_PER_SAMPLE: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ArchiveDictionaryMode {
@@ -152,21 +154,29 @@ impl DictionaryTrainer {
         }
 
         let class = classify_sample(sample);
-        let clipped_len = sample.len().min(DEFAULT_SAMPLE_SIZE);
-        if clipped_len == 0 {
-            return;
-        }
+        for window in extract_sample_windows(sample) {
+            let current_bytes = *self.sample_bytes_by_class.get(&class).unwrap_or(&0);
+            let samples = self.samples_by_class.entry(class).or_default();
+            if samples.len() >= MAX_SAMPLES_PER_CLASS || current_bytes >= MAX_SAMPLE_BYTES_PER_CLASS
+            {
+                break;
+            }
 
-        let current_bytes = *self.sample_bytes_by_class.get(&class).unwrap_or(&0);
-        let samples = self.samples_by_class.entry(class).or_default();
-        if samples.len() >= MAX_SAMPLES_PER_CLASS || current_bytes >= MAX_SAMPLE_BYTES_PER_CLASS {
-            return;
-        }
+            let remaining_bytes = MAX_SAMPLE_BYTES_PER_CLASS.saturating_sub(current_bytes);
+            if remaining_bytes == 0 {
+                break;
+            }
 
-        let clipped = sample[..clipped_len].to_vec();
-        self.sample_bytes_by_class
-            .insert(class, current_bytes.saturating_add(clipped.len()));
-        samples.push(clipped);
+            let clipped_len = window.len().min(remaining_bytes);
+            if clipped_len == 0 {
+                break;
+            }
+
+            let clipped = window[..clipped_len].to_vec();
+            self.sample_bytes_by_class
+                .insert(class, current_bytes.saturating_add(clipped.len()));
+            samples.push(clipped);
+        }
     }
 
     pub fn build(
@@ -205,6 +215,30 @@ impl DictionaryTrainer {
 
         ArchiveDictionaryBank::new(dictionaries)
     }
+}
+
+fn extract_sample_windows(sample: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let clipped_len = sample.len().min(DEFAULT_SAMPLE_SIZE);
+    if clipped_len == 0 {
+        return Vec::new().into_iter();
+    }
+
+    if sample.len() <= MULTI_WINDOW_THRESHOLD {
+        return vec![&sample[..clipped_len]].into_iter();
+    }
+
+    let suffix_start = sample.len().saturating_sub(clipped_len);
+    let middle_start = sample.len().saturating_sub(clipped_len).saturating_div(2);
+
+    let mut windows = Vec::with_capacity(MAX_WINDOWS_PER_SAMPLE);
+    windows.push(&sample[..clipped_len]);
+    if middle_start > 0 && middle_start + clipped_len <= sample.len() {
+        windows.push(&sample[middle_start..middle_start + clipped_len]);
+    }
+    if suffix_start > 0 && suffix_start + clipped_len <= sample.len() {
+        windows.push(&sample[suffix_start..suffix_start + clipped_len]);
+    }
+    windows.into_iter()
 }
 
 pub fn classify_sample(sample: &[u8]) -> DictionaryClass {

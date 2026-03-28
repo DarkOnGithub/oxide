@@ -224,6 +224,7 @@ fn build_archive_pipeline(
     performance.compression_level = settings.compression_level;
     performance.lzma_extreme = settings.compression_extreme;
     performance.lzma_dictionary_size = settings.lzma_dictionary_size;
+    performance.zstd_parameters = settings.zstd_parameters;
     performance.dictionary_mode = settings.dictionary_mode;
     performance.max_inflight_bytes = settings.inflight_bytes.max(1);
     performance.max_inflight_blocks_per_worker = settings.inflight_blocks_per_worker.max(1);
@@ -239,6 +240,7 @@ fn build_archive_pipeline(
         buffer_pool,
         settings.compression,
     );
+    config.chunking_policy = settings.chunking_policy;
     config.skip_compression = settings.skip_compression;
     config.performance = performance;
     ArchivePipeline::new(config)

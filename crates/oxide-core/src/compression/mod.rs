@@ -1,4 +1,4 @@
-use crate::{CompressionAlgo, Result};
+use crate::{CompressionAlgo, Result, ZstdCompressionParameters};
 
 pub mod lz4;
 pub mod lzma;
@@ -15,6 +15,7 @@ pub struct CompressionRequest<'a> {
     pub level: Option<i32>,
     pub lzma_extreme: bool,
     pub lzma_dictionary_size: Option<usize>,
+    pub zstd_parameters: ZstdCompressionParameters,
     pub dictionary_id: u8,
     pub dictionary: Option<&'a [u8]>,
 }
@@ -27,6 +28,7 @@ impl<'a> CompressionRequest<'a> {
             level: None,
             lzma_extreme: false,
             lzma_dictionary_size: None,
+            zstd_parameters: ZstdCompressionParameters::default(),
             dictionary_id: 0,
             dictionary: None,
         }
@@ -90,6 +92,7 @@ pub(crate) fn apply_compression_request_with_scratch(
         CompressionAlgo::Zstd => zstd::apply_with_scratch(
             request.data,
             request.level,
+            request.zstd_parameters,
             request.dictionary_id,
             request.dictionary,
             scratch.zstd(),
@@ -114,6 +117,7 @@ pub(crate) fn apply_compression_request_with_scratch_into(
         CompressionAlgo::Zstd => zstd::apply_into_vec(
             request.data,
             request.level,
+            request.zstd_parameters,
             request.dictionary_id,
             request.dictionary,
             scratch.zstd(),

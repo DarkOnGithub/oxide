@@ -35,9 +35,22 @@ fn scanner_returns_empty_for_empty_files() -> Result<(), Box<dyn std::error::Err
 #[test]
 fn block_boundary_respects_chunking_policy() {
     let scanner = InputScanner::with_chunking_policy(ChunkingPolicy::fixed(4));
+    let data = b"abcdefghij";
 
-    assert_eq!(scanner.find_block_boundary(0, 10), 4);
-    assert_eq!(scanner.find_block_boundary(4, 10), 8);
-    assert_eq!(scanner.find_block_boundary(8, 10), 10);
-    assert_eq!(scanner.find_block_boundary(10, 10), 10);
+    assert_eq!(scanner.find_block_boundary(data, 0), 4);
+    assert_eq!(scanner.find_block_boundary(data, 4), 8);
+    assert_eq!(scanner.find_block_boundary(data, 8), 10);
+    assert_eq!(scanner.find_block_boundary(data, 10), 10);
+}
+
+#[test]
+fn cdc_scanner_respects_bounds() {
+    let policy = ChunkingPolicy::content_defined_for_target(16 * 1024);
+    let scanner = InputScanner::with_chunking_policy(policy);
+    let data = vec![b'a'; 128 * 1024];
+
+    let end = scanner.find_block_boundary(&data, 0);
+
+    assert!(end >= policy.min_size);
+    assert!(end <= policy.max_size);
 }

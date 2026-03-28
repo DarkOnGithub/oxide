@@ -123,9 +123,14 @@ impl InputScanner {
         let mut start = 0usize;
         let source_path = path.to_path_buf();
         let mut id = 0usize;
+        let mapping = mmap.mapping();
+        let full_slice = mapping.as_deref();
 
         while start < len {
-            let end = self.find_block_boundary(start, len);
+            let end = match full_slice {
+                Some(bytes) => self.find_block_boundary(bytes, start),
+                None => len,
+            };
             let batch_data = mmap.mapped_slice(start, end)?;
             batches.push(Batch {
                 id,
@@ -143,14 +148,11 @@ impl InputScanner {
     }
 
     /// Finds the next fixed-size boundary.
-    pub fn find_block_boundary(&self, start: usize, len: usize) -> usize {
-        if start >= len {
-            return len;
+    pub fn find_block_boundary(&self, data: &[u8], start: usize) -> usize {
+        if start >= data.len() {
+            return data.len();
         }
 
-        let policy = self.chunking_policy;
-        let target = start.saturating_add(policy.target_size).min(len);
-        let max_cut = policy.upper_bound(start, len);
-        target.min(max_cut)
+        self.chunking_policy.find_boundary(data, start)
     }
 }

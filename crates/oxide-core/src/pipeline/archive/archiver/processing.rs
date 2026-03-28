@@ -11,8 +11,10 @@ use crate::dictionary::ArchiveDictionaryBank;
 use crate::pipeline::archive::types::ProcessingThroughputTotals;
 use crate::types::{Batch, CompressedBlock, CompressedPayload, CompressionAlgo, Result};
 
-const INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN: usize = 32 * 1024;
-const INCOMPRESSIBLE_PROBE_SAMPLE_LEN: usize = 16 * 1024;
+const INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN: usize = 64 * 1024;
+const INCOMPRESSIBLE_PROBE_SAMPLE_LEN: usize = 32 * 1024;
+const INCOMPRESSIBLE_PROBE_MIN_SAMPLES: usize = 2;
+const INCOMPRESSIBLE_PROBE_MARGIN_PERCENT: usize = 98;
 #[cfg(test)]
 const LZMA_PROBE_MIN_SOURCE_LEN: usize = 256 * 1024;
 #[cfg(test)]
@@ -61,31 +63,63 @@ fn is_likely_incompressible_sample(
     dictionary_bank: &ArchiveDictionaryBank,
     scratch: &mut WorkerScratchArena,
 ) -> Result<bool> {
-    let sample_len = source.len().min(compression_probe_config(plan).sample_len);
+    let config = compression_probe_config(plan);
+    let sample_len = source.len().min(config.sample_len);
     if sample_len == 0 {
         return Ok(false);
     }
 
-    let selected_dictionary = dictionary_bank.select_for_chunk(plan.algo, &source[..sample_len]);
-    let probe = apply_compression_request_with_scratch(
-        CompressionRequest {
-            data: &source[..sample_len],
-            algo: plan.algo,
-            level: plan.level,
-            lzma_extreme: plan.lzma_extreme,
-            lzma_dictionary_size: plan.lzma_dictionary_size,
-            dictionary_id: selected_dictionary
-                .map(|dictionary| dictionary.id)
-                .unwrap_or(0),
-            dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
-        },
-        scratch.compression(),
-    )?;
+    let mut total_probe_bytes = 0usize;
+    let mut total_encoded_bytes = 0usize;
+    let mut incompressible_samples = 0usize;
+    let mut sample_count = 0usize;
 
-    let likely_incompressible = probe.len() >= sample_len;
-    recycle_compression_buffer(plan.algo, probe, scratch.compression());
+    for start in probe_sample_offsets(source.len(), sample_len) {
+        let sample = &source[start..start + sample_len];
+        let selected_dictionary = dictionary_bank.select_for_chunk(plan.algo, sample);
+        let probe = apply_compression_request_with_scratch(
+            CompressionRequest {
+                data: sample,
+                algo: plan.algo,
+                level: plan.level,
+                lzma_extreme: plan.lzma_extreme,
+                lzma_dictionary_size: plan.lzma_dictionary_size,
+                zstd_parameters: plan.zstd_parameters,
+                dictionary_id: selected_dictionary
+                    .map(|dictionary| dictionary.id)
+                    .unwrap_or(0),
+                dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
+            },
+            scratch.compression(),
+        )?;
 
-    Ok(likely_incompressible)
+        total_probe_bytes += sample.len();
+        total_encoded_bytes += probe.len();
+        if probe.len().saturating_mul(100)
+            >= sample
+                .len()
+                .saturating_mul(INCOMPRESSIBLE_PROBE_MARGIN_PERCENT)
+        {
+            incompressible_samples += 1;
+        }
+        sample_count += 1;
+        recycle_compression_buffer(plan.algo, probe, scratch.compression());
+    }
+
+    Ok(sample_count >= INCOMPRESSIBLE_PROBE_MIN_SAMPLES
+        && incompressible_samples == sample_count
+        && total_encoded_bytes.saturating_mul(100)
+            >= total_probe_bytes.saturating_mul(INCOMPRESSIBLE_PROBE_MARGIN_PERCENT))
+}
+
+fn probe_sample_offsets(source_len: usize, sample_len: usize) -> [usize; 3] {
+    if source_len <= sample_len {
+        return [0, 0, 0];
+    }
+
+    let last = source_len.saturating_sub(sample_len);
+    let middle = last / 2;
+    [0, middle, last]
 }
 
 pub fn process_batch(
@@ -143,6 +177,7 @@ pub fn process_batch(
         level: plan.level,
         lzma_extreme: plan.lzma_extreme,
         lzma_dictionary_size: plan.lzma_dictionary_size,
+        zstd_parameters: plan.zstd_parameters,
         dictionary_id,
         dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
     };

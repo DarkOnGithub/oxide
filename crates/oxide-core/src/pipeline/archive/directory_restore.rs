@@ -107,8 +107,6 @@ enum PreparedRestoreEntry {
     File {
         path: PathBuf,
         entry: crate::ArchiveListingEntry,
-        file: Option<fs::File>,
-        create_elapsed: Duration,
     },
     Symlink {
         path: PathBuf,
@@ -353,22 +351,20 @@ impl DirectoryRestoreWriter {
                 PreparedRestoreEntry::Directory { path, entry } => {
                     self.defer_directory_metadata(path, entry);
                 }
-                PreparedRestoreEntry::File {
-                    path,
-                    entry,
-                    file,
-                    create_elapsed,
-                } => {
-                    self.stats.record_output_create_file(create_elapsed);
-
+                PreparedRestoreEntry::File { path, entry } => {
                     if entry.size == 0 {
+                        let create_started = Instant::now();
+                        let _file = fs::File::create(&path)?;
+                        self.stats
+                            .record_output_create_file(create_started.elapsed());
                         self.defer_file_metadata(path, entry);
                         continue;
                     }
 
-                    let file = file.ok_or(OxideError::InvalidFormat(
-                        "prepared file entry missing file handle",
-                    ))?;
+                    let create_started = Instant::now();
+                    let file = fs::File::create(&path)?;
+                    self.stats
+                        .record_output_create_file(create_started.elapsed());
                     self.pending_file = Some(PendingFile {
                         remaining: entry.size,
                         writer: PendingFileWriter::new(file, entry.size),
@@ -648,18 +644,7 @@ fn prepare_restore_entry(restore_entry: RestoreEntry) -> Result<PreparedRestoreE
     let RestoreEntry { path, entry } = restore_entry;
     match entry.kind {
         crate::ArchiveEntryKind::Directory => Ok(PreparedRestoreEntry::Directory { path, entry }),
-        crate::ArchiveEntryKind::File => {
-            let has_payload = entry.size > 0;
-            let create_started = Instant::now();
-            let file = fs::File::create(&path)?;
-            let create_elapsed = create_started.elapsed();
-            Ok(PreparedRestoreEntry::File {
-                path,
-                entry,
-                file: has_payload.then_some(file),
-                create_elapsed,
-            })
-        }
+        crate::ArchiveEntryKind::File => Ok(PreparedRestoreEntry::File { path, entry }),
         crate::ArchiveEntryKind::Symlink => {
             let target = entry.target.as_deref().ok_or(OxideError::InvalidFormat(
                 "symlink manifest entry missing target",

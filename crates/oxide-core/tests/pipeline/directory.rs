@@ -1,4 +1,5 @@
 use super::{detect_file_probe_plans, discover_directory_tree, estimate_directory_block_count};
+use crate::io::ChunkingPolicy;
 use std::fs;
 use tempfile::tempdir;
 
@@ -107,7 +108,9 @@ fn block_count_without_raw_boundaries_uses_total_bytes_only() {
 
     let discovery = discover_directory_tree(root).expect("discover directory");
     let raw_plan = vec![false; discovery.files.len()];
-    let block_count = estimate_directory_block_count(&discovery, &raw_plan, 4).expect("plan");
+    let block_count =
+        estimate_directory_block_count(&discovery, &raw_plan, ChunkingPolicy::fixed_for_target(4))
+            .expect("plan");
 
     assert_eq!(block_count, 3);
 }
@@ -121,7 +124,9 @@ fn block_count_accounts_for_raw_storage_policy_changes() {
 
     let discovery = discover_directory_tree(root).expect("discover directory");
     let raw_plan = vec![false, true];
-    let block_count = estimate_directory_block_count(&discovery, &raw_plan, 8).expect("plan");
+    let block_count =
+        estimate_directory_block_count(&discovery, &raw_plan, ChunkingPolicy::fixed_for_target(8))
+            .expect("plan");
 
     assert_eq!(block_count, 2);
 }

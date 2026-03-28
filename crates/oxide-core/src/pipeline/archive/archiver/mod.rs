@@ -222,11 +222,16 @@ impl<'a> Archiver<'a> {
 
     pub fn prepare_file(&self, path: &Path, block_size: usize) -> Result<PreparedInput> {
         let scanner = InputScanner::with_chunking_policy_and_plan(
-            ChunkingPolicy::fixed_for_target(block_size),
+            if self.config.chunking_policy.target_size == block_size {
+                self.config.chunking_policy
+            } else {
+                ChunkingPolicy::fixed_for_target(block_size)
+            },
             ChunkEncodingPlan::new(self.config.compression_algo)
                 .with_level(self.config.performance.compression_level)
                 .with_lzma_extreme(self.config.performance.lzma_extreme)
-                .with_lzma_dictionary_size(self.config.performance.lzma_dictionary_size),
+                .with_lzma_dictionary_size(self.config.performance.lzma_dictionary_size)
+                .with_zstd_parameters(self.config.performance.zstd_parameters),
         );
         let mut batches = scanner.scan_file(path)?;
         let force_raw_storage = batches

@@ -3,6 +3,7 @@ use super::{
     reverse_with_scratch,
 };
 use crate::compression::scratch::ZstdScratch;
+use crate::{ZstdCompressionParameters, ZstdStrategy};
 
 #[test]
 fn default_level_is_used_when_omitted() {
@@ -19,10 +20,24 @@ fn reusable_scratch_supports_multiple_levels_and_round_trips() {
     let payload = b"banana bandana banana";
     let mut scratch = ZstdScratch::default();
 
-    let balanced = apply_with_scratch(payload, Some(3), 0, None, &mut scratch)
-        .expect("zstd compression should succeed");
-    let ultra = apply_with_scratch(payload, Some(19), 0, None, &mut scratch)
-        .expect("zstd compression should succeed");
+    let balanced = apply_with_scratch(
+        payload,
+        Some(3),
+        ZstdCompressionParameters::default(),
+        0,
+        None,
+        &mut scratch,
+    )
+    .expect("zstd compression should succeed");
+    let ultra = apply_with_scratch(
+        payload,
+        Some(19),
+        ZstdCompressionParameters::default(),
+        0,
+        None,
+        &mut scratch,
+    )
+    .expect("zstd compression should succeed");
 
     let balanced_decoded =
         reverse_with_scratch(&balanced, Some(payload.len()), 0, None, &mut scratch)
@@ -40,8 +55,16 @@ fn direct_buffer_round_trip_grows_undersized_vecs() {
     let mut scratch = ZstdScratch::default();
 
     let mut compressed = Vec::with_capacity(512);
-    apply_into_vec(&payload, Some(3), 0, None, &mut scratch, &mut compressed)
-        .expect("zstd compression should grow undersized output");
+    apply_into_vec(
+        &payload,
+        Some(3),
+        ZstdCompressionParameters::default(),
+        0,
+        None,
+        &mut scratch,
+        &mut compressed,
+    )
+    .expect("zstd compression should grow undersized output");
 
     let mut decoded = Vec::with_capacity(1024);
     reverse_into_vec(
@@ -53,6 +76,24 @@ fn direct_buffer_round_trip_grows_undersized_vecs() {
         &mut decoded,
     )
     .expect("zstd decompression should grow undersized output");
+
+    assert_eq!(decoded, payload);
+}
+
+#[test]
+fn advanced_parameters_round_trip() {
+    let payload = b"banana bandana banana banana banana";
+    let mut scratch = ZstdScratch::default();
+    let params = ZstdCompressionParameters {
+        strategy: Some(ZstdStrategy::Lazy),
+        window_log: Some(20),
+        ..ZstdCompressionParameters::default()
+    };
+
+    let compressed = apply_with_scratch(payload, Some(6), params, 0, None, &mut scratch)
+        .expect("zstd compression with advanced params should succeed");
+    let decoded = reverse_with_scratch(&compressed, Some(payload.len()), 0, None, &mut scratch)
+        .expect("zstd decompression should succeed");
 
     assert_eq!(decoded, payload);
 }

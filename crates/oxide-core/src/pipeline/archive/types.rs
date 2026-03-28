@@ -3,7 +3,6 @@ use super::super::types::ArchiveSourceKind;
 use crate::buffer::PooledBuffer;
 use crate::core::{PoolRuntimeSnapshot, WorkerRuntimeSnapshot};
 use crate::format::{ArchiveManifest, ChunkDescriptor};
-use crate::io::MmapInput;
 use crate::types::{Batch, duration_to_us};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
@@ -124,7 +123,6 @@ pub(super) struct PrefetchRequest {
 #[derive(Debug)]
 pub enum PrefetchPayload {
     Owned(Vec<u8>),
-    Mapped(MmapInput),
 }
 
 #[derive(Debug)]

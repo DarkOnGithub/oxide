@@ -3,7 +3,23 @@
     "default_preset": "balanced",
     "defaults": {
       "compression": {
-        "compressor": "lz4"
+        "compressor": "lz4",
+        "window_log": null,
+        "strategy": null,
+        "long_distance_matching": null,
+        "ldm_hash_log": null,
+        "ldm_min_match": null,
+        "ldm_bucket_size_log": null,
+        "ldm_hash_rate_log": null,
+        "job_size": null,
+        "overlap_log": null
+      },
+      "chunking": {
+        "mode": "fixed",
+        "min_size": null,
+        "max_size": null,
+        "superchunk_size": null,
+        "cdc_mask_bits": null
       },
       "block_size": "1M",
       "workers": 0,
@@ -24,6 +40,9 @@
         "compression": {
           "compressor": "lz4"
         },
+        "chunking": {
+          "mode": "fixed"
+        },
         "block_size": "2M",
         "workers": 0,
         "pool_capacity": "2M",
@@ -40,11 +59,16 @@
       "balanced": {
         "compression": {
           "compressor": "zstd",
-          "level": 6
+          "level": 7,
+          "window_log": 23,
+          "strategy": "lazy2"
         },
-        "block_size": "2M",
+        "chunking": {
+          "mode": "fixed"
+        },
+        "block_size": "4M",
         "workers": 0,
-        "pool_capacity": "2M",
+        "pool_capacity": "4M",
         "pool_buffers": 512,
         "stream_read_buffer": "64M",
         "directory_mmap_threshold": "8M",
@@ -53,18 +77,21 @@
         "producer_threads": 3,
         "writer_queue_blocks": 768,
         "result_wait_ms": 1,
-        "dictionary_mode": "off"
+        "dictionary_mode": "auto"
       },
       "ultra": {
         "compression": {
           "compressor": "lzma",
           "level": 7,
-          "extreme": false,
-          "dictionary_size": "2M"
+          "extreme": true,
+          "dictionary_size": "16M"
         },
-        "block_size": "2M",
+        "chunking": {
+          "mode": "fixed"
+        },
+        "block_size": "4M",
         "workers": 0,
-        "pool_capacity": "2M",
+        "pool_capacity": "4M",
         "pool_buffers": 192,
         "stream_read_buffer": "16M",
         "inflight_bytes": "512M",
@@ -79,12 +106,15 @@
         "compression": {
           "compressor": "lzma",
           "level": 9,
-          "extreme": false,
-          "dictionary_size": "4M"
+          "extreme": true,
+          "dictionary_size": "32M"
         },
-        "block_size": "4M",
+        "chunking": {
+          "mode": "fixed"
+        },
+        "block_size": "8M",
         "workers": 0,
-        "pool_capacity": "4M",
+        "pool_capacity": "8M",
         "pool_buffers": 192,
         "stream_read_buffer": "16M",
         "inflight_bytes": "768M",

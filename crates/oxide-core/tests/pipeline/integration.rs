@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use oxide_core::{
     ArchiveDictionaryMode, ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig,
-    ArchiveProgressEvent, ArchiveReader, BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo,
-    ExtractProgressEvent, FOOTER_SIZE, ReportValue, RunTelemetryOptions, TelemetryEvent,
-    TelemetrySink,
+    ArchiveProgressEvent, ArchiveReader, BufferPool, CHUNK_TABLE_HEADER_SIZE, ChunkingPolicy,
+    CompressionAlgo, ExtractProgressEvent, FOOTER_SIZE, ReportValue, RunTelemetryOptions,
+    TelemetryEvent, TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -175,6 +175,78 @@ fn pipeline_roundtrip_reconstructs_original_bytes() -> Result<(), Box<dyn std::e
 
     let metrics = buffer_pool.metrics();
     assert!(metrics.created > 0);
+    Ok(())
+}
+
+#[test]
+fn cdc_pipeline_roundtrip_reconstructs_original_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(512 * 1024);
+    let file = write_fixture(&data)?;
+
+    let mut config = ArchivePipelineConfig::new(
+        32 * 1024,
+        4,
+        Arc::new(BufferPool::new(64 * 1024, 128)),
+        CompressionAlgo::Zstd,
+    );
+    config.chunking_policy = ChunkingPolicy::content_defined_for_target(32 * 1024);
+    let pipeline = ArchivePipeline::new(config);
+
+    let archive = pipeline
+        .archive_file(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+
+    assert_eq!(restored, data);
+    Ok(())
+}
+
+#[test]
+fn cdc_directory_archive_roundtrip_restores_tree() -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "top.txt", &build_text_fixture(96 * 1024))?;
+    write_directory_file(&source, "nested/a.bin", &build_text_fixture(80 * 1024))?;
+
+    let mut config = ArchivePipelineConfig::new(
+        32 * 1024,
+        4,
+        Arc::new(BufferPool::new(64 * 1024, 128)),
+        CompressionAlgo::Zstd,
+    );
+    config.chunking_policy = ChunkingPolicy::content_defined_for_target(32 * 1024);
+    let pipeline = ArchivePipeline::new(config);
+
+    let archive = pipeline
+        .archive_directory(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let out = tempfile::tempdir()?;
+    pipeline.extract_directory_archive(
+        Cursor::new(archive),
+        out.path(),
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(
+        std::fs::read(out.path().join("top.txt"))?,
+        build_text_fixture(96 * 1024)
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("nested/a.bin"))?,
+        build_text_fixture(80 * 1024)
+    );
     Ok(())
 }
 

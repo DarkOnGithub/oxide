@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use oxide_core::MmapInput;
 use oxide_core::pipeline::{
     PipelinePerformanceOptions,
     archive::ArchivePipeline,
     directory::{BlockCountPlanner, DirectoryBatchSubmitter},
 };
 use oxide_core::types::BatchData;
+use oxide_core::{ChunkingPolicy, MmapInput};
 use tempfile::tempdir;
 
 mod archive_tests {
@@ -123,7 +123,7 @@ mod directory_tests {
 
     #[test]
     fn block_count_planner_flushes_on_raw_storage_policy_change() {
-        let mut planner = BlockCountPlanner::new(8);
+        let mut planner = BlockCountPlanner::new(ChunkingPolicy::fixed_for_target(8));
         planner.push_len(6, false);
         planner.push_len(6, true);
 

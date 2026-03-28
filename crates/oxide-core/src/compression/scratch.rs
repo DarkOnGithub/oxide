@@ -1,7 +1,7 @@
 use std::fmt;
 
 use super::lz4::Lz4Scratch;
-use crate::{OxideError, Result};
+use crate::{OxideError, Result, ZstdCompressionParameters};
 
 const MIN_RETAINED_OUTPUT_CAPACITY: usize = 256 * 1024;
 const LZMA_MAX_RETAINED_OUTPUT_CAPACITY: usize = 8 * 1024 * 1024;
@@ -55,6 +55,7 @@ pub(crate) struct ZstdScratch {
     compressor: Option<zstd::bulk::Compressor<'static>>,
     compressor_level: Option<i32>,
     compressor_dictionary_id: u8,
+    compressor_parameters: ZstdCompressionParameters,
     decompressor: Option<zstd::bulk::Decompressor<'static>>,
     decompressor_dictionary_id: u8,
     output: Vec<u8>,
@@ -66,6 +67,7 @@ impl Default for ZstdScratch {
             compressor: None,
             compressor_level: None,
             compressor_dictionary_id: 0,
+            compressor_parameters: ZstdCompressionParameters::default(),
             decompressor: None,
             decompressor_dictionary_id: 0,
             output: Vec::new(),
@@ -79,6 +81,7 @@ impl fmt::Debug for ZstdScratch {
             .field("compressor_initialized", &self.compressor.is_some())
             .field("compressor_level", &self.compressor_level)
             .field("compressor_dictionary_id", &self.compressor_dictionary_id)
+            .field("compressor_parameters", &self.compressor_parameters)
             .field("decompressor_initialized", &self.decompressor.is_some())
             .field(
                 "decompressor_dictionary_id",
@@ -93,33 +96,29 @@ impl ZstdScratch {
     pub(crate) fn compressor(
         &mut self,
         level: i32,
+        parameters: ZstdCompressionParameters,
         dictionary_id: u8,
         dictionary: Option<&[u8]>,
     ) -> Result<&mut zstd::bulk::Compressor<'static>> {
         if self.compressor.is_none() {
             let compressor =
-                zstd::bulk::Compressor::with_dictionary(level, dictionary.unwrap_or(&[])).map_err(
-                    |err| {
-                        OxideError::CompressionError(format!("zstd compressor init failed: {err}"))
-                    },
-                )?;
+                super::zstd::build_compressor(level, parameters, dictionary.unwrap_or(&[]))?;
             self.compressor = Some(compressor);
             self.compressor_level = Some(level);
             self.compressor_dictionary_id = dictionary_id;
+            self.compressor_parameters = parameters;
         } else if self.compressor_level != Some(level)
             || self.compressor_dictionary_id != dictionary_id
+            || self.compressor_parameters != parameters
         {
-            self.compressor
-                .as_mut()
-                .expect("checked is_some above")
-                .set_dictionary(level, dictionary.unwrap_or(&[]))
-                .map_err(|err| {
-                    OxideError::CompressionError(format!(
-                        "zstd compressor reconfigure failed: {err}"
-                    ))
-                })?;
+            self.compressor = Some(super::zstd::build_compressor(
+                level,
+                parameters,
+                dictionary.unwrap_or(&[]),
+            )?);
             self.compressor_level = Some(level);
             self.compressor_dictionary_id = dictionary_id;
+            self.compressor_parameters = parameters;
         }
 
         Ok(self

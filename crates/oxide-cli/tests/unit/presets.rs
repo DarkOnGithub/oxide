@@ -1,6 +1,6 @@
 use std::fs;
 
-use oxide_core::CompressionAlgo;
+use oxide_core::{ArchiveDictionaryMode, ChunkingMode, CompressionAlgo, ZstdStrategy};
 
 use super::{ArchiveOverrides, DEFAULT_PRESETS_PATH, PresetFile};
 
@@ -86,21 +86,25 @@ fn default_preset_file_balanced_ultra_and_extreme_use_expected_codecs() {
         .expect("extreme should resolve");
 
     assert_eq!(balanced.compression, CompressionAlgo::Zstd);
-    assert_eq!(balanced.compression_level, Some(6));
+    assert_eq!(balanced.compression_level, Some(7));
     assert!(!balanced.compression_extreme);
-    assert_eq!(balanced.block_size, 2 * 1024 * 1024);
+    assert_eq!(balanced.zstd_parameters.window_log, Some(23));
+    assert_eq!(balanced.zstd_parameters.strategy, Some(ZstdStrategy::Lazy2));
+    assert_eq!(balanced.block_size, 4 * 1024 * 1024);
+    assert_eq!(balanced.dictionary_mode, ArchiveDictionaryMode::Auto);
+    assert_eq!(balanced.chunking_policy.mode, ChunkingMode::Fixed);
     assert_eq!(ultra.compression, CompressionAlgo::Lzma);
     assert_eq!(ultra.compression_level, Some(7));
-    assert!(!ultra.compression_extreme);
-    assert_eq!(ultra.lzma_dictionary_size, Some(2 * 1024 * 1024));
-    assert_eq!(ultra.block_size, 2 * 1024 * 1024);
-    assert_eq!(ultra.pool_capacity, 2 * 1024 * 1024);
+    assert!(ultra.compression_extreme);
+    assert_eq!(ultra.lzma_dictionary_size, Some(16 * 1024 * 1024));
+    assert_eq!(ultra.block_size, 4 * 1024 * 1024);
+    assert_eq!(ultra.pool_capacity, 4 * 1024 * 1024);
     assert_eq!(extreme.compression, CompressionAlgo::Lzma);
     assert_eq!(extreme.compression_level, Some(9));
-    assert!(!extreme.compression_extreme);
-    assert_eq!(extreme.lzma_dictionary_size, Some(4 * 1024 * 1024));
-    assert_eq!(extreme.block_size, 4 * 1024 * 1024);
-    assert_eq!(extreme.pool_capacity, 4 * 1024 * 1024);
+    assert!(extreme.compression_extreme);
+    assert_eq!(extreme.lzma_dictionary_size, Some(32 * 1024 * 1024));
+    assert_eq!(extreme.block_size, 8 * 1024 * 1024);
+    assert_eq!(extreme.pool_capacity, 8 * 1024 * 1024);
 }
 
 #[test]
@@ -379,4 +383,106 @@ fn rejects_invalid_zstd_level() {
         error.to_string(),
         "invalid compression.level '99' for zstd: expected an integer between 1 and 22"
     );
+}
+
+#[test]
+fn resolves_advanced_zstd_parameters_from_config() {
+    let file = parse_fixture(
+        r#"{
+          "archive": {
+            "default_preset": "ratio",
+            "defaults": {
+              "compression": {
+                "compressor": "zstd",
+                "level": 6
+              },
+              "block_size": "2M",
+              "workers": 0,
+              "pool_capacity": "1M",
+              "pool_buffers": 512,
+              "stats_interval_ms": 250,
+              "inflight_bytes": "2G",
+              "inflight_blocks_per_worker": 256,
+              "stream_read_buffer": "64M",
+              "producer_threads": 1,
+              "directory_mmap_threshold": "8M",
+              "writer_queue_blocks": 1024,
+              "result_wait_ms": 1
+            },
+            "presets": {
+              "ratio": {
+                "compression": {
+                  "window_log": 22,
+                  "strategy": "btopt",
+                  "long_distance_matching": true
+                }
+              }
+            }
+          }
+        }"#,
+    );
+
+    let preset = file.archive.presets.get("ratio").unwrap();
+    let mut merged = file.archive.defaults.clone();
+    merged.merge_from(preset);
+    let resolved = merged
+        .resolve("ratio", "fixture", ArchiveOverrides::default())
+        .expect("settings should resolve");
+
+    assert_eq!(resolved.zstd_parameters.window_log, Some(22));
+    assert_eq!(resolved.zstd_parameters.strategy, Some(ZstdStrategy::Btopt));
+    assert_eq!(
+        resolved.zstd_parameters.enable_long_distance_matching,
+        Some(true)
+    );
+}
+
+#[test]
+fn resolves_cdc_chunking_from_config() {
+    let file = parse_fixture(
+        r#"{
+          "archive": {
+            "default_preset": "cdc",
+            "defaults": {
+              "compression": {
+                "compressor": "zstd",
+                "level": 6
+              },
+              "block_size": "1M",
+              "workers": 0,
+              "pool_capacity": "1M",
+              "pool_buffers": 512,
+              "stats_interval_ms": 250,
+              "inflight_bytes": "2G",
+              "inflight_blocks_per_worker": 256,
+              "stream_read_buffer": "64M",
+              "producer_threads": 1,
+              "directory_mmap_threshold": "8M",
+              "writer_queue_blocks": 1024,
+              "result_wait_ms": 1
+            },
+            "presets": {
+              "cdc": {
+                "chunking": {
+                  "mode": "cdc",
+                  "min_size": "256K",
+                  "max_size": "4M",
+                  "cdc_mask_bits": 20
+                }
+              }
+            }
+          }
+        }"#,
+    );
+
+    let preset = file.archive.presets.get("cdc").unwrap();
+    let mut merged = file.archive.defaults.clone();
+    merged.merge_from(preset);
+    let resolved = merged
+        .resolve("cdc", "fixture", ArchiveOverrides::default())
+        .expect("settings should resolve");
+
+    assert_eq!(resolved.chunking_policy.mode, ChunkingMode::ContentDefined);
+    assert_eq!(resolved.chunking_policy.min_size, 256 * 1024);
+    assert_eq!(resolved.chunking_policy.max_size, 4 * 1024 * 1024);
 }
