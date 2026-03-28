@@ -84,6 +84,7 @@ class Settings:
     rebuild_oxide: bool
     modes: tuple[str, ...]
     squashfs_block_size: str | None
+    raw_oxide_presets: bool
     telemetry_dir: Path
     shuffle_seed: int
 
@@ -183,7 +184,9 @@ def merge_archive_preset(
     return merged
 
 
-def load_mode_configs_from_oxide_presets() -> dict[str, ModeConfig]:
+def load_mode_configs_from_oxide_presets(
+    raw_oxide_presets: bool = False,
+) -> dict[str, ModeConfig]:
     try:
         payload = json.loads(OXIDE_PRESETS_PATH.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -240,7 +243,11 @@ def load_mode_configs_from_oxide_presets() -> dict[str, ModeConfig]:
         mode_configs[mode] = ModeConfig(
             compression=compressor,
             compression_level=None if level is None else str(level),
-            block_size=BENCHMARK_BLOCK_SIZE_OVERRIDES.get(mode, str(block_size)),
+            block_size=(
+                str(block_size)
+                if raw_oxide_presets
+                else BENCHMARK_BLOCK_SIZE_OVERRIDES.get(mode, str(block_size))
+            ),
             lzma_dictionary_size=(
                 None if dictionary_size is None else str(dictionary_size)
             ),
@@ -248,8 +255,6 @@ def load_mode_configs_from_oxide_presets() -> dict[str, ModeConfig]:
 
     return mode_configs
 
-
-MODE_CONFIGS: dict[str, ModeConfig] = load_mode_configs_from_oxide_presets()
 
 MODE_BASELINES: dict[str, str] = {
     "fast": "mksquashfs",
@@ -381,6 +386,11 @@ def parse_args() -> Settings:
         help="Optional override for mksquashfs block size; default is mode-matched.",
     )
     parser.add_argument(
+        "--raw-oxide-presets",
+        action="store_true",
+        help="Use Oxide preset values as-is instead of benchmark-tuned overrides.",
+    )
+    parser.add_argument(
         "--shuffle-seed",
         type=int,
         default=None,
@@ -420,6 +430,7 @@ def parse_args() -> Settings:
         rebuild_oxide=args.rebuild_oxide,
         modes=tuple(args.modes),
         squashfs_block_size=squashfs_block_size,
+        raw_oxide_presets=args.raw_oxide_presets,
         telemetry_dir=Path(args.telemetry_dir),
         shuffle_seed=shuffle_seed,
     )
@@ -1336,6 +1347,7 @@ def print_run_header(
     console: Console, settings: Settings, telemetry_run_dir: Path, source_bytes: int
 ) -> None:
     squashfs_policy = settings.squashfs_block_size or "mode-matched"
+    oxide_preset_mode = "raw" if settings.raw_oxide_presets else "benchmark-tuned"
     worker_modes = ", ".join(settings.worker_modes)
     panel = Panel.fit(
         Text.from_markup(
@@ -1345,6 +1357,7 @@ def print_run_header(
             f"modes: [cyan]{', '.join(settings.modes)}[/cyan]\n"
             f"worker modes: [cyan]{worker_modes}[/cyan]\n"
             f"passes: [cyan]{settings.passes}[/cyan]  explicit threads: [cyan]{settings.threads}[/cyan]  auto threads: [cyan]{settings.logical_threads}[/cyan]\n"
+            f"oxide preset mode: [cyan]{oxide_preset_mode}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
             f"oxide presets: [cyan]{OXIDE_PRESETS_PATH}[/cyan]\n"
             f"7z solid mode: [cyan]{'on' if SEVENZIP_EQUIVALENT_SOLID else 'off'}[/cyan]\n"
@@ -1756,9 +1769,10 @@ def baseline_steps(
 
 def build_run_units(settings: Settings) -> list[RunUnit]:
     units: list[RunUnit] = []
+    mode_configs = load_mode_configs_from_oxide_presets(settings.raw_oxide_presets)
     for workers in settings.worker_modes:
         for mode in settings.modes:
-            mode_config = MODE_CONFIGS.get(mode)
+            mode_config = mode_configs.get(mode)
             if mode_config is None:
                 raise SystemExit(f"Unknown mode: {mode}")
 
@@ -2047,6 +2061,7 @@ def run_bench_with_telemetry(
     telemetry_run_dir: Path,
 ) -> None:
     run_units = build_run_units(settings)
+    mode_configs = load_mode_configs_from_oxide_presets(settings.raw_oxide_presets)
 
     telemetry.write_run(
         {
@@ -2067,12 +2082,13 @@ def run_bench_with_telemetry(
             "workers": settings.threads,
             "shuffle_seed": settings.shuffle_seed,
             "squashfs_block_size": settings.squashfs_block_size,
+            "raw_oxide_presets": settings.raw_oxide_presets,
             "mode_configs": {
                 mode: {
-                    "compression": MODE_CONFIGS[mode].compression,
-                    "compression_level": MODE_CONFIGS[mode].compression_level,
-                    "block_size": MODE_CONFIGS[mode].block_size,
-                    "lzma_dictionary_size": MODE_CONFIGS[mode].lzma_dictionary_size,
+                    "compression": mode_configs[mode].compression,
+                    "compression_level": mode_configs[mode].compression_level,
+                    "block_size": mode_configs[mode].block_size,
+                    "lzma_dictionary_size": mode_configs[mode].lzma_dictionary_size,
                 }
                 for mode in settings.modes
             },
@@ -2205,6 +2221,7 @@ def main() -> int:
                         "shuffle_seed": settings.shuffle_seed,
                         "workers": settings.threads,
                         "worker_modes": list(settings.worker_modes),
+                        "raw_oxide_presets": settings.raw_oxide_presets,
                         "host_telemetry": True,
                     }
                 )
