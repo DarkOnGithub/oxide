@@ -34,11 +34,11 @@ liblzma = { version = "0.4", features = ["static"] }
 regex = "1.11"
 libc = "0.2"
 crc32c = "0.6"
+lz4_flex = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5"
-lz4_flex = { version = "0.11", default-features = false }
 
 [build-dependencies]
 cc = "1.0"
