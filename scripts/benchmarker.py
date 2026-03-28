@@ -139,6 +139,7 @@ class Step:
     phase: str
     workers: str
     output_path: Path
+    mode_config: ModeConfig
     command_builder: Callable[[Settings, str, ModeConfig, str], Sequence[str]]
     cleanup_targets: tuple[Path, ...] = ()
 
@@ -147,7 +148,6 @@ class Step:
 class RunUnit:
     mode: str
     workers: str
-    mode_config: ModeConfig
     oxide_archive: Step
     oxide_extract: Step | None
     baseline_archive: Step
@@ -1740,12 +1740,13 @@ def baseline_steps(
 
     if tool == "mksquashfs":
         return (
-            Step(tool, "archive", workers, output_path, mksquashfs_command),
+            Step(tool, "archive", workers, output_path, config, mksquashfs_command),
             Step(
                 "unsquashfs",
                 "extract",
                 workers,
                 settings.squashfs_extract_dir,
+                config,
                 unsquashfs_extract_command,
                 cleanup_targets=(output_path, settings.squashfs_extract_dir),
             ),
@@ -1753,12 +1754,15 @@ def baseline_steps(
 
     if tool == "7zz":
         return (
-            Step(tool, "archive", workers, output_path, sevenzip_archive_command),
+            Step(
+                tool, "archive", workers, output_path, config, sevenzip_archive_command
+            ),
             Step(
                 tool,
                 "extract",
                 workers,
                 settings.squashfs_extract_dir,
+                config,
                 sevenzip_extract_command,
                 cleanup_targets=(output_path, settings.squashfs_extract_dir),
             ),
@@ -1769,21 +1773,28 @@ def baseline_steps(
 
 def build_run_units(settings: Settings) -> list[RunUnit]:
     units: list[RunUnit] = []
-    mode_configs = load_mode_configs_from_oxide_presets(settings.raw_oxide_presets)
+    tuned_mode_configs = load_mode_configs_from_oxide_presets(False)
+    oxide_mode_configs = (
+        load_mode_configs_from_oxide_presets(True)
+        if settings.raw_oxide_presets
+        else tuned_mode_configs
+    )
     for workers in settings.worker_modes:
         for mode in settings.modes:
-            mode_config = mode_configs.get(mode)
-            if mode_config is None:
+            oxide_mode_config = oxide_mode_configs.get(mode)
+            baseline_mode_config = tuned_mode_configs.get(mode)
+            if oxide_mode_config is None or baseline_mode_config is None:
                 raise SystemExit(f"Unknown mode: {mode}")
 
             baseline_archive_step, baseline_extract_step = baseline_steps(
-                settings, mode, mode_config, workers
+                settings, mode, baseline_mode_config, workers
             )
             oxide_archive_step = Step(
                 "oxide",
                 "archive",
                 workers,
                 settings.oxide_output,
+                oxide_mode_config,
                 oxide_archive_command,
             )
             oxide_extract_step = Step(
@@ -1791,6 +1802,7 @@ def build_run_units(settings: Settings) -> list[RunUnit]:
                 "extract",
                 workers,
                 settings.oxide_extract_dir,
+                oxide_mode_config,
                 oxide_extract_command,
                 cleanup_targets=(settings.oxide_output, settings.oxide_extract_dir),
             )
@@ -1800,6 +1812,7 @@ def build_run_units(settings: Settings) -> list[RunUnit]:
                     oxide_archive_step.phase,
                     oxide_archive_step.workers,
                     oxide_archive_step.output_path,
+                    oxide_archive_step.mode_config,
                     oxide_archive_step.command_builder,
                     cleanup_targets=(oxide_archive_step.output_path,),
                 )
@@ -1808,6 +1821,7 @@ def build_run_units(settings: Settings) -> list[RunUnit]:
                     baseline_archive_step.phase,
                     baseline_archive_step.workers,
                     baseline_archive_step.output_path,
+                    baseline_archive_step.mode_config,
                     baseline_archive_step.command_builder,
                     cleanup_targets=(baseline_archive_step.output_path,),
                 )
@@ -1818,7 +1832,6 @@ def build_run_units(settings: Settings) -> list[RunUnit]:
                 RunUnit(
                     mode=mode,
                     workers=workers,
-                    mode_config=mode_config,
                     oxide_archive=oxide_archive_step,
                     oxide_extract=oxide_extract_step,
                     baseline_archive=baseline_archive_step,
@@ -1932,7 +1945,6 @@ def record_step(
     settings: Settings,
     step: Step,
     mode: str,
-    mode_config: ModeConfig,
     pass_num: int,
     source_bytes: int,
     results: list[ResultRow],
@@ -1940,7 +1952,7 @@ def record_step(
 ) -> ResultRow:
     cleanup_path(step.output_path)
 
-    command = step.command_builder(settings, mode, mode_config, step.workers)
+    command = step.command_builder(settings, mode, step.mode_config, step.workers)
     start_ns = time.perf_counter_ns()
     completed, host = run_command_with_host_telemetry(command, step.output_path)
     stdout = completed.stdout or ""
@@ -2129,7 +2141,6 @@ def run_bench_with_telemetry(
                     settings,
                     archive_step,
                     unit.mode,
-                    unit.mode_config,
                     pass_num,
                     source_bytes,
                     results,
@@ -2146,7 +2157,6 @@ def run_bench_with_telemetry(
                         settings,
                         extract_step,
                         unit.mode,
-                        unit.mode_config,
                         pass_num,
                         source_bytes,
                         results,
