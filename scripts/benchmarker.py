@@ -1075,6 +1075,76 @@ def result_to_stats(rows: Sequence[ResultRow], source_bytes: int) -> list[ModeSt
     return stats_rows
 
 
+def efficiency_suite(tool: str) -> str:
+    if tool in {"mksquashfs", "unsquashfs"}:
+        return "squashfs"
+    return tool
+
+
+def normalize_score(value: float, maximum: float) -> float:
+    if maximum <= 0:
+        return 1.0
+    return value / maximum
+
+
+def efficiency_scores(stats_rows: Sequence[ModeStats]) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str, str], dict[str, list[ModeStats]]] = {}
+
+    for row in stats_rows:
+        key = (efficiency_suite(row.tool), row.mode, row.workers)
+        bucket = grouped.setdefault(key, {"archive": [], "extract": []})
+        if row.phase in bucket:
+            bucket[row.phase].append(row)
+
+    candidates: list[dict[str, object]] = []
+    for (suite, mode, workers), phases in sorted(grouped.items()):
+        archive_rows = phases["archive"]
+        extract_rows = phases["extract"]
+        if not archive_rows or not extract_rows:
+            continue
+
+        compression_ratios = [1.0 / row.ratio for row in archive_rows if row.ratio > 0]
+        compression_speeds = [row.avg_throughput_mib_s for row in archive_rows]
+        decompression_speeds = [row.avg_throughput_mib_s for row in extract_rows]
+
+        if not compression_ratios or not compression_speeds or not decompression_speeds:
+            continue
+
+        candidates.append(
+            {
+                "suite": suite,
+                "archive_tool": ", ".join(sorted({row.tool for row in archive_rows})),
+                "extract_tool": ", ".join(sorted({row.tool for row in extract_rows})),
+                "mode": mode,
+                "workers": workers,
+                "compression_ratio": statistics.mean(compression_ratios),
+                "compression_speed_mib_s": statistics.mean(compression_speeds),
+                "decompression_speed_mib_s": statistics.mean(decompression_speeds),
+            }
+        )
+
+    if not candidates:
+        return []
+
+    max_cr = max(float(item["compression_ratio"]) for item in candidates)
+    max_cs = max(float(item["compression_speed_mib_s"]) for item in candidates)
+    max_ds = max(float(item["decompression_speed_mib_s"]) for item in candidates)
+
+    for item in candidates:
+        norm_cr = normalize_score(float(item["compression_ratio"]), max_cr)
+        norm_cs = normalize_score(float(item["compression_speed_mib_s"]), max_cs)
+        norm_ds = normalize_score(float(item["decompression_speed_mib_s"]), max_ds)
+        item["normalized_compression_ratio"] = round(norm_cr, 6)
+        item["normalized_compression_speed"] = round(norm_cs, 6)
+        item["normalized_decompression_speed"] = round(norm_ds, 6)
+        item["efficiency_score"] = round(
+            0.4 * norm_cr + 0.3 * norm_cs + 0.3 * norm_ds, 6
+        )
+
+    candidates.sort(key=lambda item: float(item["efficiency_score"]), reverse=True)
+    return candidates
+
+
 def stats_lookup(
     stats_rows: Sequence[ModeStats],
 ) -> dict[tuple[str, str, str, str], ModeStats]:
@@ -1331,6 +1401,13 @@ def print_analysis(
 
 
 def print_averages(console: Console, stats_rows: Sequence[ModeStats]) -> None:
+    score_lookup = {
+        (str(row["suite"]), str(row["mode"]), str(row["workers"])): float(
+            row["efficiency_score"]
+        )
+        for row in efficiency_scores(stats_rows)
+    }
+
     table = Table(title="Averages", box=box.SIMPLE_HEAVY)
     table.caption = "Averages are grouped by mode, workers, then phase, then tool."
     table.add_column("mode", style="bold")
@@ -1341,10 +1418,12 @@ def print_averages(console: Console, stats_rows: Sequence[ModeStats]) -> None:
     table.add_column("avg MiB/s", justify="right")
     table.add_column("avg output", justify="right")
     table.add_column("ratio", justify="right")
+    table.add_column("score", justify="right")
 
     for row in sorted(
         stats_rows, key=lambda item: (item.mode, item.workers, item.phase, item.tool)
     ):
+        score = score_lookup.get((efficiency_suite(row.tool), row.mode, row.workers))
         table.add_row(
             row.mode,
             row.workers,
@@ -1354,6 +1433,45 @@ def print_averages(console: Console, stats_rows: Sequence[ModeStats]) -> None:
             f"{row.avg_throughput_mib_s:.2f}",
             format_bytes(row.avg_output_bytes),
             f"{row.ratio:.3f}",
+            "" if score is None else f"{score:.3f}",
+        )
+
+    console.print(table)
+
+
+def print_efficiency_scores(console: Console, stats_rows: Sequence[ModeStats]) -> None:
+    scores = efficiency_scores(stats_rows)
+    if not scores:
+        return
+
+    table = Table(title="Efficiency scores", box=box.SIMPLE_HEAVY)
+    table.add_column("suite", style="bold")
+    table.add_column("archive tool")
+    table.add_column("extract tool")
+    table.add_column("mode", style="bold")
+    table.add_column("workers", justify="right")
+    table.add_column("score", justify="right")
+    table.add_column("norm cr", justify="right")
+    table.add_column("norm cs", justify="right")
+    table.add_column("norm ds", justify="right")
+    table.add_column("compression ratio", justify="right")
+    table.add_column("archive MiB/s", justify="right")
+    table.add_column("extract MiB/s", justify="right")
+
+    for row in scores:
+        table.add_row(
+            row["suite"],
+            row["archive_tool"],
+            row["extract_tool"],
+            row["mode"],
+            row["workers"],
+            f"{float(row['efficiency_score']):.3f}",
+            f"{float(row['normalized_compression_ratio']):.3f}",
+            f"{float(row['normalized_compression_speed']):.3f}",
+            f"{float(row['normalized_decompression_speed']):.3f}",
+            f"{float(row['compression_ratio']):.3f}",
+            f"{float(row['compression_speed_mib_s']):.3f}",
+            f"{float(row['decompression_speed_mib_s']):.3f}",
         )
 
     console.print(table)
@@ -1818,6 +1936,7 @@ def print_results_table(results: Sequence[ResultRow], source_bytes: int) -> None
     comparisons = mode_comparisons(stats_rows, modes, worker_modes)
     print_steps_table(console, results, source_bytes)
     print_analysis(console, stats_rows, comparisons)
+    print_efficiency_scores(console, stats_rows)
     print_averages(console, stats_rows)
 
 
