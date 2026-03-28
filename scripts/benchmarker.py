@@ -49,6 +49,14 @@ except ImportError as exc:
     ) from exc
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+OXIDE_PRESETS_PATH = BASE_DIR / "crates" / "oxide-cli" / "presets.json"
+SEVENZIP_EQUIVALENT_SOLID = False
+BENCHMARK_BLOCK_SIZE_OVERRIDES: dict[str, str] = {
+    "fast": "1M",
+    "balanced": "1M",
+    "ultra": "4M",
+    "extreme": "8M",
+}
 
 
 @dataclass(frozen=True)
@@ -164,26 +172,84 @@ class HostTelemetry:
     disk_usage_after: dict[str, int] | None
 
 
-MODE_CONFIGS: dict[str, ModeConfig] = {
-    "fast": ModeConfig(compression="lz4", compression_level=None, block_size="1M"),
-    "balanced": ModeConfig(
-        compression="zstd",
-        compression_level="6",
-        block_size="1M",
-    ),
-    "ultra": ModeConfig(
-        compression="lzma",
-        compression_level="7",
-        block_size="2M",
-        lzma_dictionary_size="2M",
-    ),
-    "extreme": ModeConfig(
-        compression="lzma",
-        compression_level="9",
-        block_size="4M",
-        lzma_dictionary_size="4M",
-    ),
-}
+def merge_archive_preset(
+    defaults: dict[str, object], preset: dict[str, object]
+) -> dict[str, object]:
+    merged = dict(defaults)
+    merged_compression = dict(defaults.get("compression", {}))
+    merged_compression.update(preset.get("compression", {}))
+    merged.update(preset)
+    merged["compression"] = merged_compression
+    return merged
+
+
+def load_mode_configs_from_oxide_presets() -> dict[str, ModeConfig]:
+    try:
+        payload = json.loads(OXIDE_PRESETS_PATH.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(
+            f"Failed to read Oxide presets: {OXIDE_PRESETS_PATH}: {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"Failed to parse Oxide presets: {OXIDE_PRESETS_PATH}: {exc}"
+        ) from exc
+
+    archive = payload.get("archive")
+    if not isinstance(archive, dict):
+        raise SystemExit(
+            f"Invalid Oxide preset payload: missing archive registry in {OXIDE_PRESETS_PATH}"
+        )
+
+    defaults = archive.get("defaults")
+    presets = archive.get("presets")
+    if not isinstance(defaults, dict) or not isinstance(presets, dict):
+        raise SystemExit(
+            f"Invalid Oxide preset payload: missing archive defaults/presets in {OXIDE_PRESETS_PATH}"
+        )
+
+    mode_configs: dict[str, ModeConfig] = {}
+    for mode in ("fast", "balanced", "ultra", "extreme"):
+        preset = presets.get(mode)
+        if not isinstance(preset, dict):
+            raise SystemExit(
+                f"Invalid Oxide preset payload: missing archive preset '{mode}' in {OXIDE_PRESETS_PATH}"
+            )
+
+        merged = merge_archive_preset(defaults, preset)
+        compression = merged.get("compression")
+        if not isinstance(compression, dict):
+            raise SystemExit(
+                f"Invalid Oxide preset payload: missing compression settings for '{mode}' in {OXIDE_PRESETS_PATH}"
+            )
+
+        compressor = compression.get("compressor")
+        if not isinstance(compressor, str):
+            raise SystemExit(
+                f"Invalid Oxide preset payload: missing compressor for '{mode}' in {OXIDE_PRESETS_PATH}"
+            )
+
+        level = compression.get("level")
+        dictionary_size = compression.get("dictionary_size")
+        block_size = merged.get("block_size")
+        if not isinstance(block_size, (str, int)):
+            raise SystemExit(
+                f"Invalid Oxide preset payload: missing block_size for '{mode}' in {OXIDE_PRESETS_PATH}"
+            )
+
+        mode_configs[mode] = ModeConfig(
+            compression=compressor,
+            compression_level=None if level is None else str(level),
+            block_size=BENCHMARK_BLOCK_SIZE_OVERRIDES.get(mode, str(block_size)),
+            lzma_dictionary_size=(
+                None if dictionary_size is None else str(dictionary_size)
+            ),
+        )
+
+    return mode_configs
+
+
+MODE_CONFIGS: dict[str, ModeConfig] = load_mode_configs_from_oxide_presets()
 
 MODE_BASELINES: dict[str, str] = {
     "fast": "mksquashfs",
@@ -199,6 +265,34 @@ def resolve_tool(*candidates: str) -> str:
         if resolved:
             return resolved
     raise SystemExit(f"Missing required tool: tried {', '.join(candidates)}")
+
+
+def parse_size_bytes(value: str) -> int:
+    match = re.fullmatch(r"\s*(\d+)\s*([KMG]?)\s*", value, re.IGNORECASE)
+    if match is None:
+        raise SystemExit(f"Invalid size value: {value!r}")
+
+    number = int(match.group(1))
+    suffix = match.group(2).upper()
+    multiplier = {
+        "": 1,
+        "K": 1024,
+        "M": 1024 * 1024,
+        "G": 1024 * 1024 * 1024,
+    }[suffix]
+    return number * multiplier
+
+
+def validate_mksquashfs_block_size(block_size: str) -> None:
+    block_size_bytes = parse_size_bytes(block_size)
+    if not 4096 <= block_size_bytes <= 1024 * 1024:
+        raise SystemExit(
+            f"mksquashfs requires block sizes between 4K and 1M; got {block_size}"
+        )
+    if block_size_bytes & (block_size_bytes - 1) != 0:
+        raise SystemExit(
+            f"mksquashfs requires a power-of-two block size; got {block_size}"
+        )
 
 
 def env_value(name: str, default: str) -> str:
@@ -1252,6 +1346,8 @@ def print_run_header(
             f"worker modes: [cyan]{worker_modes}[/cyan]\n"
             f"passes: [cyan]{settings.passes}[/cyan]  explicit threads: [cyan]{settings.threads}[/cyan]  auto threads: [cyan]{settings.logical_threads}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
+            f"oxide presets: [cyan]{OXIDE_PRESETS_PATH}[/cyan]\n"
+            f"7z solid mode: [cyan]{'on' if SEVENZIP_EQUIVALENT_SOLID else 'off'}[/cyan]\n"
             f"drop caches: [cyan]{'yes' if settings.drop_caches else 'no'}[/cyan]\n"
             f"shuffle seed: [cyan]{settings.shuffle_seed}[/cyan]\n"
             f"telemetry: [cyan]{telemetry_run_dir}[/cyan]"
@@ -1555,6 +1651,7 @@ def mksquashfs_command(
     settings: Settings, mode: str, config: ModeConfig, workers: str
 ) -> list[str]:
     block_size = settings.squashfs_block_size or config.block_size
+    validate_mksquashfs_block_size(block_size)
     command = [
         resolve_tool("mksquashfs"),
         str(settings.source),
@@ -1576,12 +1673,13 @@ def sevenzip_archive_command(
 ) -> list[str]:
     mmt = resolved_thread_count(settings, workers)
     dictionary_size = config.lzma_dictionary_size or config.block_size
+    solid_mode = "on" if SEVENZIP_EQUIVALENT_SOLID else "off"
     return [
         resolve_tool("7zz", "7z"),
         "a",
         "-t7z",
         f"-mx={config.compression_level or '9'}",
-        "-ms=on",
+        f"-ms={solid_mode}",
         "-m0=LZMA2",
         f"-md={dictionary_size}",
         f"-mmt={mmt}",
