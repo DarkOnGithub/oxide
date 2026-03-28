@@ -62,6 +62,49 @@ fn restore_creates_implicit_parent_directories() {
 }
 
 #[test]
+fn restore_does_not_create_files_during_create() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    let manifest = ArchiveManifest::new(vec![
+        ArchiveListingEntry::file(
+            "nested/first.txt".to_string(),
+            4,
+            0o644,
+            ArchiveTimestamp::default(),
+            0,
+            0,
+            0,
+        ),
+        ArchiveListingEntry::file(
+            "nested/second.txt".to_string(),
+            4,
+            0o644,
+            ArchiveTimestamp::default(),
+            0,
+            0,
+            1,
+        ),
+    ]);
+
+    let mut writer = DirectoryRestoreWriter::create(root, manifest).expect("create writer");
+
+    assert!(!root.join("nested/first.txt").exists());
+    assert!(!root.join("nested/second.txt").exists());
+
+    writer.write_chunk(b"testdata").expect("write chunk");
+    writer.finish().expect("finish restore");
+
+    assert_eq!(
+        fs::read(root.join("nested/first.txt")).expect("read first"),
+        b"test"
+    );
+    assert_eq!(
+        fs::read(root.join("nested/second.txt")).expect("read second"),
+        b"data"
+    );
+}
+
+#[test]
 fn restore_multiple_files_completes_metadata_finalization() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
