@@ -201,6 +201,7 @@ impl DirectoryBatchSubmitter {
                     self.flush_pending(submit)?;
                 }
                 self.pending_force_raw_storage = Some(force_raw_storage);
+                self.set_pending_source_path(source_path);
             }
             Some(_) => {}
             None => {
@@ -209,13 +210,7 @@ impl DirectoryBatchSubmitter {
             }
         }
 
-        if self.should_flush_for_source_path(source_path) {
-            self.flush_pending(submit)?;
-            self.pending_force_raw_storage = Some(force_raw_storage);
-            self.set_pending_source_path(source_path);
-        } else if self.pending_source_path.is_none() {
-            self.set_pending_source_path(source_path);
-        }
+        self.update_pending_source_path(source_path);
 
         Ok(())
     }
@@ -239,17 +234,26 @@ impl DirectoryBatchSubmitter {
         Ok(())
     }
 
-    fn should_flush_for_source_path(&self, source_path: &Path) -> bool {
-        if self.pending.is_empty() || self.compression_plan.algo != CompressionAlgo::Zstd {
-            return false;
-        }
-
-        normalized_extension_from_path(source_path) != self.pending_extension
-    }
-
     fn set_pending_source_path(&mut self, source_path: &Path) {
         self.pending_source_path = Some(source_path.to_path_buf());
         self.pending_extension = normalized_extension_from_path(source_path);
+    }
+
+    fn update_pending_source_path(&mut self, source_path: &Path) {
+        if self.pending_source_path.is_none() {
+            self.set_pending_source_path(source_path);
+            return;
+        }
+
+        if self.compression_plan.algo != CompressionAlgo::Zstd || self.pending.is_empty() {
+            return;
+        }
+
+        let source_extension = normalized_extension_from_path(source_path);
+        if source_extension != self.pending_extension {
+            self.pending_source_path = Some(self.source_path.clone());
+            self.pending_extension = None;
+        }
     }
 
     fn submit_batch<F>(
@@ -526,11 +530,9 @@ fn metadata_gid(_: &fs::Metadata) -> u32 {
 #[derive(Debug, Clone)]
 pub struct BlockCountPlanner {
     block_size: usize,
-    compression_plan: ChunkEncodingPlan,
     blocks: usize,
     pending_len: usize,
     pending_force_raw_storage: Option<bool>,
-    pending_extension: Option<String>,
 }
 
 impl BlockCountPlanner {
@@ -538,40 +540,29 @@ impl BlockCountPlanner {
         Self::new_with_plan(block_size, ChunkEncodingPlan::default())
     }
 
-    pub fn new_with_plan(block_size: usize, compression_plan: ChunkEncodingPlan) -> Self {
+    pub fn new_with_plan(block_size: usize, _compression_plan: ChunkEncodingPlan) -> Self {
         Self {
             block_size: block_size.max(1),
-            compression_plan,
             blocks: 0,
             pending_len: 0,
             pending_force_raw_storage: None,
-            pending_extension: None,
         }
     }
 
-    pub fn push_len<P>(&mut self, source_path: P, mut len: usize, force_raw_storage: bool)
+    pub fn push_len<P>(&mut self, _source_path: P, mut len: usize, force_raw_storage: bool)
     where
         P: AsRef<Path>,
     {
-        let source_path = source_path.as_ref();
         while len > 0 {
             match self.pending_force_raw_storage {
                 Some(current) if current != force_raw_storage => {
                     self.flush_pending();
                     self.pending_force_raw_storage = Some(force_raw_storage);
-                    self.pending_extension = normalized_extension_from_path(source_path);
                 }
                 Some(_) => {}
                 None => {
                     self.pending_force_raw_storage = Some(force_raw_storage);
-                    self.pending_extension = normalized_extension_from_path(source_path);
                 }
-            }
-
-            if self.should_flush_for_source_path(source_path) {
-                self.flush_pending();
-                self.pending_force_raw_storage = Some(force_raw_storage);
-                self.pending_extension = normalized_extension_from_path(source_path);
             }
 
             let room = self.block_size.saturating_sub(self.pending_len).max(1);
@@ -595,16 +586,7 @@ impl BlockCountPlanner {
             self.blocks += 1;
             self.pending_len = 0;
             self.pending_force_raw_storage = None;
-            self.pending_extension = None;
         }
-    }
-
-    fn should_flush_for_source_path(&self, source_path: &Path) -> bool {
-        if self.pending_len == 0 || self.compression_plan.algo != CompressionAlgo::Zstd {
-            return false;
-        }
-
-        normalized_extension_from_path(source_path) != self.pending_extension
     }
 }
 

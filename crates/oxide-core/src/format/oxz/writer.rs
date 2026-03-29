@@ -1,5 +1,8 @@
+use std::collections::{HashMap, VecDeque};
 use std::io::{Seek, Write};
 use std::time::Instant;
+
+use blake3::Hash as Blake3Hash;
 
 use crate::checksum::compute_checksum;
 use crate::telemetry::{profile, tags};
@@ -7,8 +10,8 @@ use crate::types::duration_to_us;
 use crate::{ArchiveSourceKind, CompressedBlock, OxideError, Result};
 
 use super::{
-    ArchiveManifest, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT, Footer, GLOBAL_HEADER_SIZE,
-    GlobalHeader, ReorderBuffer, encode_chunk_table,
+    encode_chunk_table, ArchiveManifest, ChunkDescriptor, Footer, GlobalHeader, ReorderBuffer,
+    DEFAULT_REORDER_PENDING_LIMIT, GLOBAL_HEADER_SIZE,
 };
 
 pub trait ArchiveBlockWriter {
@@ -25,6 +28,83 @@ pub trait ArchiveBlockWriter {
     fn write_footer(self) -> Result<Self::InnerWriter>;
 }
 
+const DEFAULT_DEDUP_WINDOW_BLOCKS: usize = 131_072;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BlockDedupeKey {
+    compression_flags: u8,
+    raw_passthrough: bool,
+    dictionary_id: u8,
+    original_len: u64,
+    encoded_len: usize,
+    payload_hash: Blake3Hash,
+}
+
+impl BlockDedupeKey {
+    fn from_block(block: &CompressedBlock) -> Self {
+        Self {
+            compression_flags: block.compression.to_flags(),
+            raw_passthrough: block.raw_passthrough,
+            dictionary_id: block.dictionary_id,
+            original_len: block.original_len,
+            encoded_len: block.data.len(),
+            payload_hash: blake3::hash(block.data.as_slice()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BlockDeduper {
+    max_entries: usize,
+    entries: HashMap<BlockDedupeKey, u32>,
+    insertion_order: VecDeque<BlockDedupeKey>,
+}
+
+impl Default for BlockDeduper {
+    fn default() -> Self {
+        Self::new(DEFAULT_DEDUP_WINDOW_BLOCKS)
+    }
+}
+
+impl BlockDeduper {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            max_entries,
+            entries: HashMap::new(),
+            insertion_order: VecDeque::new(),
+        }
+    }
+
+    fn rewrite(&mut self, block: CompressedBlock) -> Result<CompressedBlock> {
+        if block.is_reference() || self.max_entries == 0 {
+            return Ok(block);
+        }
+
+        let key = BlockDedupeKey::from_block(&block);
+        if let Some(&reference_target) = self.entries.get(&key) {
+            return Ok(CompressedBlock::reference(
+                block.id,
+                block.stream_id,
+                reference_target,
+                block.original_len,
+            ));
+        }
+
+        let block_id = u32::try_from(block.id)
+            .map_err(|_| OxideError::InvalidFormat("block id exceeds u32 range"))?;
+        self.entries.insert(key.clone(), block_id);
+        self.insertion_order.push_back(key);
+
+        while self.insertion_order.len() > self.max_entries {
+            if let Some(evicted) = self.insertion_order.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+
+        Ok(block)
+    }
+}
+
 #[derive(Debug)]
 pub struct ArchiveWriter<W: Write> {
     writer: W,
@@ -36,6 +116,7 @@ pub struct ArchiveWriter<W: Write> {
     reorder: ReorderBuffer<CompressedBlock>,
     next_payload_offset: u64,
     pending_descriptors: Vec<ChunkDescriptor>,
+    block_deduper: BlockDeduper,
 }
 
 #[derive(Debug)]
@@ -49,6 +130,7 @@ pub struct SeekableArchiveWriter<W: Write + Seek> {
     reorder: ReorderBuffer<CompressedBlock>,
     next_payload_offset: u64,
     pending_descriptors: Vec<ChunkDescriptor>,
+    block_deduper: BlockDeduper,
 }
 
 impl<W: Write> ArchiveWriter<W> {
@@ -75,6 +157,7 @@ impl<W: Write> ArchiveWriter<W> {
             reorder: ReorderBuffer::with_limit(max_pending),
             next_payload_offset: GLOBAL_HEADER_SIZE as u64,
             pending_descriptors: Vec::new(),
+            block_deduper: BlockDeduper::default(),
         }
     }
 
@@ -219,6 +302,7 @@ impl<W: Write> ArchiveWriter<W> {
             return Err(OxideError::InvalidFormat("archive block count exceeded"));
         }
 
+        let block = self.block_deduper.rewrite(block)?;
         let descriptor = ChunkDescriptor::from_block(&block, self.next_payload_offset)?;
         self.next_payload_offset = descriptor.payload_end()?;
         self.writer.write_all(block.data.as_slice())?;
@@ -278,6 +362,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             reorder: ReorderBuffer::with_limit(max_pending),
             next_payload_offset: GLOBAL_HEADER_SIZE as u64,
             pending_descriptors: Vec::new(),
+            block_deduper: BlockDeduper::default(),
         }
     }
 
@@ -428,6 +513,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             return Err(OxideError::InvalidFormat("archive block count exceeded"));
         }
 
+        let block = self.block_deduper.rewrite(block)?;
         let descriptor = ChunkDescriptor::from_block(&block, self.next_payload_offset)?;
         self.next_payload_offset = descriptor.payload_end()?;
         self.writer.write_all(block.data.as_slice())?;

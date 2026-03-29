@@ -1330,8 +1330,7 @@ fn directory_archiver_merges_small_compressible_files_into_larger_blocks(
 }
 
 #[test]
-fn archive_writer_emits_full_descriptors_for_duplicate_blocks_without_dedup(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn archive_writer_deduplicates_duplicate_blocks() -> Result<(), Box<dyn std::error::Error>> {
     let file = write_fixture(b"abcdabcd")?;
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
     let pipeline = build_pipeline(4, 2, buffer_pool, CompressionAlgo::Lz4);
@@ -1356,9 +1355,9 @@ fn archive_writer_emits_full_descriptors_for_duplicate_blocks_without_dedup(
 
     assert_eq!(descriptors.len(), 2);
     assert_eq!(descriptors[0].reference_target, None);
-    assert_eq!(descriptors[1].reference_target, None);
+    assert_eq!(descriptors[1].reference_target, Some(0));
     assert!(descriptors[0].encoded_len > 0);
-    assert!(descriptors[1].encoded_len > 0);
+    assert_eq!(descriptors[1].encoded_len, 0);
 
     let (restored, _report) =
         pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;

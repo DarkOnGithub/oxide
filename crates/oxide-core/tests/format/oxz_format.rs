@@ -1,7 +1,7 @@
 use oxide_core::{
-    ArchiveReader, ArchiveWriter, CHUNK_DESCRIPTOR_SIZE, ChunkDescriptor, CompressionAlgo,
-    CompressionMeta, Footer, GLOBAL_HEADER_SIZE, GlobalHeader, OxideError, ReorderBuffer,
-    SeekableArchiveWriter,
+    ArchiveReader, ArchiveWriter, ChunkDescriptor, CompressionAlgo, CompressionMeta, Footer,
+    GlobalHeader, OxideError, ReorderBuffer, SeekableArchiveWriter, CHUNK_DESCRIPTOR_SIZE,
+    GLOBAL_HEADER_SIZE,
 };
 use std::io::Cursor;
 
@@ -125,8 +125,8 @@ fn footer_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn archive_writer_and_reader_support_random_and_sequential_access()
--> Result<(), Box<dyn std::error::Error>> {
+fn archive_writer_and_reader_support_random_and_sequential_access(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = ArchiveWriter::new(Vec::new());
     writer.write_global_header(3)?;
     writer.write_block(&block(0, b"alpha", CompressionAlgo::Lz4))?;
@@ -186,8 +186,36 @@ fn archive_writer_reorders_out_of_order_blocks() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn seekable_archive_writer_streams_payload_and_round_trips()
--> Result<(), Box<dyn std::error::Error>> {
+fn archive_writer_deduplicates_duplicate_blocks() -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer = ArchiveWriter::new(Vec::new());
+    writer.write_global_header(2)?;
+    writer.write_block(&block(0, b"repeat", CompressionAlgo::Lz4))?;
+    writer.write_block(&block(1, b"repeat", CompressionAlgo::Lz4))?;
+    let archive = writer.write_footer()?;
+
+    let reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+    let header = reader.global_header();
+    let chunk_table = &archive[header.chunk_table_offset as usize
+        ..(header.chunk_table_offset + u64::from(header.chunk_table_len)) as usize];
+    let descriptors = oxide_core::format::oxz::decode_chunk_table(
+        chunk_table,
+        header.payload_offset,
+        header.block_count,
+    )?;
+
+    assert_eq!(descriptors[0].reference_target, None);
+    assert_eq!(descriptors[1].reference_target, Some(0));
+    assert_eq!(descriptors[1].encoded_len, 0);
+
+    let mut reader = ArchiveReader::new(Cursor::new(archive))?;
+    assert_eq!(reader.read_block(0)?.1, b"repeat");
+    assert_eq!(reader.read_block(1)?.1, b"repeat");
+    Ok(())
+}
+
+#[test]
+fn seekable_archive_writer_streams_payload_and_round_trips(
+) -> Result<(), Box<dyn std::error::Error>> {
     let cursor = Cursor::new(Vec::new());
     let mut writer = SeekableArchiveWriter::new(cursor);
     writer.write_global_header(3)?;
@@ -201,6 +229,36 @@ fn seekable_archive_writer_streams_payload_and_round_trips()
     let (header, payload) = reader.read_block(1)?;
     assert_eq!(payload, b"beta");
     assert!(header.payload_offset > 0);
+    Ok(())
+}
+
+#[test]
+fn seekable_archive_writer_deduplicates_duplicate_blocks() -> Result<(), Box<dyn std::error::Error>>
+{
+    let cursor = Cursor::new(Vec::new());
+    let mut writer = SeekableArchiveWriter::new(cursor);
+    writer.write_global_header(2)?;
+    writer.write_block(&block(0, b"repeat", CompressionAlgo::Lz4))?;
+    writer.write_block(&block(1, b"repeat", CompressionAlgo::Lz4))?;
+
+    let archive = writer.write_footer()?.into_inner();
+    let reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+    let header = reader.global_header();
+    let chunk_table = &archive[header.chunk_table_offset as usize
+        ..(header.chunk_table_offset + u64::from(header.chunk_table_len)) as usize];
+    let descriptors = oxide_core::format::oxz::decode_chunk_table(
+        chunk_table,
+        header.payload_offset,
+        header.block_count,
+    )?;
+
+    assert_eq!(descriptors[0].reference_target, None);
+    assert_eq!(descriptors[1].reference_target, Some(0));
+    assert_eq!(descriptors[1].encoded_len, 0);
+
+    let mut reader = ArchiveReader::new(Cursor::new(archive))?;
+    assert_eq!(reader.read_block(0)?.1, b"repeat");
+    assert_eq!(reader.read_block(1)?.1, b"repeat");
     Ok(())
 }
 
