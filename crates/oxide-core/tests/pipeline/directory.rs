@@ -1,5 +1,6 @@
 use super::{
-    detect_file_probe_plans, discover_directory_tree, estimate_directory_block_count, FileProbePlan,
+    detect_file_probe_plans, discover_directory_tree, estimate_directory_block_count,
+    plan_directory_file_order, FileProbePlan,
 };
 use crate::{ChunkEncodingPlan, CompressionAlgo};
 use std::fs;
@@ -65,6 +66,38 @@ fn discovery_includes_hidden_files_and_directories() {
         ]
     );
     assert_eq!(discovery.input_bytes_total, 4 + 10 + 6);
+}
+
+#[test]
+fn file_order_moves_small_fragment_candidates_after_large_files() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+
+    fs::write(root.join("01-large.txt"), vec![b'a'; 80 * 1024]).expect("write large text");
+    fs::write(root.join("02-small.txt"), b"small text").expect("write small text");
+    fs::write(
+        root.join("03-small.jpg"),
+        [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10],
+    )
+    .expect("write small jpeg");
+
+    let discovery = discover_directory_tree(root).expect("discover directory");
+    let plans = detect_file_probe_plans(
+        &discovery,
+        64 * 1024,
+        ChunkEncodingPlan::new(CompressionAlgo::Zstd),
+        1,
+    )
+    .expect("probe plans");
+    let order = plan_directory_file_order(&discovery, &plans, 64 * 1024).expect("file order");
+
+    assert_eq!(
+        order
+            .into_iter()
+            .map(|index| discovery.files[index].entry.rel_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["01-large.txt", "02-small.txt", "03-small.jpg"]
+    );
 }
 
 #[cfg(unix)]
