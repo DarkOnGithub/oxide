@@ -1,9 +1,9 @@
 use bytes::Bytes;
 
 use super::{
-    INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN, INCOMPRESSIBLE_PROBE_SAMPLE_LEN,
-    LZMA_EXTREME_PROBE_MIN_SOURCE_LEN, LZMA_PROBE_MIN_SOURCE_LEN, compression_probe_config,
-    is_likely_incompressible_sample, process_batch, should_skip_full_compression_probe,
+    compression_probe_config, is_likely_incompressible_sample, process_batch,
+    should_skip_full_compression_probe, INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN,
+    INCOMPRESSIBLE_PROBE_SAMPLE_LEN, LZMA_EXTREME_PROBE_MIN_SOURCE_LEN, LZMA_PROBE_MIN_SOURCE_LEN,
 };
 use crate::buffer::BufferPool;
 use crate::core::WorkerScratchArena;

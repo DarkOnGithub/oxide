@@ -1,5 +1,5 @@
 use super::{
-    FileProbePlan, detect_file_probe_plans, discover_directory_tree, estimate_directory_block_count,
+    detect_file_probe_plans, discover_directory_tree, estimate_directory_block_count, FileProbePlan,
 };
 use crate::{ChunkEncodingPlan, CompressionAlgo};
 use std::fs;
