@@ -151,6 +151,7 @@ pub struct DecodeTask {
     pub index: usize,
     pub header: ChunkDescriptor,
     pub block_data: PooledBuffer,
+    pub read_elapsed: Duration,
 }
 
 #[derive(Debug)]
