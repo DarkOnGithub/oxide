@@ -2,9 +2,8 @@ use std::time::Instant;
 
 use crate::buffer::BufferPool;
 use crate::compression::{
-    CompressionRequest, apply_compression_request_with_scratch,
-    apply_compression_request_with_scratch_into, recycle_compression_buffer,
-    supports_direct_buffer_output,
+    apply_compression_request_with_scratch, apply_compression_request_with_scratch_into,
+    recycle_compression_buffer, supports_direct_buffer_output, CompressionRequest,
 };
 use crate::core::WorkerScratchArena;
 use crate::dictionary::ArchiveDictionaryBank;
