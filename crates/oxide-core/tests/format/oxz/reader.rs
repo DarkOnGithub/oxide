@@ -68,6 +68,46 @@ fn build_test_archive() -> Vec<u8> {
         .expect("test archive footer should write")
 }
 
+fn build_reference_test_archive() -> Vec<u8> {
+    let mut writer = ArchiveWriter::with_manifest(Vec::new(), Some(ArchiveManifest::default()));
+    writer
+        .write_global_header_with_flags(4, 0)
+        .expect("test archive header should write");
+
+    let meta = CompressionMeta::new(CompressionAlgo::Lz4, true);
+    writer
+        .write_owned_block(CompressedBlock::with_compression_meta(
+            0,
+            b"alpha".to_vec(),
+            meta,
+            5,
+        ))
+        .expect("first test block should write");
+    writer
+        .write_owned_block(CompressedBlock::with_compression_meta(
+            1,
+            b"beta".to_vec(),
+            meta,
+            4,
+        ))
+        .expect("second test block should write");
+    writer
+        .write_owned_block(CompressedBlock::reference(2, 0, 0, 5))
+        .expect("reference test block should write");
+    writer
+        .write_owned_block(CompressedBlock::with_compression_meta(
+            3,
+            b"gamma".to_vec(),
+            meta,
+            5,
+        ))
+        .expect("fourth test block should write");
+
+    writer
+        .write_footer()
+        .expect("test archive footer should write")
+}
+
 #[test]
 fn sequential_block_reads_reuse_buffer_without_extra_seeks() {
     let archive_bytes = build_test_archive();
@@ -111,4 +151,34 @@ fn sequential_reader_seeks_when_blocks_are_requested_out_of_order() {
 
     assert!(seek_count.get() > seek_count_after_open);
     assert_eq!(&buffer, b"beta");
+}
+
+#[test]
+fn sequential_reference_blocks_keep_cursor_aligned() {
+    let archive_bytes = build_reference_test_archive();
+
+    let (reader, _seek_count) = SeekCountingCursor::new(archive_bytes);
+    let mut archive =
+        ArchiveReader::new_for_sequential_extract(reader).expect("archive should open");
+
+    let mut buffer = Vec::new();
+    archive
+        .read_block_into(0, &mut buffer)
+        .expect("first block should read");
+    assert_eq!(&buffer, b"alpha");
+
+    archive
+        .read_block_into(1, &mut buffer)
+        .expect("second block should read");
+    assert_eq!(&buffer, b"beta");
+
+    archive
+        .read_block_into(2, &mut buffer)
+        .expect("reference block should read");
+    assert_eq!(&buffer, b"alpha");
+
+    archive
+        .read_block_into(3, &mut buffer)
+        .expect("block after reference should read");
+    assert_eq!(&buffer, b"gamma");
 }

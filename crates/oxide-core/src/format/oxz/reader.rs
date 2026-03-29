@@ -6,7 +6,7 @@ use crate::types::duration_to_us;
 use crate::{ArchiveSourceKind, OxideError, Result};
 
 use super::{
-    ArchiveManifest, ArchiveMetadata, ChunkDescriptor, Footer, GlobalHeader, decode_chunk_table,
+    decode_chunk_table, ArchiveManifest, ArchiveMetadata, ChunkDescriptor, Footer, GlobalHeader,
 };
 
 #[derive(Debug)]
@@ -147,6 +147,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let start = Instant::now();
         let descriptor = self.block_descriptor(index)?;
         let resolved = self.resolve_data_descriptor(index, descriptor)?;
+        let is_reference = descriptor.is_reference();
 
         if self.sequential_extract_state.map(|state| {
             state.next_block_index == index && state.next_payload_offset == resolved.payload_offset
@@ -162,6 +163,11 @@ impl<R: Read + Seek> ArchiveReader<R> {
         if let Some(state) = self.sequential_extract_state.as_mut() {
             state.next_block_index = index.saturating_add(1);
             state.next_payload_offset = descriptor.payload_end()?;
+        }
+
+        if is_reference && self.sequential_extract_state.is_some() {
+            self.reader
+                .seek(SeekFrom::Start(descriptor.payload_end()?))?;
         }
 
         profile::event(
