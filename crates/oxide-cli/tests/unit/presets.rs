@@ -106,7 +106,7 @@ fn default_preset_file_balanced_ultra_and_extreme_use_expected_codecs() {
     assert_eq!(balanced.block_size, 2 * 1024 * 1024);
     assert_eq!(
         balanced.chunking_policy,
-        ChunkingPolicy::cdc(2 * 1024 * 1024, 512 * 1024, 4 * 1024 * 1024)
+        ChunkingPolicy::fixed(2 * 1024 * 1024)
     );
     assert_eq!(ultra.compression, CompressionAlgo::Lzma);
     assert_eq!(ultra.compression_level, Some(7));
@@ -115,7 +115,7 @@ fn default_preset_file_balanced_ultra_and_extreme_use_expected_codecs() {
     assert_eq!(ultra.block_size, 3 * 1024 * 1024);
     assert_eq!(
         ultra.chunking_policy,
-        ChunkingPolicy::cdc(3 * 1024 * 1024, 768 * 1024, 6 * 1024 * 1024)
+        ChunkingPolicy::fixed(3 * 1024 * 1024)
     );
     assert_eq!(ultra.pool_capacity, 3 * 1024 * 1024);
     assert_eq!(extreme.compression, CompressionAlgo::Lzma);
@@ -125,7 +125,7 @@ fn default_preset_file_balanced_ultra_and_extreme_use_expected_codecs() {
     assert_eq!(extreme.block_size, 4 * 1024 * 1024);
     assert_eq!(
         extreme.chunking_policy,
-        ChunkingPolicy::cdc(4 * 1024 * 1024, 1024 * 1024, 8 * 1024 * 1024)
+        ChunkingPolicy::fixed(4 * 1024 * 1024)
     );
     assert_eq!(extreme.pool_capacity, 4 * 1024 * 1024);
 }

@@ -105,10 +105,11 @@ fn probe_plan_uses_extension_based_raw_storage() {
 
     assert_eq!(plans.len(), 1);
     assert!(plans[0].force_raw_storage);
+    assert_eq!(plans[0].max_block_size, 16);
 }
 
 #[test]
-fn probe_plan_expands_blocks_for_small_compressible_files() {
+fn probe_plan_keeps_target_block_size_for_small_compressible_files() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
     fs::write(root.join("alpha.txt"), b"alpha alpha alpha alpha\n").expect("write alpha");
@@ -123,11 +124,11 @@ fn probe_plan_expands_blocks_for_small_compressible_files() {
     .expect("probe plans");
 
     assert_eq!(plans.len(), 1);
-    assert_eq!(plans[0].max_block_size, 256);
+    assert_eq!(plans[0].max_block_size, 128);
 }
 
 #[test]
-fn block_count_accounts_for_extension_boundaries() {
+fn block_count_uses_fixed_size_blocks_without_extension_boundaries() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
     fs::write(root.join("alpha.txt"), b"alpha\n").expect("write alpha");
@@ -150,7 +151,7 @@ fn block_count_accounts_for_extension_boundaries() {
     )
     .expect("plan");
 
-    assert_eq!(block_count, 4);
+    assert_eq!(block_count, 3);
 }
 
 #[test]
@@ -181,7 +182,7 @@ fn block_count_accounts_for_raw_storage_policy_changes() {
 }
 
 #[test]
-fn block_count_merges_small_compressible_files_up_to_double_target() {
+fn block_count_does_not_merge_past_fixed_target_when_limit_is_larger() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
     fs::write(root.join("01.txt"), b"aaaa").expect("write first");
@@ -209,5 +210,5 @@ fn block_count_merges_small_compressible_files_up_to_double_target() {
     )
     .expect("plan");
 
-    assert_eq!(block_count, 1);
+    assert_eq!(block_count, 2);
 }

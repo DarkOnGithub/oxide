@@ -38,12 +38,7 @@
         "result_wait_ms": 1,
         "directory_mmap_threshold": "8M",
         "writer_queue_blocks": 768,
-        "dictionary_mode": "off",
-        "chunking": {
-          "mode": "cdc",
-          "min_block_size": "768K",
-          "max_block_size": "6M"
-        }
+        "dictionary_mode": "off"
       },
       "balanced": {
         "compression": {
@@ -61,12 +56,7 @@
         "producer_threads": 3,
         "writer_queue_blocks": 384,
         "result_wait_ms": 1,
-        "dictionary_mode": "off",
-        "chunking": {
-          "mode": "cdc",
-          "min_block_size": "512K",
-          "max_block_size": "4M"
-        }
+        "dictionary_mode": "off"
       },
       "ultra": {
         "compression": {
@@ -86,12 +76,7 @@
         "directory_mmap_threshold": "16M",
         "writer_queue_blocks": 128,
         "result_wait_ms": 4,
-        "dictionary_mode": "auto",
-        "chunking": {
-          "mode": "cdc",
-          "min_block_size": "768K",
-          "max_block_size": "6M"
-        }
+        "dictionary_mode": "auto"
       },
       "extreme": {
         "compression": {
@@ -111,12 +96,7 @@
         "directory_mmap_threshold": "16M",
         "writer_queue_blocks": 96,
         "result_wait_ms": 6,
-        "dictionary_mode": "auto",
-        "chunking": {
-          "mode": "cdc",
-          "min_block_size": "1M",
-          "max_block_size": "8M"
-        }
+        "dictionary_mode": "auto"
       }
     }
   }

@@ -1226,7 +1226,7 @@ fn zstd_dictionary_mode_embeds_dictionary_bank_and_round_trips()
 }
 
 #[test]
-fn directory_dictionary_mode_assigns_extension_dictionary_ids()
+fn directory_dictionary_mode_assigns_sample_based_dictionary_ids()
 -> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     for index in 0..16 {
@@ -1250,16 +1250,14 @@ fn directory_dictionary_mode_assigns_extension_dictionary_ids()
     let mut reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
 
     assert!(
-        reader
+        !reader
             .manifest()
             .dictionary_bank()
             .dictionaries()
             .iter()
-            .any(|dictionary| {
-                dictionary.class == DictionaryClass::Extension("json".to_string())
-                    && dictionary.id != 0
-            })
+            .any(|dictionary| matches!(dictionary.class, DictionaryClass::Extension(_)))
     );
+    assert!(!reader.manifest().dictionary_bank().is_empty());
     let mut saw_dictionary_id = false;
     for index in 0..reader.block_count() {
         let (descriptor, _payload) = reader.read_block(index)?;
@@ -1328,7 +1326,7 @@ fn directory_archiver_merges_small_compressible_files_into_larger_blocks()
 }
 
 #[test]
-fn archive_writer_emits_reference_descriptors_for_duplicate_blocks()
+fn archive_writer_emits_full_descriptors_for_duplicate_blocks_without_dedup()
 -> Result<(), Box<dyn std::error::Error>> {
     let file = write_fixture(b"abcdabcd")?;
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
@@ -1353,8 +1351,10 @@ fn archive_writer_emits_reference_descriptors_for_duplicate_blocks()
     )?;
 
     assert_eq!(descriptors.len(), 2);
-    assert_eq!(descriptors[1].reference_target, Some(0));
-    assert_eq!(descriptors[1].encoded_len, 0);
+    assert_eq!(descriptors[0].reference_target, None);
+    assert_eq!(descriptors[1].reference_target, None);
+    assert!(descriptors[0].encoded_len > 0);
+    assert!(descriptors[1].encoded_len > 0);
 
     let (restored, _report) =
         pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
