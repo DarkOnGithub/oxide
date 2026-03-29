@@ -6,9 +6,6 @@ use bytes::Bytes;
 use jwalk::WalkDir;
 use memmap2::Mmap;
 
-use crate::compression::{CompressionRequest, apply_compression_request_with_scratch};
-use crate::dictionary::classify_sample;
-use crate::dictionary::normalized_extension_from_path;
 use crate::format::should_force_raw_storage;
 use crate::types::{Batch, BatchData, ChunkEncodingPlan, Result};
 
@@ -59,20 +56,12 @@ pub(super) struct FileProbePlan {
 /// Utility for grouping file data into batches while respecting raw-storage boundaries.
 #[derive(Debug, Clone)]
 pub struct DirectoryBatchSubmitter {
-    default_source_path: PathBuf,
+    source_path: PathBuf,
     block_size: usize,
     compression_plan: ChunkEncodingPlan,
     next_block_id: usize,
     pending: Vec<u8>,
-    pending_key: Option<BatchBoundaryKey>,
-    pending_source_path: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BatchBoundaryKey {
-    force_raw_storage: bool,
-    extension: Option<String>,
-    max_block_size: usize,
+    pending_force_raw_storage: Option<bool>,
 }
 
 impl DirectoryBatchSubmitter {
@@ -86,66 +75,35 @@ impl DirectoryBatchSubmitter {
         compression_plan: ChunkEncodingPlan,
     ) -> Self {
         Self {
-            default_source_path: source_path,
+            source_path,
             block_size: block_size.max(1),
             compression_plan,
             next_block_id: 0,
             pending: Vec::with_capacity(block_size.max(1)),
-            pending_key: None,
-            pending_source_path: None,
+            pending_force_raw_storage: None,
         }
     }
 
     pub fn push_bytes<P, F>(
         &mut self,
-        source_path: P,
-        bytes: &[u8],
-        force_raw_storage: bool,
-        submit: F,
-    ) -> Result<()>
-    where
-        P: AsRef<Path>,
-        F: FnMut(Batch) -> Result<()>,
-    {
-        self.push_bytes_with_limit(
-            source_path,
-            bytes,
-            force_raw_storage,
-            self.block_size,
-            submit,
-        )
-    }
-
-    pub fn push_bytes_with_limit<P, F>(
-        &mut self,
-        source_path: P,
+        _source_path: P,
         mut bytes: &[u8],
         force_raw_storage: bool,
-        max_block_size: usize,
         mut submit: F,
     ) -> Result<()>
     where
         P: AsRef<Path>,
         F: FnMut(Batch) -> Result<()>,
     {
-        let source_path = source_path.as_ref();
         while !bytes.is_empty() {
-            self.prepare_pending_state(
-                source_path,
-                force_raw_storage,
-                max_block_size,
-                &mut submit,
-            )?;
+            self.prepare_pending_state(force_raw_storage, &mut submit)?;
 
-            let room = self
-                .active_block_size()
-                .saturating_sub(self.pending.len())
-                .max(1);
+            let room = self.block_size.saturating_sub(self.pending.len()).max(1);
             let take = room.min(bytes.len());
             self.pending.extend_from_slice(&bytes[..take]);
             bytes = &bytes[take..];
 
-            if self.pending.len() == self.active_block_size() {
+            if self.pending.len() == self.block_size {
                 self.flush_pending(&mut submit)?;
             }
         }
@@ -153,38 +111,28 @@ impl DirectoryBatchSubmitter {
         Ok(())
     }
 
-    pub fn push_mapped<P, F>(
+    pub fn push_bytes_with_limit<P, F>(
         &mut self,
         source_path: P,
-        map: Arc<Mmap>,
-        start: usize,
-        end: usize,
+        bytes: &[u8],
         force_raw_storage: bool,
+        _max_block_size: usize,
         submit: F,
     ) -> Result<()>
     where
         P: AsRef<Path>,
         F: FnMut(Batch) -> Result<()>,
     {
-        self.push_mapped_with_limit(
-            source_path,
-            map,
-            start,
-            end,
-            force_raw_storage,
-            self.block_size,
-            submit,
-        )
+        self.push_bytes(source_path, bytes, force_raw_storage, submit)
     }
 
-    pub fn push_mapped_with_limit<P, F>(
+    pub fn push_mapped<P, F>(
         &mut self,
-        source_path: P,
+        _source_path: P,
         map: Arc<Mmap>,
         start: usize,
         end: usize,
         force_raw_storage: bool,
-        max_block_size: usize,
         mut submit: F,
     ) -> Result<()>
     where
@@ -197,36 +145,26 @@ impl DirectoryBatchSubmitter {
             ));
         }
 
-        let source_path = source_path.as_ref();
         let mut offset = start;
         while offset < end {
-            self.prepare_pending_state(
-                source_path,
-                force_raw_storage,
-                max_block_size,
-                &mut submit,
-            )?;
+            self.prepare_pending_state(force_raw_storage, &mut submit)?;
 
             if !self.pending.is_empty() {
-                let room = self
-                    .active_block_size()
-                    .saturating_sub(self.pending.len())
-                    .max(1);
+                let room = self.block_size.saturating_sub(self.pending.len()).max(1);
                 let take = room.min(end - offset);
                 self.pending.extend_from_slice(&map[offset..offset + take]);
                 offset += take;
 
-                if self.pending.len() == self.active_block_size() {
+                if self.pending.len() == self.block_size {
                     self.flush_pending(&mut submit)?;
                 }
                 continue;
             }
 
             let remaining = end - offset;
-            if remaining >= self.active_block_size() {
-                let batch_end = offset + self.active_block_size();
+            if remaining >= self.block_size {
+                let batch_end = offset + self.block_size;
                 self.submit_batch(
-                    source_path.to_path_buf(),
                     BatchData::Mapped {
                         map: Arc::clone(&map),
                         start: offset,
@@ -246,6 +184,23 @@ impl DirectoryBatchSubmitter {
         Ok(())
     }
 
+    pub fn push_mapped_with_limit<P, F>(
+        &mut self,
+        source_path: P,
+        map: Arc<Mmap>,
+        start: usize,
+        end: usize,
+        force_raw_storage: bool,
+        _max_block_size: usize,
+        submit: F,
+    ) -> Result<()>
+    where
+        P: AsRef<Path>,
+        F: FnMut(Batch) -> Result<()>,
+    {
+        self.push_mapped(source_path, map, start, end, force_raw_storage, submit)
+    }
+
     pub fn finish<F>(&mut self, submit: F) -> Result<()>
     where
         F: FnMut(Batch) -> Result<()>,
@@ -257,34 +212,20 @@ impl DirectoryBatchSubmitter {
         Ok(())
     }
 
-    fn prepare_pending_state<F>(
-        &mut self,
-        source_path: &Path,
-        force_raw_storage: bool,
-        max_block_size: usize,
-        submit: &mut F,
-    ) -> Result<()>
+    fn prepare_pending_state<F>(&mut self, force_raw_storage: bool, submit: &mut F) -> Result<()>
     where
         F: FnMut(Batch) -> Result<()>,
     {
-        let next_key = BatchBoundaryKey {
-            force_raw_storage,
-            extension: normalized_extension_from_path(source_path),
-            max_block_size: max_block_size.max(self.block_size),
-        };
-
-        match self.pending_key.as_ref() {
-            Some(current) if current != &next_key => {
+        match self.pending_force_raw_storage {
+            Some(current) if current != force_raw_storage => {
                 if !self.pending.is_empty() {
                     self.flush_pending(submit)?;
                 }
-                self.pending_key = Some(next_key);
-                self.pending_source_path = Some(source_path.to_path_buf());
+                self.pending_force_raw_storage = Some(force_raw_storage);
             }
             Some(_) => {}
             None => {
-                self.pending_key = Some(next_key);
-                self.pending_source_path = Some(source_path.to_path_buf());
+                self.pending_force_raw_storage = Some(force_raw_storage);
             }
         }
 
@@ -297,31 +238,16 @@ impl DirectoryBatchSubmitter {
     {
         let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(self.block_size));
         self.submit_batch(
-            self.pending_source_path
-                .clone()
-                .unwrap_or_else(|| self.default_source_path.clone()),
             BatchData::Owned(Bytes::from(chunk)),
-            self.pending_key
-                .as_ref()
-                .map(|key| key.force_raw_storage)
-                .unwrap_or(false),
+            self.pending_force_raw_storage.unwrap_or(false),
             submit,
         )?;
-        self.pending_key = None;
-        self.pending_source_path = None;
+        self.pending_force_raw_storage = None;
         Ok(())
-    }
-
-    fn active_block_size(&self) -> usize {
-        self.pending_key
-            .as_ref()
-            .map(|key| key.max_block_size)
-            .unwrap_or(self.block_size)
     }
 
     fn submit_batch<F>(
         &mut self,
-        source_path: PathBuf,
         data: BatchData,
         force_raw_storage: bool,
         submit: &mut F,
@@ -331,7 +257,7 @@ impl DirectoryBatchSubmitter {
     {
         let batch = Batch {
             id: self.next_block_id,
-            source_path,
+            source_path: self.source_path.clone(),
             data,
             stream_id: 0,
             compression_plan: self.compression_plan,
@@ -501,37 +427,17 @@ pub(super) fn manifest_from_discovery(
 pub(super) fn detect_file_probe_plans(
     discovery: &DirectoryDiscovery,
     target_block_size: usize,
-    compression_plan: ChunkEncodingPlan,
+    _compression_plan: ChunkEncodingPlan,
     _threads: usize,
 ) -> Result<Vec<FileProbePlan>> {
-    let target_block_size = target_block_size.max(1);
-    let adaptive_max_block_size = target_block_size.saturating_mul(2).max(target_block_size);
-    let small_file_cutoff = target_block_size / 4;
-
-    let mut plans = Vec::with_capacity(discovery.files.len());
-    for file in &discovery.files {
-        let force_raw_storage = should_force_raw_storage(&file.full_path);
-        let max_block_size = if force_raw_storage {
-            target_block_size
-        } else {
-            let file_size = usize::try_from(file.size)
-                .map_err(|_| crate::OxideError::InvalidFormat("file size exceeds usize range"))?;
-            if file_size == 0 || small_file_cutoff == 0 || file_size >= small_file_cutoff {
-                target_block_size
-            } else if is_small_file_highly_compressible(&file.full_path, compression_plan)? {
-                adaptive_max_block_size
-            } else {
-                target_block_size
-            }
-        };
-
-        plans.push(FileProbePlan {
-            force_raw_storage,
-            max_block_size,
-        });
-    }
-
-    Ok(plans)
+    Ok(discovery
+        .files
+        .iter()
+        .map(|file| FileProbePlan {
+            force_raw_storage: should_force_raw_storage(&file.full_path),
+            max_block_size: target_block_size.max(1),
+        })
+        .collect())
 }
 
 pub(super) fn estimate_directory_block_count(
@@ -541,19 +447,25 @@ pub(super) fn estimate_directory_block_count(
 ) -> Result<u32> {
     if discovery.files.len() != file_probe_plans.len() {
         return Err(crate::OxideError::InvalidFormat(
-            "directory probe plan mismatch",
+            "directory raw storage plan mismatch",
         ));
+    }
+
+    if file_probe_plans.iter().all(|plan| !plan.force_raw_storage) {
+        let block_size = block_size.max(1) as u64;
+        let block_count = discovery.input_bytes_total.div_ceil(block_size);
+        return u32::try_from(block_count)
+            .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v2"));
     }
 
     let mut planner = BlockCountPlanner::new(block_size);
     for (index, file) in discovery.files.iter().enumerate() {
         let file_size = usize::try_from(file.size)
             .map_err(|_| crate::OxideError::InvalidFormat("file size exceeds usize range"))?;
-        planner.push_file_with_limit(
+        planner.push_file(
             &file.full_path,
             file_size,
             file_probe_plans[index].force_raw_storage,
-            file_probe_plans[index].max_block_size,
         );
     }
 
@@ -616,7 +528,7 @@ pub struct BlockCountPlanner {
     block_size: usize,
     blocks: usize,
     pending_len: usize,
-    pending_key: Option<BatchBoundaryKey>,
+    pending_force_raw_storage: Option<bool>,
 }
 
 impl BlockCountPlanner {
@@ -625,16 +537,37 @@ impl BlockCountPlanner {
             block_size: block_size.max(1),
             blocks: 0,
             pending_len: 0,
-            pending_key: None,
+            pending_force_raw_storage: None,
         }
     }
 
-    pub fn push_len(&mut self, len: usize, force_raw_storage: bool) {
-        self.push_len_with_extension(None, len, force_raw_storage);
+    pub fn push_len(&mut self, mut len: usize, force_raw_storage: bool) {
+        while len > 0 {
+            match self.pending_force_raw_storage {
+                Some(current) if current != force_raw_storage => {
+                    self.flush_pending();
+                    self.pending_force_raw_storage = Some(force_raw_storage);
+                }
+                Some(_) => {}
+                None => {
+                    self.pending_force_raw_storage = Some(force_raw_storage);
+                }
+            }
+
+            let room = self.block_size.saturating_sub(self.pending_len).max(1);
+            let take = room.min(len);
+            self.pending_len += take;
+            len -= take;
+
+            if self.pending_len == self.block_size {
+                self.flush_pending();
+            }
+        }
     }
 
     pub fn push_file(&mut self, path: &Path, len: usize, force_raw_storage: bool) {
-        self.push_len_with_extension(normalized_extension_from_path(path), len, force_raw_storage);
+        let _ = path;
+        self.push_len(len, force_raw_storage);
     }
 
     pub fn push_file_with_limit(
@@ -642,59 +575,9 @@ impl BlockCountPlanner {
         path: &Path,
         len: usize,
         force_raw_storage: bool,
-        max_block_size: usize,
+        _max_block_size: usize,
     ) {
-        self.push_len_with_key(
-            BatchBoundaryKey {
-                force_raw_storage,
-                extension: normalized_extension_from_path(path),
-                max_block_size: max_block_size.max(self.block_size),
-            },
-            len,
-        );
-    }
-
-    fn push_len_with_extension(
-        &mut self,
-        extension: Option<String>,
-        len: usize,
-        force_raw_storage: bool,
-    ) {
-        self.push_len_with_key(
-            BatchBoundaryKey {
-                force_raw_storage,
-                extension,
-                max_block_size: self.block_size,
-            },
-            len,
-        );
-    }
-
-    fn push_len_with_key(&mut self, next_key: BatchBoundaryKey, mut len: usize) {
-        while len > 0 {
-            match self.pending_key.as_ref() {
-                Some(current) if current != &next_key => {
-                    self.flush_pending();
-                    self.pending_key = Some(next_key.clone());
-                }
-                Some(_) => {}
-                None => {
-                    self.pending_key = Some(next_key.clone());
-                }
-            }
-
-            let room = next_key
-                .max_block_size
-                .saturating_sub(self.pending_len)
-                .max(1);
-            let take = room.min(len);
-            self.pending_len += take;
-            len -= take;
-
-            if self.pending_len == next_key.max_block_size {
-                self.flush_pending();
-            }
-        }
+        self.push_file(path, len, force_raw_storage);
     }
 
     pub fn finish(mut self) -> usize {
@@ -706,39 +589,9 @@ impl BlockCountPlanner {
         if self.pending_len > 0 {
             self.blocks += 1;
             self.pending_len = 0;
-            self.pending_key = None;
+            self.pending_force_raw_storage = None;
         }
     }
-}
-
-fn is_small_file_highly_compressible(
-    path: &Path,
-    compression_plan: ChunkEncodingPlan,
-) -> Result<bool> {
-    let sample = fs::read(path)?;
-    if sample.is_empty() {
-        return Ok(false);
-    }
-
-    if !matches!(classify_sample(&sample), crate::DictionaryClass::Binary) {
-        return Ok(true);
-    }
-
-    let mut scratch = crate::compression::CompressionScratchArena::new();
-    let compressed = apply_compression_request_with_scratch(
-        CompressionRequest {
-            data: &sample,
-            algo: compression_plan.algo,
-            level: compression_plan.level,
-            lzma_extreme: compression_plan.lzma_extreme,
-            lzma_dictionary_size: compression_plan.lzma_dictionary_size,
-            dictionary_id: 0,
-            dictionary: None,
-        },
-        &mut scratch,
-    )?;
-
-    Ok(compressed.len().saturating_mul(100) <= sample.len().saturating_mul(90))
 }
 
 fn relative_path_to_utf8(path: &Path) -> Result<String> {

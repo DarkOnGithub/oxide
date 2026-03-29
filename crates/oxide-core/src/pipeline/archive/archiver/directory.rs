@@ -173,8 +173,6 @@ where
     let mut raw_passthrough_blocks = 0u64;
     let mut writer_queue_peak = 0usize;
     let mut pending_results = ReorderBuffer::<CompressedBlock>::with_limit(total_blocks.max(1));
-    let mut dedup_index = BlockDedupIndex::new();
-
     let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
     let producer_root = discovery.root.clone();
     let producer_files = discovery.files.clone();
@@ -255,7 +253,6 @@ where
         for (file_index, file) in producer_files.iter().enumerate() {
             let file_probe_plan = producer_file_probe_plans[file_index];
             let force_raw_storage = file_probe_plan.force_raw_storage;
-            let max_block_size = file_probe_plan.max_block_size;
             if let Some(prefetch_tx) = prefetch_request_tx.as_ref() {
                 while next_prefetch < producer_files.len()
                     && next_prefetch <= file_index.saturating_add(prefetch_window)
@@ -300,23 +297,21 @@ where
                 producer_read += prefetched_file.read_elapsed;
                 match prefetched_file.payload {
                     PrefetchPayload::Owned(data) => {
-                        submitter.push_bytes_with_limit(
+                        submitter.push_bytes(
                             &file.full_path,
                             &data,
                             force_raw_storage,
-                            max_block_size,
                             |batch| submit_batch(batch),
                         )?;
                     }
                     PrefetchPayload::Mapped(mmap) => {
                         if let Some(map) = mmap.mapping() {
-                            submitter.push_mapped_with_limit(
+                            submitter.push_mapped(
                                 &file.full_path,
                                 map,
                                 0,
                                 mmap.len(),
                                 force_raw_storage,
-                                max_block_size,
                                 |batch| submit_batch(batch),
                             )?;
                         }
@@ -326,13 +321,12 @@ where
                 let read_started = Instant::now();
                 let mmap = MmapInput::open(&file.full_path)?;
                 if let Some(map) = mmap.mapping() {
-                    submitter.push_mapped_with_limit(
+                    submitter.push_mapped(
                         &file.full_path,
                         map,
                         0,
                         mmap.len(),
                         force_raw_storage,
-                        max_block_size,
                         |batch| submit_batch(batch),
                     )?;
                 }
@@ -347,11 +341,10 @@ where
                         break;
                     }
 
-                    submitter.push_bytes_with_limit(
+                    submitter.push_bytes(
                         &file.full_path,
                         &read_buffer[..read],
                         force_raw_storage,
-                        max_block_size,
                         |batch| submit_batch(batch),
                     )?;
                 }
@@ -414,31 +407,7 @@ where
         {
             match batch_rx.try_recv() {
                 Ok(batch) => {
-                    match dedup_index.classify(&batch)? {
-                        DedupDecision::Unique => {
-                            handle.submit(batch)?;
-                        }
-                        DedupDecision::Reference(reference_target) => {
-                            record_result_to_writer_queue(
-                                Ok(CompressedBlock::reference(
-                                    batch.id,
-                                    batch.stream_id,
-                                    reference_target,
-                                    batch.len() as u64,
-                                )),
-                                &writer_tx,
-                                &writer_failure,
-                                &mut pending_results,
-                                &mut completed_bytes,
-                                &mut first_error,
-                                &mut raw_passthrough_blocks,
-                                &mut writer_queue_peak,
-                                &mut stage_timings.writer_enqueue_blocked,
-                                &mut retired_count,
-                            );
-                            received_count += 1;
-                        }
-                    }
+                    handle.submit(batch)?;
                     submitted_count += 1;
                     progressed = true;
                 }
@@ -962,7 +931,7 @@ fn train_directory_dictionary_bank(
             Ok(read) => read,
             Err(_) => continue,
         };
-        trainer.observe_path(&sample[..read], &file.full_path);
+        trainer.observe(&sample[..read]);
     }
 
     trainer.build(

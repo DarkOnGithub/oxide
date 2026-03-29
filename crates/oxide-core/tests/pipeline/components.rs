@@ -131,12 +131,12 @@ mod directory_tests {
     }
 
     #[test]
-    fn block_count_planner_flushes_on_extension_change() {
+    fn block_count_planner_ignores_extension_changes() {
         let mut planner = BlockCountPlanner::new(8);
         planner.push_file(std::path::Path::new("root/a.json"), 4, false);
         planner.push_file(std::path::Path::new("root/b.html"), 4, false);
 
-        assert_eq!(planner.finish(), 2);
+        assert_eq!(planner.finish(), 1);
     }
 
     #[test]
@@ -210,7 +210,7 @@ mod directory_tests {
     }
 
     #[test]
-    fn submitter_flushes_when_extension_changes() {
+    fn submitter_merges_same_policy_bytes_even_when_paths_change() {
         let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8);
         let mut batches = Vec::new();
 
@@ -233,15 +233,13 @@ mod directory_tests {
             })
             .expect("finish should succeed");
 
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].source_path, PathBuf::from("root/a.json"));
-        assert_eq!(batches[1].source_path, PathBuf::from("root/b.html"));
-        assert_eq!(batches[0].data.as_slice(), b"aaaa");
-        assert_eq!(batches[1].data.as_slice(), b"bbbb");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].source_path, PathBuf::from("root"));
+        assert_eq!(batches[0].data.as_slice(), b"aaaabbbb");
     }
 
     #[test]
-    fn submitter_merges_small_files_up_to_adaptive_limit() {
+    fn submitter_respects_fixed_block_size_even_with_limit_override() {
         let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8);
         let mut batches = Vec::new();
 
@@ -270,7 +268,8 @@ mod directory_tests {
             })
             .expect("finish should succeed");
 
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].data.as_slice(), b"aaaabbbbcccc");
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].data.as_slice(), b"aaaabbbb");
+        assert_eq!(batches[1].data.as_slice(), b"cccc");
     }
 }
