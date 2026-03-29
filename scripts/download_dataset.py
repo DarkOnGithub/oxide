@@ -46,16 +46,13 @@ COMPONENTS = {
         "linux", "archive",
         "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.13.tar.xz", "tar"
     ),
-    "nyctaxi": DatasetSpec(
-        "nyctaxi", "file",
+    "nyctaxi-2015-01": DatasetSpec(
+        "nyctaxi-2015-01", "file",
         "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2015-01.parquet"
     ),
-    "logs": DatasetSpec(
-        "logs", "archive",
-        "https://zenodo.org/api/records/3227177/files/HDFS_1.tar.gz/content",
-        "tar",
-        optional=True,
-        fallback_git="https://github.com/logpai/loghub.git",
+    "nyctaxi-2015-02": DatasetSpec(
+        "nyctaxi-2015-02", "file",
+        "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2015-02.parquet"
     ),
     "div2k": DatasetSpec(
         "div2k", "archive",
@@ -71,8 +68,8 @@ COMPONENTS = {
 TIERS = {
     "200mb": ["silesia"],
     "1gb": ["enwik9"],
-    "5gb": ["silesia", "enwik9", "linux", "nyctaxi", "logs"],
-    "6gb": ["silesia", "enwik9", "linux", "nyctaxi", "logs", "div2k"],
+    "5gb": ["silesia", "enwik9", "linux", "nyctaxi-2015-01"],
+    "6gb": ["silesia", "enwik9", "linux", "nyctaxi-2015-01", "nyctaxi-2015-02", "div2k"],
     "10gb": ["chromium"],
 }
 
