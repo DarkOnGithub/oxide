@@ -227,7 +227,7 @@ impl ArchivePipeline {
 
     /// Extracts all block payload bytes from an OXZ archive in block order and
     /// returns a detailed report.
-    pub fn extract_archive<R: Read + Seek>(
+    pub fn extract_archive<R: Read + Seek + Send + 'static>(
         &self,
         reader: R,
         options: RunTelemetryOptions,
@@ -272,7 +272,7 @@ impl ArchivePipeline {
         sink: Option<&mut dyn TelemetrySink>,
     ) -> Result<ExtractReport>
     where
-        R: Read + Seek,
+        R: Read + Seek + Send + 'static,
         P: AsRef<Path>,
     {
         tracing::info!(output_dir = %output_dir.as_ref().display(), "starting directory archive extraction");
@@ -325,7 +325,7 @@ impl ArchivePipeline {
         sink: Option<&mut dyn TelemetrySink>,
     ) -> Result<ExtractReport>
     where
-        R: Read + Seek,
+        R: Read + Seek + Send + 'static,
         P: AsRef<Path>,
     {
         tracing::info!(output_path = %output_path.as_ref().display(), "starting path extraction");
@@ -402,7 +402,7 @@ impl ArchivePipeline {
         sink: Option<&mut dyn TelemetrySink>,
     ) -> Result<ExtractReport>
     where
-        R: Read + Seek,
+        R: Read + Seek + Send + 'static,
         P: AsRef<Path>,
         S: AsRef<str>,
     {
@@ -427,7 +427,7 @@ impl ArchivePipeline {
         sink: Option<&mut dyn TelemetrySink>,
     ) -> Result<ExtractReport>
     where
-        R: Read + Seek,
+        R: Read + Seek + Send + 'static,
         P: AsRef<Path>,
         S: AsRef<str>,
         T: AsRef<str>,

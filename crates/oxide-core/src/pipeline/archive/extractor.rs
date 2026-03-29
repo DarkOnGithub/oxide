@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, TryRecvError, bounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 
 use crate::buffer::{BufferPool, PooledBuffer};
 use crate::compression::CompressionScratchArena;
@@ -189,6 +189,13 @@ enum OrderedWriteTask {
     Abort,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ReadRequest {
+    index: usize,
+    block_index: u32,
+    header: ChunkDescriptor,
+}
+
 struct OrderedWriterOutcome<W> {
     writer: W,
     stats: ReorderWriterStats,
@@ -342,7 +349,7 @@ impl Extractor {
         Ok(header.source_kind())
     }
 
-    pub fn read_archive_payload_with_metrics<R: Read + Seek>(
+    pub fn read_archive_payload_with_metrics<R: Read + Seek + Send + 'static>(
         &self,
         reader: R,
         started_at: Instant,
@@ -382,7 +389,7 @@ impl Extractor {
         })
     }
 
-    pub fn extract_file_to_path_with_metrics<R: Read + Seek>(
+    pub fn extract_file_to_path_with_metrics<R: Read + Seek + Send + 'static>(
         &self,
         reader: R,
         output_path: &Path,
@@ -442,7 +449,7 @@ impl Extractor {
         })
     }
 
-    pub(crate) fn extract_directory_to_path_with_metrics<R: Read + Seek>(
+    pub(crate) fn extract_directory_to_path_with_metrics<R: Read + Seek + Send + 'static>(
         &self,
         reader: R,
         output_path: &Path,
@@ -502,7 +509,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DirectoryRestoreOutcome>
     where
-        R: Read + Seek,
+        R: Read + Seek + Send + 'static,
         S: AsRef<str>,
         T: AsRef<str>,
     {
@@ -565,15 +572,17 @@ impl Extractor {
         writer: W,
     ) -> Result<(DecodeStreamOutcome, W)>
     where
-        R: Read + Seek,
+        R: Read + Seek + Send + 'static,
         W: OrderedChunkWriter + Send + 'static,
     {
         let mut stage_timings = ExtractStageTimings::default();
         stage_timings.archive_read += archive_read_elapsed;
         let source_kind = archive.source_kind();
         let flags = directory::source_kind_flags(source_kind);
+        let block_descriptors = archive.block_descriptors().to_vec();
+        let archive_header = archive.global_header();
         let decode_plan = match selected_ranges {
-            Some(ranges) => DecodePlan::from_ranges(archive.block_descriptors(), ranges),
+            Some(ranges) => DecodePlan::from_ranges(&block_descriptors, ranges),
             None => DecodePlan::all(archive.block_count() as usize),
         };
         let block_capacity = decode_plan.block_count();
@@ -584,8 +593,10 @@ impl Extractor {
         let reorder_pending_limit =
             reorder_pending_limit(ordered_write_queue_capacity, block_capacity);
 
+        let (read_request_tx, read_request_rx) = bounded::<ReadRequest>(queue_capacity);
         let (task_tx, task_rx) = bounded::<DecodeTask>(queue_capacity);
-        let (result_tx, result_rx) = bounded::<(usize, Result<DecodedBlock>)>(queue_capacity);
+        let (result_tx, result_rx) =
+            bounded::<(usize, Duration, Result<DecodedBlock>)>(queue_capacity);
         let (ordered_write_tx, ordered_write_rx) =
             bounded::<OrderedWriteTask>(ordered_write_queue_capacity);
         let runtime_state = Arc::new(DecodeRuntimeState::new(worker_count, started_at));
@@ -597,6 +608,18 @@ impl Extractor {
             block_capacity,
         );
         let dictionary_bank = Arc::new(archive.manifest().dictionary_bank().clone());
+        let reader_buffer_pool = Arc::clone(&self.buffer_pool);
+        let reader_task_tx = task_tx.clone();
+        let reader_result_tx = result_tx.clone();
+        let io_reader_handle = thread::spawn(move || -> Result<()> {
+            spawn_io_reader(
+                archive,
+                read_request_rx,
+                reader_task_tx,
+                reader_result_tx,
+                reader_buffer_pool,
+            )
+        });
 
         for worker_id in 0..worker_count {
             let local_task_rx = task_rx.clone();
@@ -624,7 +647,10 @@ impl Extractor {
                     busy += busy_elapsed;
                     local_runtime.record_worker_task(worker_id, busy_elapsed);
                     tasks_completed += 1;
-                    if local_result_tx.send((task.index, decoded)).is_err() {
+                    if local_result_tx
+                        .send((task.index, task.read_elapsed, decoded))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -641,10 +667,10 @@ impl Extractor {
         }
         drop(result_tx);
 
-        let archive_bytes_total = archive.global_header().footer_offset + crate::FOOTER_SIZE as u64;
-        let mut archive_bytes_completed = archive.global_header().payload_offset
-            + u64::from(archive.global_header().entry_table_len)
-            + u64::from(archive.global_header().chunk_table_len)
+        let archive_bytes_total = archive_header.footer_offset + crate::FOOTER_SIZE as u64;
+        let mut archive_bytes_completed = archive_header.payload_offset
+            + u64::from(archive_header.entry_table_len)
+            + u64::from(archive_header.chunk_table_len)
             + crate::FOOTER_SIZE as u64;
         let mut submitted = 0usize;
         let mut received = 0usize;
@@ -660,8 +686,7 @@ impl Extractor {
         let mut ordered_write_tx = Some(ordered_write_tx);
 
         let run_result = (|| -> Result<()> {
-            for block_index in 0..archive.block_count() as usize {
-                let header = archive.block_descriptor(block_index as u32)?;
+            for (block_index, header) in block_descriptors.iter().copied().enumerate() {
                 archive_bytes_completed =
                     archive_bytes_completed.saturating_add(header.encoded_len as u64);
 
@@ -718,21 +743,16 @@ impl Extractor {
                     );
                 }
 
-                let read_started = Instant::now();
-                let mut block_data = self.buffer_pool.acquire();
-                archive.read_block_into(block_index as u32, block_data.as_mut_vec())?;
-                stage_timings.archive_read += read_started.elapsed();
-
                 let submit_started = Instant::now();
-                task_tx
-                    .send(DecodeTask {
+                read_request_tx
+                    .send(ReadRequest {
                         index: submitted,
+                        block_index: block_index as u32,
                         header,
-                        block_data,
                     })
                     .map_err(|_| {
                         crate::OxideError::CompressionError(
-                            "decode queue closed before submission completed".to_string(),
+                            "decode read queue closed before submission completed".to_string(),
                         )
                     })?;
                 stage_timings.decode_submit += submit_started.elapsed();
@@ -746,6 +766,7 @@ impl Extractor {
                         Ok(result) => result,
                         Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
                     };
+                    stage_timings.archive_read += result.1;
                     let outcome = process_decode_result(
                         result,
                         block_capacity,
@@ -779,13 +800,6 @@ impl Extractor {
                     false,
                     sink,
                 );
-            }
-
-            if let Err(error) = archive.finish_sequential_extract_validation()
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-                abort_ordered_writer(&mut ordered_write_tx);
             }
 
             if submitted != block_capacity && first_error.is_none() {
@@ -833,6 +847,7 @@ impl Extractor {
             Ok(())
         })();
 
+        drop(read_request_tx);
         drop(task_tx);
         if run_result.is_err() || first_error.is_some() {
             abort_ordered_writer(&mut ordered_write_tx);
@@ -840,12 +855,14 @@ impl Extractor {
         drop(ordered_write_tx);
         drop(result_rx);
 
+        let io_reader_result = join_io_reader(io_reader_handle);
         let workers_result = join_decode_workers(worker_handles);
         let ordered_writer_result = join_ordered_writer(ordered_writer_handle);
 
         if let Some(error) = first_error {
             return Err(error);
         }
+        io_reader_result?;
         if let Err(error) = run_result {
             if ordered_writer_disconnected && let Err(writer_error) = ordered_writer_result {
                 return Err(writer_error);
@@ -1001,8 +1018,54 @@ fn apply_directory_restore_stats(
     stage_timings.output_metadata_directories += restore_stats.output_metadata_directories;
 }
 
+fn spawn_io_reader<R>(
+    mut archive: ArchiveReader<R>,
+    read_request_rx: Receiver<ReadRequest>,
+    task_tx: Sender<DecodeTask>,
+    result_tx: Sender<(usize, Duration, Result<DecodedBlock>)>,
+    buffer_pool: Arc<BufferPool>,
+) -> Result<()>
+where
+    R: Read + Seek,
+{
+    while let Ok(request) = read_request_rx.recv() {
+        let read_started = Instant::now();
+        let mut block_data = buffer_pool.acquire();
+        let read_result = archive.read_block_into(request.block_index, block_data.as_mut_vec());
+        let read_elapsed = read_started.elapsed();
+
+        match read_result {
+            Ok(_) => {
+                task_tx
+                    .send(DecodeTask {
+                        index: request.index,
+                        header: request.header,
+                        block_data,
+                        read_elapsed,
+                    })
+                    .map_err(|_| {
+                        crate::OxideError::CompressionError(
+                            "decode queue closed before I/O submission completed".to_string(),
+                        )
+                    })?;
+            }
+            Err(error) => {
+                result_tx
+                    .send((request.index, read_elapsed, Err(error)))
+                    .map_err(|_| {
+                        crate::OxideError::CompressionError(
+                            "decode result channel closed before I/O error delivery".to_string(),
+                        )
+                    })?;
+            }
+        }
+    }
+
+    archive.finish_sequential_extract_validation()
+}
+
 fn receive_decode_result(
-    result_rx: &Receiver<(usize, Result<DecodedBlock>)>,
+    result_rx: &Receiver<(usize, Duration, Result<DecodedBlock>)>,
     stage_timings: &mut ExtractStageTimings,
     total_blocks: usize,
     received_indices: &mut [bool],
@@ -1018,6 +1081,7 @@ fn receive_decode_result(
         )
     })?;
     stage_timings.decode_wait += wait_started.elapsed();
+    stage_timings.archive_read += result.1;
     process_decode_result(
         result,
         total_blocks,
@@ -1030,7 +1094,7 @@ fn receive_decode_result(
 }
 
 fn process_decode_result(
-    (index, block): (usize, Result<DecodedBlock>),
+    (index, _read_elapsed, block): (usize, Duration, Result<DecodedBlock>),
     total_blocks: usize,
     received_indices: &mut [bool],
     runtime_state: &DecodeRuntimeState,
@@ -1149,6 +1213,19 @@ fn join_decode_workers(
     }
     workers.sort_by_key(|worker| worker.worker_id);
     Ok(workers)
+}
+
+fn join_io_reader(handle: thread::JoinHandle<Result<()>>) -> Result<()> {
+    handle.join().map_err(|payload| {
+        let details = if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        crate::OxideError::CompressionError(format!("I/O reader thread panicked: {details}"))
+    })?
 }
 
 fn spawn_ordered_writer<W>(
