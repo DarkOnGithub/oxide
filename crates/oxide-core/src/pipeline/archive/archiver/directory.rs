@@ -44,15 +44,19 @@ where
     let discovery = directory::discover_directory_tree(root)?;
     stage_timings.discovery += discovery_started.elapsed();
     let block_size = config.target_block_size;
-    let file_probe_plans =
-        directory::detect_file_probe_plans(&discovery, config.performance.producer_threads)?;
-    let file_force_raw_storage = file_probe_plans
-        .iter()
-        .map(|plan| plan.force_raw_storage)
-        .collect::<Vec<_>>();
+    let producer_compression_plan = ChunkEncodingPlan::new(config.compression_algo)
+        .with_level(config.performance.compression_level)
+        .with_lzma_extreme(config.performance.lzma_extreme)
+        .with_lzma_dictionary_size(config.performance.lzma_dictionary_size);
+    let file_probe_plans = directory::detect_file_probe_plans(
+        &discovery,
+        block_size,
+        producer_compression_plan,
+        config.performance.producer_threads,
+    )?;
 
     let block_count =
-        directory::estimate_directory_block_count(&discovery, &file_force_raw_storage, block_size)?;
+        directory::estimate_directory_block_count(&discovery, &file_probe_plans, block_size)?;
     let dictionary_bank = train_directory_dictionary_bank(config, &discovery)?;
     let manifest = directory::manifest_from_discovery(&discovery)?
         .with_dictionary_bank(dictionary_bank.clone());
@@ -173,12 +177,8 @@ where
     let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
     let producer_root = discovery.root.clone();
     let producer_files = discovery.files.clone();
-    let producer_force_raw_storage = file_force_raw_storage;
+    let producer_file_probe_plans = file_probe_plans;
     let producer_block_size = block_size;
-    let producer_compression_plan = ChunkEncodingPlan::new(config.compression_algo)
-        .with_level(config.performance.compression_level)
-        .with_lzma_extreme(config.performance.lzma_extreme)
-        .with_lzma_dictionary_size(config.performance.lzma_dictionary_size);
     let stream_read_buffer_size = config.performance.directory_stream_read_buffer_size.max(1);
     let producer_threads = config.performance.producer_threads.max(1);
     let mmap_threshold = config.performance.directory_mmap_threshold_bytes.max(1);
@@ -252,7 +252,9 @@ where
         let mut next_prefetch = 0usize;
         let mut read_buffer = vec![0u8; stream_read_buffer_size];
         for (file_index, file) in producer_files.iter().enumerate() {
-            let force_raw_storage = producer_force_raw_storage[file_index];
+            let file_probe_plan = producer_file_probe_plans[file_index];
+            let force_raw_storage = file_probe_plan.force_raw_storage;
+            let max_block_size = file_probe_plan.max_block_size;
             if let Some(prefetch_tx) = prefetch_request_tx.as_ref() {
                 while next_prefetch < producer_files.len()
                     && next_prefetch <= file_index.saturating_add(prefetch_window)
@@ -297,21 +299,23 @@ where
                 producer_read += prefetched_file.read_elapsed;
                 match prefetched_file.payload {
                     PrefetchPayload::Owned(data) => {
-                        submitter.push_bytes(
+                        submitter.push_bytes_with_limit(
                             &file.full_path,
                             &data,
                             force_raw_storage,
+                            max_block_size,
                             |batch| submit_batch(batch),
                         )?;
                     }
                     PrefetchPayload::Mapped(mmap) => {
                         if let Some(map) = mmap.mapping() {
-                            submitter.push_mapped(
+                            submitter.push_mapped_with_limit(
                                 &file.full_path,
                                 map,
                                 0,
                                 mmap.len(),
                                 force_raw_storage,
+                                max_block_size,
                                 |batch| submit_batch(batch),
                             )?;
                         }
@@ -321,12 +325,13 @@ where
                 let read_started = Instant::now();
                 let mmap = MmapInput::open(&file.full_path)?;
                 if let Some(map) = mmap.mapping() {
-                    submitter.push_mapped(
+                    submitter.push_mapped_with_limit(
                         &file.full_path,
                         map,
                         0,
                         mmap.len(),
                         force_raw_storage,
+                        max_block_size,
                         |batch| submit_batch(batch),
                     )?;
                 }
@@ -341,10 +346,11 @@ where
                         break;
                     }
 
-                    submitter.push_bytes(
+                    submitter.push_bytes_with_limit(
                         &file.full_path,
                         &read_buffer[..read],
                         force_raw_storage,
+                        max_block_size,
                         |batch| submit_batch(batch),
                     )?;
                 }

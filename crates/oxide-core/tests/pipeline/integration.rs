@@ -1290,6 +1290,43 @@ fn directory_dictionary_mode_assigns_extension_dictionary_ids()
     Ok(())
 }
 
+#[test]
+fn directory_archiver_merges_small_compressible_files_into_larger_blocks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    write_directory_file(&source, "01.txt", b"aaaa")?;
+    write_directory_file(&source, "02.txt", b"bbbb")?;
+    write_directory_file(&source, "03.txt", b"cccc")?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(32, 2, buffer_pool, CompressionAlgo::Zstd);
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+
+    assert_eq!(reader.block_count(), 1);
+
+    let restored = tempfile::tempdir()?;
+    pipeline.extract_path(
+        Cursor::new(archive),
+        restored.path(),
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(std::fs::read(restored.path().join("01.txt"))?, b"aaaa");
+    assert_eq!(std::fs::read(restored.path().join("02.txt"))?, b"bbbb");
+    assert_eq!(std::fs::read(restored.path().join("03.txt"))?, b"cccc");
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn extract_path_preserves_file_metadata() -> Result<(), Box<dyn std::error::Error>> {
