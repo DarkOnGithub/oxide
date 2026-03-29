@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt;
 
 use super::lz4::Lz4Scratch;
@@ -52,17 +51,28 @@ impl LzmaScratch {
     }
 }
 
+struct CachedZstdCompressor {
+    level: i32,
+    dictionary_id: u8,
+    compressor: zstd::bulk::Compressor<'static>,
+}
+
+struct CachedZstdDecompressor {
+    dictionary_id: u8,
+    decompressor: zstd::bulk::Decompressor<'static>,
+}
+
 pub(crate) struct ZstdScratch {
-    compressors: HashMap<(i32, u8), zstd::bulk::Compressor<'static>>,
-    decompressors: HashMap<u8, zstd::bulk::Decompressor<'static>>,
+    compressors: Vec<CachedZstdCompressor>,
+    decompressors: Vec<CachedZstdDecompressor>,
     output: Vec<u8>,
 }
 
 impl Default for ZstdScratch {
     fn default() -> Self {
         Self {
-            compressors: HashMap::new(),
-            decompressors: HashMap::new(),
+            compressors: Vec::new(),
+            decompressors: Vec::new(),
             output: Vec::new(),
         }
     }
@@ -85,21 +95,33 @@ impl ZstdScratch {
         dictionary_id: u8,
         dictionary: Option<&[u8]>,
     ) -> Result<&mut zstd::bulk::Compressor<'static>> {
-        let key = (level, dictionary_id);
-        if !self.compressors.contains_key(&key) {
+        if let Some(index) = self
+            .compressors
+            .iter()
+            .position(|cached| cached.level == level && cached.dictionary_id == dictionary_id)
+        {
+            return Ok(&mut self.compressors[index].compressor);
+        }
+
+        {
             let compressor =
                 zstd::bulk::Compressor::with_dictionary(level, dictionary.unwrap_or(&[])).map_err(
                     |err| {
                         OxideError::CompressionError(format!("zstd compressor init failed: {err}"))
                     },
                 )?;
-            self.compressors.insert(key, compressor);
+            self.compressors.push(CachedZstdCompressor {
+                level,
+                dictionary_id,
+                compressor,
+            });
         }
 
-        Ok(self
+        Ok(&mut self
             .compressors
-            .get_mut(&key)
-            .expect("compressor initialized before return"))
+            .last_mut()
+            .expect("compressor initialized before return")
+            .compressor)
     }
 
     pub(crate) fn decompressor(
@@ -107,18 +129,30 @@ impl ZstdScratch {
         dictionary_id: u8,
         dictionary: Option<&[u8]>,
     ) -> Result<&mut zstd::bulk::Decompressor<'static>> {
-        if !self.decompressors.contains_key(&dictionary_id) {
+        if let Some(index) = self
+            .decompressors
+            .iter()
+            .position(|cached| cached.dictionary_id == dictionary_id)
+        {
+            return Ok(&mut self.decompressors[index].decompressor);
+        }
+
+        {
             let decompressor = zstd::bulk::Decompressor::with_dictionary(dictionary.unwrap_or(&[]))
                 .map_err(|err| {
                     OxideError::DecompressionError(format!("zstd decompressor init failed: {err}"))
                 })?;
-            self.decompressors.insert(dictionary_id, decompressor);
+            self.decompressors.push(CachedZstdDecompressor {
+                dictionary_id,
+                decompressor,
+            });
         }
 
-        Ok(self
+        Ok(&mut self
             .decompressors
-            .get_mut(&dictionary_id)
-            .expect("decompressor initialized before return"))
+            .last_mut()
+            .expect("decompressor initialized before return")
+            .decompressor)
     }
 
     pub(crate) fn allocated_bytes(&self) -> usize {

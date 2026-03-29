@@ -120,8 +120,14 @@ fn lzma_probe_is_now_enabled() {
     let regular_config = compression_probe_config(regular);
     let extreme_config = compression_probe_config(extreme);
 
-    assert_eq!(regular_config.min_source_len, INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN);
-    assert_eq!(extreme_config.min_source_len, INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN);
+    assert_eq!(
+        regular_config.min_source_len,
+        INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN
+    );
+    assert_eq!(
+        extreme_config.min_source_len,
+        INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN
+    );
     assert!(regular_config.sample_len < INCOMPRESSIBLE_PROBE_SAMPLE_LEN);
     assert_eq!(regular_config.sample_len, extreme_config.sample_len);
     assert!(should_skip_full_compression_probe(
