@@ -28,6 +28,9 @@ use super::telemetry;
 use super::types::PreparedInput;
 use crate::telemetry::{ArchivePlanningCompleteEvent, TelemetryEvent};
 
+const AUTO_DICTIONARY_MIN_BATCHES: usize = 8;
+const AUTO_DICTIONARY_MAX_AVG_BATCH_BYTES: usize = 128 * 1024;
+
 pub struct Archiver<'a> {
     pub config: &'a ArchivePipelineConfig,
 }
@@ -259,14 +262,16 @@ fn train_file_dictionary_bank(
         return Ok(dictionary_bank.clone());
     }
 
-    if config.skip_compression
-        || config.compression_algo != crate::CompressionAlgo::Zstd
-        || config.performance.dictionary_mode == ArchiveDictionaryMode::Off
-    {
+    if config.skip_compression || config.compression_algo != crate::CompressionAlgo::Zstd {
         return Ok(ArchiveDictionaryBank::default());
     }
 
-    let mut trainer = DictionaryTrainer::new(config.performance.dictionary_mode);
+    let dictionary_mode = effective_file_dictionary_mode(config, batches);
+    if dictionary_mode == ArchiveDictionaryMode::Off {
+        return Ok(ArchiveDictionaryBank::default());
+    }
+
+    let mut trainer = DictionaryTrainer::new(dictionary_mode);
     for batch in batches {
         trainer.observe_with_path(&batch.source_path, batch.data());
     }
@@ -275,4 +280,25 @@ fn train_file_dictionary_bank(
         config.compression_algo,
         config.performance.compression_level,
     )
+}
+
+fn effective_file_dictionary_mode(
+    config: &ArchivePipelineConfig,
+    batches: &[crate::Batch],
+) -> ArchiveDictionaryMode {
+    if config.performance.dictionary_mode != ArchiveDictionaryMode::Auto {
+        return config.performance.dictionary_mode;
+    }
+
+    if batches.len() < AUTO_DICTIONARY_MIN_BATCHES {
+        return ArchiveDictionaryMode::Off;
+    }
+
+    let total_bytes = batches.iter().map(|batch| batch.len()).sum::<usize>();
+    let avg_batch_bytes = total_bytes / batches.len().max(1);
+    if avg_batch_bytes > AUTO_DICTIONARY_MAX_AVG_BATCH_BYTES {
+        return ArchiveDictionaryMode::Off;
+    }
+
+    ArchiveDictionaryMode::Auto
 }

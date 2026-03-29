@@ -1267,6 +1267,32 @@ fn directory_dictionary_mode_assigns_sample_based_dictionary_ids(
 }
 
 #[test]
+fn directory_dictionary_mode_skips_large_file_heavy_inputs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    let payload = build_text_fixture(256 * 1024);
+    for index in 0..4 {
+        write_directory_file(&source, &format!("nested/{index:02}.json"), &payload)?;
+    }
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_dictionary_pipeline(256 * 1024, 2, buffer_pool);
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let reader = ArchiveReader::new(Cursor::new(archive))?;
+
+    assert!(reader.manifest().dictionary_bank().is_empty());
+
+    Ok(())
+}
+
+#[test]
 fn directory_archiver_merges_small_compressible_files_into_larger_blocks(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
