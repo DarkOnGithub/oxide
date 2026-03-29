@@ -36,7 +36,7 @@ struct CompressionProbeConfig {
 fn compression_probe_config(plan: crate::types::ChunkEncodingPlan) -> CompressionProbeConfig {
     match plan.algo {
         CompressionAlgo::Lz4 => CompressionProbeConfig {
-            min_source_len: usize::MAX,
+            min_source_len: INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN,
             sample_len: INCOMPRESSIBLE_PROBE_SAMPLE_LEN,
         },
         CompressionAlgo::Zstd => CompressionProbeConfig {
@@ -44,11 +44,11 @@ fn compression_probe_config(plan: crate::types::ChunkEncodingPlan) -> Compressio
             sample_len: INCOMPRESSIBLE_PROBE_SAMPLE_LEN,
         },
         CompressionAlgo::Lzma if plan.lzma_extreme => CompressionProbeConfig {
-            min_source_len: usize::MAX,
+            min_source_len: INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN,
             sample_len: LZMA_PROBE_SAMPLE_LEN,
         },
         CompressionAlgo::Lzma => CompressionProbeConfig {
-            min_source_len: usize::MAX,
+            min_source_len: INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN,
             sample_len: LZMA_PROBE_SAMPLE_LEN,
         },
     }
