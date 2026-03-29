@@ -1,4 +1,3 @@
-use std::io::Cursor;
 
 use super::scratch::ZstdScratch;
 use crate::{OxideError, Result};
@@ -111,10 +110,20 @@ pub(crate) fn reverse_into_vec(
             Ok(())
         }
         None => {
-            let decoded = zstd::stream::decode_all(Cursor::new(data)).map_err(|err| {
-                OxideError::DecompressionError(format!("zstd decode failed: {err}"))
-            })?;
-            output.extend_from_slice(&decoded);
+            // Use frame content size to pre-allocate when available, then
+            // decode directly into the output buffer to avoid a temporary Vec.
+            if let Ok(Some(content_size)) = zstd::zstd_safe::get_frame_content_size(data) {
+                let size = content_size as usize;
+                if output.capacity() < size {
+                    output.reserve(size - output.len());
+                }
+            }
+            scratch
+                .decompressor(dictionary_id, dictionary)?
+                .decompress_to_buffer(data, output)
+                .map_err(|err| {
+                    OxideError::DecompressionError(format!("zstd decode failed: {err}"))
+                })?;
             Ok(())
         }
     }
