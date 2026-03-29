@@ -107,7 +107,8 @@ fn is_likely_incompressible_sample(
         return Ok(true);
     }
 
-    let selected_dictionary = dictionary_bank.select_for_chunk(plan.algo, &source[..sample_len]);
+    let selected_dictionary =
+        dictionary_bank.select_for_chunk(plan.algo, &source[..sample_len], None);
     let probe = apply_compression_request_with_scratch(
         CompressionRequest {
             data: &source[..sample_len],
@@ -141,6 +142,7 @@ pub fn process_batch(
 ) -> Result<CompressedBlock> {
     let Batch {
         id,
+        source_path,
         data,
         stream_id,
         compression_plan: plan,
@@ -189,7 +191,8 @@ pub fn process_batch(
         ));
     }
 
-    let selected_dictionary = dictionary_bank.select_for_chunk(plan.algo, source);
+    let selected_dictionary =
+        dictionary_bank.select_for_chunk(plan.algo, source, Some(&source_path));
     let dictionary_id = selected_dictionary
         .map(|dictionary| dictionary.id)
         .unwrap_or(0);

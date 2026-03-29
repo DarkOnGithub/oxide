@@ -1,4 +1,8 @@
-use super::{ArchiveDictionaryMode, DictionaryClass, DictionaryTrainer, classify_sample};
+use std::path::Path;
+
+use super::{
+    ArchiveDictionaryMode, DictionaryClass, DictionaryTrainer, classify_path, classify_sample,
+};
 use crate::CompressionAlgo;
 
 #[test]
@@ -25,8 +29,35 @@ fn trainer_builds_zstd_dictionary_bank_when_samples_are_available() {
         .expect("dictionary bank should build");
 
     assert!(!bank.is_empty());
-    assert!(
-        bank.dictionary(DictionaryClass::StructuredText.id(), CompressionAlgo::Zstd)
-            .is_some()
+    assert!(bank.dictionaries().iter().any(|dictionary| {
+        dictionary.algo == CompressionAlgo::Zstd
+            && dictionary.class == DictionaryClass::StructuredText
+    }));
+}
+
+#[test]
+fn classify_path_detects_normalized_extension_dictionary_class() {
+    assert_eq!(
+        classify_path(Path::new("nested/INDEX.HTML")),
+        Some(DictionaryClass::Extension("html".to_string()))
     );
+}
+
+#[test]
+fn trainer_groups_samples_by_extension() {
+    let mut trainer = DictionaryTrainer::new(ArchiveDictionaryMode::Auto);
+    for _ in 0..16 {
+        trainer.observe_path(
+            br#"{"kind":"log","message":"banana bandana banana"}"#,
+            Path::new("nested/data.json"),
+        );
+    }
+
+    let bank = trainer
+        .build(CompressionAlgo::Zstd, Some(6))
+        .expect("dictionary bank should build");
+
+    assert!(bank.dictionaries().iter().any(|dictionary| {
+        dictionary.class == DictionaryClass::Extension("json".to_string()) && dictionary.id != 0
+    }));
 }

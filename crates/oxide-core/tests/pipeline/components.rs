@@ -71,7 +71,7 @@ mod directory_tests {
         let mut batches = Vec::new();
 
         submitter
-            .push_bytes(b"aaaaaabbbbbb", false, |batch| {
+            .push_bytes("root/data.txt", b"aaaaaabbbbbb", false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
@@ -96,13 +96,13 @@ mod directory_tests {
         let mut batches = Vec::new();
 
         submitter
-            .push_bytes(b"aaaaaa", false, |batch| {
+            .push_bytes("root/a.txt", b"aaaaaa", false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
             .expect("first push should succeed");
         submitter
-            .push_bytes(b"bbbbbb", true, |batch| {
+            .push_bytes("root/b.txt", b"bbbbbb", true, |batch| {
                 batches.push(batch);
                 Ok(())
             })
@@ -131,6 +131,15 @@ mod directory_tests {
     }
 
     #[test]
+    fn block_count_planner_flushes_on_extension_change() {
+        let mut planner = BlockCountPlanner::new(8);
+        planner.push_file(std::path::Path::new("root/a.json"), 4, false);
+        planner.push_file(std::path::Path::new("root/b.html"), 4, false);
+
+        assert_eq!(planner.finish(), 2);
+    }
+
+    #[test]
     fn submitter_uses_mapped_batches_for_full_mmap_sized_blocks() {
         let temp = tempdir().expect("tempdir");
         let file_path = temp.path().join("payload.bin");
@@ -142,7 +151,7 @@ mod directory_tests {
         let mut batches = Vec::new();
 
         submitter
-            .push_mapped(map, 0, mmap.len(), false, |batch| {
+            .push_mapped(&file_path, map, 0, mmap.len(), false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
@@ -175,13 +184,13 @@ mod directory_tests {
         let mut batches = Vec::new();
 
         submitter
-            .push_bytes(b"ab", false, |batch| {
+            .push_bytes("root/prefix.bin", b"ab", false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
             .expect("owned push should succeed");
         submitter
-            .push_mapped(map, 0, mmap.len(), false, |batch| {
+            .push_mapped(&file_path, map, 0, mmap.len(), false, |batch| {
                 batches.push(batch);
                 Ok(())
             })
@@ -198,5 +207,36 @@ mod directory_tests {
         assert!(matches!(batches[1].data, BatchData::Mapped { .. }));
         assert_eq!(batches[0].data.as_slice(), b"abcd");
         assert_eq!(batches[1].data.as_slice(), b"efgh");
+    }
+
+    #[test]
+    fn submitter_flushes_when_extension_changes() {
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8);
+        let mut batches = Vec::new();
+
+        submitter
+            .push_bytes("root/a.json", b"aaaa", false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("first push should succeed");
+        submitter
+            .push_bytes("root/b.html", b"bbbb", false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("second push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].source_path, PathBuf::from("root/a.json"));
+        assert_eq!(batches[1].source_path, PathBuf::from("root/b.html"));
+        assert_eq!(batches[0].data.as_slice(), b"aaaa");
+        assert_eq!(batches[1].data.as_slice(), b"bbbb");
     }
 }

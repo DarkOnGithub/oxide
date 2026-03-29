@@ -297,12 +297,17 @@ where
                 producer_read += prefetched_file.read_elapsed;
                 match prefetched_file.payload {
                     PrefetchPayload::Owned(data) => {
-                        submitter
-                            .push_bytes(&data, force_raw_storage, |batch| submit_batch(batch))?;
+                        submitter.push_bytes(
+                            &file.full_path,
+                            &data,
+                            force_raw_storage,
+                            |batch| submit_batch(batch),
+                        )?;
                     }
                     PrefetchPayload::Mapped(mmap) => {
                         if let Some(map) = mmap.mapping() {
                             submitter.push_mapped(
+                                &file.full_path,
                                 map,
                                 0,
                                 mmap.len(),
@@ -316,9 +321,14 @@ where
                 let read_started = Instant::now();
                 let mmap = MmapInput::open(&file.full_path)?;
                 if let Some(map) = mmap.mapping() {
-                    submitter.push_mapped(map, 0, mmap.len(), force_raw_storage, |batch| {
-                        submit_batch(batch)
-                    })?;
+                    submitter.push_mapped(
+                        &file.full_path,
+                        map,
+                        0,
+                        mmap.len(),
+                        force_raw_storage,
+                        |batch| submit_batch(batch),
+                    )?;
                 }
                 producer_read += read_started.elapsed();
             } else {
@@ -331,9 +341,12 @@ where
                         break;
                     }
 
-                    submitter.push_bytes(&read_buffer[..read], force_raw_storage, |batch| {
-                        submit_batch(batch)
-                    })?;
+                    submitter.push_bytes(
+                        &file.full_path,
+                        &read_buffer[..read],
+                        force_raw_storage,
+                        |batch| submit_batch(batch),
+                    )?;
                 }
             }
 
@@ -920,7 +933,7 @@ fn train_directory_dictionary_bank(
             Ok(read) => read,
             Err(_) => continue,
         };
-        trainer.observe(&sample[..read]);
+        trainer.observe_path(&sample[..read], &file.full_path);
     }
 
     trainer.build(

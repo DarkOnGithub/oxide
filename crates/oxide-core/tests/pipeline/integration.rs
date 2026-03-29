@@ -5,8 +5,8 @@ use std::time::Duration;
 use oxide_core::{
     ArchiveDictionaryMode, ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig,
     ArchiveProgressEvent, ArchiveReader, BufferPool, CHUNK_TABLE_HEADER_SIZE, CompressionAlgo,
-    ExtractProgressEvent, FOOTER_SIZE, ReportValue, RunTelemetryOptions, TelemetryEvent,
-    TelemetrySink,
+    DictionaryClass, ExtractProgressEvent, FOOTER_SIZE, ReportValue, RunTelemetryOptions,
+    TelemetryEvent, TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
 
@@ -1221,6 +1221,71 @@ fn zstd_dictionary_mode_embeds_dictionary_bank_and_round_trips()
     let (restored, _report) =
         pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
     assert_eq!(restored, data);
+
+    Ok(())
+}
+
+#[test]
+fn directory_dictionary_mode_assigns_extension_dictionary_ids()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    for index in 0..16 {
+        write_directory_file(
+            &source,
+            &format!("nested/{index:02}.json"),
+            br#"{"kind":"log","message":"banana bandana banana"}"#,
+        )?;
+    }
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_dictionary_pipeline(8 * 1024, 2, buffer_pool);
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let mut reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+
+    assert!(
+        reader
+            .manifest()
+            .dictionary_bank()
+            .dictionaries()
+            .iter()
+            .any(|dictionary| {
+                dictionary.class == DictionaryClass::Extension("json".to_string())
+                    && dictionary.id != 0
+            })
+    );
+    let mut saw_dictionary_id = false;
+    for index in 0..reader.block_count() {
+        let (descriptor, _payload) = reader.read_block(index)?;
+        saw_dictionary_id |= descriptor.dictionary_id != 0;
+    }
+    assert!(saw_dictionary_id);
+
+    let restored = tempfile::tempdir()?;
+    pipeline.extract_path(
+        Cursor::new(archive),
+        restored.path(),
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    for index in 0..16 {
+        assert_eq!(
+            std::fs::read(
+                restored
+                    .path()
+                    .join("nested")
+                    .join(format!("{index:02}.json"))
+            )?,
+            br#"{"kind":"log","message":"banana bandana banana"}"#
+        );
+    }
 
     Ok(())
 }

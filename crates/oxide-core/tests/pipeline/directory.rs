@@ -99,7 +99,7 @@ fn probe_plan_uses_extension_based_raw_storage() {
 }
 
 #[test]
-fn block_count_without_raw_boundaries_uses_total_bytes_only() {
+fn block_count_accounts_for_extension_boundaries() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
     fs::write(root.join("alpha.txt"), b"alpha\n").expect("write alpha");
@@ -109,7 +109,7 @@ fn block_count_without_raw_boundaries_uses_total_bytes_only() {
     let raw_plan = vec![false; discovery.files.len()];
     let block_count = estimate_directory_block_count(&discovery, &raw_plan, 4).expect("plan");
 
-    assert_eq!(block_count, 3);
+    assert_eq!(block_count, 4);
 }
 
 #[test]
