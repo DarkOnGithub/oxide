@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 
 use super::lz4::Lz4Scratch;
@@ -52,22 +53,16 @@ impl LzmaScratch {
 }
 
 pub(crate) struct ZstdScratch {
-    compressor: Option<zstd::bulk::Compressor<'static>>,
-    compressor_level: Option<i32>,
-    compressor_dictionary_id: u8,
-    decompressor: Option<zstd::bulk::Decompressor<'static>>,
-    decompressor_dictionary_id: u8,
+    compressors: HashMap<(i32, u8), zstd::bulk::Compressor<'static>>,
+    decompressors: HashMap<u8, zstd::bulk::Decompressor<'static>>,
     output: Vec<u8>,
 }
 
 impl Default for ZstdScratch {
     fn default() -> Self {
         Self {
-            compressor: None,
-            compressor_level: None,
-            compressor_dictionary_id: 0,
-            decompressor: None,
-            decompressor_dictionary_id: 0,
+            compressors: HashMap::new(),
+            decompressors: HashMap::new(),
             output: Vec::new(),
         }
     }
@@ -76,14 +71,8 @@ impl Default for ZstdScratch {
 impl fmt::Debug for ZstdScratch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ZstdScratch")
-            .field("compressor_initialized", &self.compressor.is_some())
-            .field("compressor_level", &self.compressor_level)
-            .field("compressor_dictionary_id", &self.compressor_dictionary_id)
-            .field("decompressor_initialized", &self.decompressor.is_some())
-            .field(
-                "decompressor_dictionary_id",
-                &self.decompressor_dictionary_id,
-            )
+            .field("compressors_cached", &self.compressors.len())
+            .field("decompressors_cached", &self.decompressors.len())
             .field("output_capacity", &self.output.capacity())
             .finish()
     }
@@ -96,35 +85,20 @@ impl ZstdScratch {
         dictionary_id: u8,
         dictionary: Option<&[u8]>,
     ) -> Result<&mut zstd::bulk::Compressor<'static>> {
-        if self.compressor.is_none() {
+        let key = (level, dictionary_id);
+        if !self.compressors.contains_key(&key) {
             let compressor =
                 zstd::bulk::Compressor::with_dictionary(level, dictionary.unwrap_or(&[])).map_err(
                     |err| {
                         OxideError::CompressionError(format!("zstd compressor init failed: {err}"))
                     },
                 )?;
-            self.compressor = Some(compressor);
-            self.compressor_level = Some(level);
-            self.compressor_dictionary_id = dictionary_id;
-        } else if self.compressor_level != Some(level)
-            || self.compressor_dictionary_id != dictionary_id
-        {
-            self.compressor
-                .as_mut()
-                .expect("checked is_some above")
-                .set_dictionary(level, dictionary.unwrap_or(&[]))
-                .map_err(|err| {
-                    OxideError::CompressionError(format!(
-                        "zstd compressor reconfigure failed: {err}"
-                    ))
-                })?;
-            self.compressor_level = Some(level);
-            self.compressor_dictionary_id = dictionary_id;
+            self.compressors.insert(key, compressor);
         }
 
         Ok(self
-            .compressor
-            .as_mut()
+            .compressors
+            .get_mut(&key)
             .expect("compressor initialized before return"))
     }
 
@@ -133,29 +107,17 @@ impl ZstdScratch {
         dictionary_id: u8,
         dictionary: Option<&[u8]>,
     ) -> Result<&mut zstd::bulk::Decompressor<'static>> {
-        if self.decompressor.is_none() {
+        if !self.decompressors.contains_key(&dictionary_id) {
             let decompressor = zstd::bulk::Decompressor::with_dictionary(dictionary.unwrap_or(&[]))
                 .map_err(|err| {
                     OxideError::DecompressionError(format!("zstd decompressor init failed: {err}"))
                 })?;
-            self.decompressor = Some(decompressor);
-            self.decompressor_dictionary_id = dictionary_id;
-        } else if self.decompressor_dictionary_id != dictionary_id {
-            self.decompressor
-                .as_mut()
-                .expect("checked is_some above")
-                .set_dictionary(dictionary.unwrap_or(&[]))
-                .map_err(|err| {
-                    OxideError::DecompressionError(format!(
-                        "zstd decompressor reconfigure failed: {err}"
-                    ))
-                })?;
-            self.decompressor_dictionary_id = dictionary_id;
+            self.decompressors.insert(dictionary_id, decompressor);
         }
 
         Ok(self
-            .decompressor
-            .as_mut()
+            .decompressors
+            .get_mut(&dictionary_id)
             .expect("decompressor initialized before return"))
     }
 
