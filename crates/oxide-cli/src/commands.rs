@@ -4,13 +4,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oxide_core::{
-    ArchivePipeline, ArchivePipelineConfig, BufferPool, CompressionAlgo,
+    ArchivePipeline, ArchivePipelineConfig, BufferPool, ChunkingPolicy, CompressionAlgo,
     PipelinePerformanceOptions, RunTelemetryOptions,
 };
 
 use crate::AppResult;
 use crate::cli::{
-    ArchiveArgs, ExtractArgs, TreeArgs, default_extract_output_path, default_output_path,
+    ArchiveArgs, ChunkingArg, ExtractArgs, TreeArgs, default_extract_output_path,
+    default_output_path,
 };
 use crate::presets::{ArchiveOverrides, ResolvedArchiveSettings, resolve_archive_settings};
 use crate::progress::{ArchiveCliSink, ExtractCliSink, LiveRateStats};
@@ -26,6 +27,9 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         input,
         output,
         block_size,
+        chunking,
+        min_block_size,
+        max_block_size,
         workers,
         compression,
         skip_compression,
@@ -89,6 +93,9 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         &settings,
         compression_workers,
         producer_threads,
+        chunking,
+        min_block_size,
+        max_block_size,
         Arc::clone(&buffer_pool),
     );
     let output_file = File::create(&output_path)?;
@@ -218,6 +225,9 @@ fn build_archive_pipeline(
     settings: &ResolvedArchiveSettings,
     workers: usize,
     producer_threads: usize,
+    chunking: Option<ChunkingArg>,
+    min_block_size: Option<usize>,
+    max_block_size: Option<usize>,
     buffer_pool: Arc<BufferPool>,
 ) -> ArchivePipeline {
     let mut performance = PipelinePerformanceOptions::default();
@@ -239,9 +249,31 @@ fn build_archive_pipeline(
         buffer_pool,
         settings.compression,
     );
+    config.chunking_policy = resolve_chunking_policy(
+        settings.block_size.max(1),
+        chunking.unwrap_or(ChunkingArg::Fixed),
+        min_block_size,
+        max_block_size,
+    );
     config.skip_compression = settings.skip_compression;
     config.performance = performance;
     ArchivePipeline::new(config)
+}
+
+fn resolve_chunking_policy(
+    target_block_size: usize,
+    chunking: ChunkingArg,
+    min_block_size: Option<usize>,
+    max_block_size: Option<usize>,
+) -> ChunkingPolicy {
+    match chunking {
+        ChunkingArg::Fixed => ChunkingPolicy::fixed_for_target(target_block_size),
+        ChunkingArg::Cdc => ChunkingPolicy::cdc(
+            target_block_size,
+            min_block_size.unwrap_or((target_block_size / 4).max(1)),
+            max_block_size.unwrap_or(target_block_size.saturating_mul(2).max(target_block_size)),
+        ),
+    }
 }
 
 fn build_extract_pipeline(workers: usize) -> ArchivePipeline {

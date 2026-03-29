@@ -2,7 +2,7 @@ use crate::dictionary::{ArchiveDictionaryBank, ArchiveDictionaryMode, Dictionary
 use crate::format::{
     ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter, should_force_raw_storage,
 };
-use crate::io::{ChunkingPolicy, InputScanner};
+use crate::io::InputScanner;
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
 use crate::telemetry::{ArchiveRun, RunTelemetryOptions, TelemetrySink};
 use crate::types::ChunkEncodingPlan;
@@ -222,7 +222,7 @@ impl<'a> Archiver<'a> {
 
     pub fn prepare_file(&self, path: &Path, block_size: usize) -> Result<PreparedInput> {
         let scanner = InputScanner::with_chunking_policy_and_plan(
-            ChunkingPolicy::fixed_for_target(block_size),
+            self.config.chunking_policy,
             ChunkEncodingPlan::new(self.config.compression_algo)
                 .with_level(self.config.performance.compression_level)
                 .with_lzma_extreme(self.config.performance.lzma_extreme)

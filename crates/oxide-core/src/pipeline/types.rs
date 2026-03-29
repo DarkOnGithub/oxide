@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::buffer::BufferPool;
 use crate::dictionary::ArchiveDictionaryMode;
+use crate::io::ChunkingPolicy;
 use crate::types::CompressionAlgo;
 
 /// Indicates whether the archive source is a single file or a directory.
@@ -289,6 +290,8 @@ impl Default for PipelinePerformanceOptions {
 pub struct ArchivePipelineConfig {
     /// Target size for data blocks.
     pub target_block_size: usize,
+    /// Chunking policy used when splitting file input into blocks.
+    pub chunking_policy: ChunkingPolicy,
     /// Number of parallel workers.
     pub workers: usize,
     /// Shared buffer pool for memory management.
@@ -311,6 +314,7 @@ impl ArchivePipelineConfig {
     ) -> Self {
         Self {
             target_block_size,
+            chunking_policy: ChunkingPolicy::fixed_for_target(target_block_size),
             workers,
             buffer_pool,
             compression_algo,
