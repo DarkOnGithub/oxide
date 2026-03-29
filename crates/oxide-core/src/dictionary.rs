@@ -142,6 +142,20 @@ impl DictionaryTrainer {
         self.observe_class(sample, classify_sample(sample));
     }
 
+    pub fn observe_with_path<P>(&mut self, path: P, sample: &[u8])
+    where
+        P: AsRef<Path>,
+    {
+        let sample_class = classify_sample(sample);
+        self.observe_class(sample, sample_class.clone());
+
+        if let Some(path_class) = classify_path(path.as_ref()) {
+            if path_class != sample_class {
+                self.observe_class(sample, path_class);
+            }
+        }
+    }
+
     fn observe_class(&mut self, sample: &[u8], class: DictionaryClass) {
         if self.mode == ArchiveDictionaryMode::Off || sample.is_empty() {
             return;

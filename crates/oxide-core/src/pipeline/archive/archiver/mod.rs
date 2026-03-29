@@ -1,6 +1,6 @@
 use crate::dictionary::{ArchiveDictionaryBank, ArchiveDictionaryMode, DictionaryTrainer};
 use crate::format::{
-    ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter, should_force_raw_storage,
+    should_force_raw_storage, ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter,
 };
 use crate::io::InputScanner;
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
@@ -268,7 +268,7 @@ fn train_file_dictionary_bank(
 
     let mut trainer = DictionaryTrainer::new(config.performance.dictionary_mode);
     for batch in batches {
-        trainer.observe(batch.data());
+        trainer.observe_with_path(&batch.source_path, batch.data());
     }
 
     trainer.build(
