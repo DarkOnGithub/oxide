@@ -123,8 +123,18 @@ mod directory_tests {
     #[test]
     fn block_count_planner_flushes_on_raw_storage_policy_change() {
         let mut planner = BlockCountPlanner::new(8);
-        planner.push_len(6, false);
-        planner.push_len(6, true);
+        planner.push_len("root/a.txt", 6, false);
+        planner.push_len("root/b.jpg", 6, true);
+
+        assert_eq!(planner.finish(), 2);
+    }
+
+    #[test]
+    fn block_count_planner_flushes_zstd_batches_when_extension_changes() {
+        let mut planner =
+            BlockCountPlanner::new_with_plan(8, ChunkEncodingPlan::new(CompressionAlgo::Zstd));
+        planner.push_len("root/a.json", 4, false);
+        planner.push_len("root/b.html", 4, false);
 
         assert_eq!(planner.finish(), 2);
     }
