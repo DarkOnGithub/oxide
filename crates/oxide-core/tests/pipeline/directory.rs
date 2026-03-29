@@ -145,6 +145,7 @@ fn block_count_uses_fixed_size_blocks_without_extension_boundaries() {
             },
         ],
         4,
+        ChunkEncodingPlan::new(CompressionAlgo::Lz4),
     )
     .expect("plan");
 
@@ -170,6 +171,7 @@ fn block_count_accounts_for_raw_storage_policy_changes() {
             },
         ],
         8,
+        ChunkEncodingPlan::new(CompressionAlgo::Lz4),
     )
     .expect("plan");
 
@@ -199,6 +201,33 @@ fn block_count_does_not_merge_past_fixed_target_when_limit_is_larger() {
             },
         ],
         8,
+        ChunkEncodingPlan::new(CompressionAlgo::Lz4),
+    )
+    .expect("plan");
+
+    assert_eq!(block_count, 2);
+}
+
+#[test]
+fn block_count_accounts_for_zstd_extension_boundaries() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    fs::write(root.join("a.json"), b"aaaa").expect("write first");
+    fs::write(root.join("b.html"), b"bbbb").expect("write second");
+
+    let discovery = discover_directory_tree(root).expect("discover directory");
+    let block_count = estimate_directory_block_count(
+        &discovery,
+        &[
+            FileProbePlan {
+                force_raw_storage: false,
+            },
+            FileProbePlan {
+                force_raw_storage: false,
+            },
+        ],
+        8,
+        ChunkEncodingPlan::new(CompressionAlgo::Zstd),
     )
     .expect("plan");
 

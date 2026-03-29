@@ -450,6 +450,7 @@ pub(super) fn estimate_directory_block_count(
     discovery: &DirectoryDiscovery,
     file_probe_plans: &[FileProbePlan],
     block_size: usize,
+    compression_plan: ChunkEncodingPlan,
 ) -> Result<u32> {
     if discovery.files.len() != file_probe_plans.len() {
         return Err(crate::OxideError::InvalidFormat(
@@ -457,18 +458,15 @@ pub(super) fn estimate_directory_block_count(
         ));
     }
 
-    if file_probe_plans.iter().all(|plan| !plan.force_raw_storage) {
-        let block_size = block_size.max(1) as u64;
-        let block_count = discovery.input_bytes_total.div_ceil(block_size);
-        return u32::try_from(block_count)
-            .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v2"));
-    }
-
-    let mut planner = BlockCountPlanner::new(block_size);
+    let mut planner = BlockCountPlanner::new_with_plan(block_size, compression_plan);
     for (index, file) in discovery.files.iter().enumerate() {
         let file_size = usize::try_from(file.size)
             .map_err(|_| crate::OxideError::InvalidFormat("file size exceeds usize range"))?;
-        planner.push_len(file_size, file_probe_plans[index].force_raw_storage);
+        planner.push_len(
+            &file.full_path,
+            file_size,
+            file_probe_plans[index].force_raw_storage,
+        );
     }
 
     u32::try_from(planner.finish())
@@ -528,32 +526,52 @@ fn metadata_gid(_: &fs::Metadata) -> u32 {
 #[derive(Debug, Clone)]
 pub struct BlockCountPlanner {
     block_size: usize,
+    compression_plan: ChunkEncodingPlan,
     blocks: usize,
     pending_len: usize,
     pending_force_raw_storage: Option<bool>,
+    pending_extension: Option<String>,
 }
 
 impl BlockCountPlanner {
     pub fn new(block_size: usize) -> Self {
+        Self::new_with_plan(block_size, ChunkEncodingPlan::default())
+    }
+
+    pub fn new_with_plan(block_size: usize, compression_plan: ChunkEncodingPlan) -> Self {
         Self {
             block_size: block_size.max(1),
+            compression_plan,
             blocks: 0,
             pending_len: 0,
             pending_force_raw_storage: None,
+            pending_extension: None,
         }
     }
 
-    pub fn push_len(&mut self, mut len: usize, force_raw_storage: bool) {
+    pub fn push_len<P>(&mut self, source_path: P, mut len: usize, force_raw_storage: bool)
+    where
+        P: AsRef<Path>,
+    {
+        let source_path = source_path.as_ref();
         while len > 0 {
             match self.pending_force_raw_storage {
                 Some(current) if current != force_raw_storage => {
                     self.flush_pending();
                     self.pending_force_raw_storage = Some(force_raw_storage);
+                    self.pending_extension = normalized_extension_from_path(source_path);
                 }
                 Some(_) => {}
                 None => {
                     self.pending_force_raw_storage = Some(force_raw_storage);
+                    self.pending_extension = normalized_extension_from_path(source_path);
                 }
+            }
+
+            if self.should_flush_for_source_path(source_path) {
+                self.flush_pending();
+                self.pending_force_raw_storage = Some(force_raw_storage);
+                self.pending_extension = normalized_extension_from_path(source_path);
             }
 
             let room = self.block_size.saturating_sub(self.pending_len).max(1);
@@ -577,7 +595,16 @@ impl BlockCountPlanner {
             self.blocks += 1;
             self.pending_len = 0;
             self.pending_force_raw_storage = None;
+            self.pending_extension = None;
         }
+    }
+
+    fn should_flush_for_source_path(&self, source_path: &Path) -> bool {
+        if self.pending_len == 0 || self.compression_plan.algo != CompressionAlgo::Zstd {
+            return false;
+        }
+
+        normalized_extension_from_path(source_path) != self.pending_extension
     }
 }
 

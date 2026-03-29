@@ -59,8 +59,12 @@ where
         config.performance.producer_threads,
     )?;
 
-    let block_count =
-        directory::estimate_directory_block_count(&discovery, &file_probe_plans, block_size)?;
+    let block_count = directory::estimate_directory_block_count(
+        &discovery,
+        &file_probe_plans,
+        block_size,
+        producer_compression_plan,
+    )?;
     let dictionary_bank = train_directory_dictionary_bank(config, &discovery)?;
     let manifest = directory::manifest_from_discovery(&discovery)?
         .with_dictionary_bank(dictionary_bank.clone());
