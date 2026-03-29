@@ -58,7 +58,12 @@ impl MmapInput {
             let mmap = if len == 0 {
                 None
             } else {
-                Some(Arc::new(unsafe { MmapOptions::new().map(&file)? }))
+                let map = unsafe { MmapOptions::new().map(&file)? };
+                #[cfg(unix)]
+                {
+                    let _ = map.advise(memmap2::Advice::Sequential);
+                }
+                Some(Arc::new(map))
             };
 
             Ok(Self {
