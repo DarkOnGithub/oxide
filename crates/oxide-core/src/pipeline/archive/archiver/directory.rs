@@ -24,6 +24,10 @@ use super::super::types::*;
 use super::processing::process_batch;
 use super::utils::*;
 
+const AUTO_DICTIONARY_MIN_DIRECTORY_FILES: usize = 8;
+const AUTO_DICTIONARY_MIN_SMALL_FILES: usize = 8;
+const AUTO_DICTIONARY_SMALL_FILE_MAX_BYTES: u64 = 128 * 1024;
+
 pub fn archive_directory_streaming_with_writer<W, AW, F>(
     config: &ArchivePipelineConfig,
     root: &Path,
@@ -912,14 +916,16 @@ fn train_directory_dictionary_bank(
         return Ok(dictionary_bank.clone());
     }
 
-    if config.skip_compression
-        || config.compression_algo != crate::CompressionAlgo::Zstd
-        || config.performance.dictionary_mode == ArchiveDictionaryMode::Off
-    {
+    if config.skip_compression || config.compression_algo != crate::CompressionAlgo::Zstd {
         return Ok(ArchiveDictionaryBank::default());
     }
 
-    let mut trainer = DictionaryTrainer::new(config.performance.dictionary_mode);
+    let dictionary_mode = effective_directory_dictionary_mode(config, discovery);
+    if dictionary_mode == ArchiveDictionaryMode::Off {
+        return Ok(ArchiveDictionaryBank::default());
+    }
+
+    let mut trainer = DictionaryTrainer::new(dictionary_mode);
     for file in &discovery.files {
         let mut handle = match fs::File::open(&file.full_path) {
             Ok(handle) => handle,
@@ -938,6 +944,30 @@ fn train_directory_dictionary_bank(
         config.compression_algo,
         config.performance.compression_level,
     )
+}
+
+fn effective_directory_dictionary_mode(
+    config: &ArchivePipelineConfig,
+    discovery: &directory::DirectoryDiscovery,
+) -> ArchiveDictionaryMode {
+    if config.performance.dictionary_mode != ArchiveDictionaryMode::Auto {
+        return config.performance.dictionary_mode;
+    }
+
+    if discovery.files.len() < AUTO_DICTIONARY_MIN_DIRECTORY_FILES {
+        return ArchiveDictionaryMode::Off;
+    }
+
+    let small_files = discovery
+        .files
+        .iter()
+        .filter(|file| file.size <= AUTO_DICTIONARY_SMALL_FILE_MAX_BYTES)
+        .count();
+    if small_files < AUTO_DICTIONARY_MIN_SMALL_FILES {
+        return ArchiveDictionaryMode::Off;
+    }
+
+    ArchiveDictionaryMode::Auto
 }
 
 #[cfg(test)]

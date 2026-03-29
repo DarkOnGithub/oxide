@@ -43,7 +43,7 @@
         "result_wait_ms": 1,
         "directory_mmap_threshold": "8M",
         "writer_queue_blocks": 768,
-        "dictionary_mode": "off"
+        "dictionary_mode": "auto"
       },
       "balanced": {
         "compression": {
