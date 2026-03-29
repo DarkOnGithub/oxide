@@ -80,6 +80,7 @@ class Settings:
     worker_modes: tuple[str, ...]
     passes: int
     skip_extract: bool
+    skip_baseline: bool
     drop_caches: bool
     rebuild_oxide: bool
     modes: tuple[str, ...]
@@ -151,7 +152,7 @@ class RunUnit:
     workers: str
     oxide_archive: Step
     oxide_extract: Step | None
-    baseline_archive: Step
+    baseline_archive: Step | None
     baseline_extract: Step | None
 
 
@@ -364,6 +365,12 @@ def parse_args() -> Settings:
         default=env_value("BENCHMARK_SKIP_EXTRACT", "0") == "1",
     )
     parser.add_argument(
+        "--skip-baseline",
+        action="store_true",
+        default=env_value("BENCHMARK_SKIP_BASELINE", "0") == "1",
+        help="Do not run the baseline tool (mksquashfs/unsquashfs or 7zz).",
+    )
+    parser.add_argument(
         "--no-drop-caches",
         dest="drop_caches",
         action="store_false",
@@ -434,6 +441,7 @@ def parse_args() -> Settings:
         worker_modes=worker_modes,
         passes=args.passes,
         skip_extract=args.skip_extract,
+        skip_baseline=args.skip_baseline,
         drop_caches=args.drop_caches,
         rebuild_oxide=args.rebuild_oxide,
         modes=tuple(args.modes),
@@ -1373,6 +1381,7 @@ def print_run_header(
             f"modes: [cyan]{', '.join(settings.modes)}[/cyan]\n"
             f"worker modes: [cyan]{worker_modes}[/cyan]\n"
             f"passes: [cyan]{settings.passes}[/cyan]  explicit threads: [cyan]{settings.threads}[/cyan]  auto threads: [cyan]{settings.logical_threads}[/cyan]\n"
+            f"baseline: [cyan]{'skipped' if settings.skip_baseline else 'enabled'}[/cyan]\n"
             f"oxide preset mode: [cyan]{oxide_preset_mode}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
             f"oxide presets: [cyan]{OXIDE_PRESETS_PATH}[/cyan]\n"
@@ -1457,6 +1466,9 @@ def print_analysis(
     stats_rows: Sequence[ModeStats],
     comparisons: Sequence[ModeComparison],
 ) -> None:
+    if not comparisons:
+        return
+
     lookup = stats_lookup(stats_rows)
     table = Table(box=box.SIMPLE_HEAVY)
     table.caption = "Delta is Oxide minus baseline: negative means Oxide is faster."
@@ -1806,13 +1818,21 @@ def build_run_units(settings: Settings) -> list[RunUnit]:
     for workers in settings.worker_modes:
         for mode in settings.modes:
             oxide_mode_config = oxide_mode_configs.get(mode)
-            baseline_mode_config = tuned_mode_configs.get(mode)
-            if oxide_mode_config is None or baseline_mode_config is None:
+            if oxide_mode_config is None:
                 raise SystemExit(f"Unknown mode: {mode}")
 
-            baseline_archive_step, baseline_extract_step = baseline_steps(
-                settings, mode, baseline_mode_config, workers
-            )
+            baseline_archive_step: Step | None
+            baseline_extract_step: Step | None
+            if settings.skip_baseline:
+                baseline_archive_step = None
+                baseline_extract_step = None
+            else:
+                baseline_mode_config = tuned_mode_configs.get(mode)
+                if baseline_mode_config is None:
+                    raise SystemExit(f"Unknown mode: {mode}")
+                baseline_archive_step, baseline_extract_step = baseline_steps(
+                    settings, mode, baseline_mode_config, workers
+                )
             oxide_archive_step = Step(
                 "oxide",
                 "archive",
@@ -1840,15 +1860,16 @@ def build_run_units(settings: Settings) -> list[RunUnit]:
                     oxide_archive_step.command_builder,
                     cleanup_targets=(oxide_archive_step.output_path,),
                 )
-                baseline_archive_step = Step(
-                    baseline_archive_step.tool,
-                    baseline_archive_step.phase,
-                    baseline_archive_step.workers,
-                    baseline_archive_step.output_path,
-                    baseline_archive_step.mode_config,
-                    baseline_archive_step.command_builder,
-                    cleanup_targets=(baseline_archive_step.output_path,),
-                )
+                if baseline_archive_step is not None:
+                    baseline_archive_step = Step(
+                        baseline_archive_step.tool,
+                        baseline_archive_step.phase,
+                        baseline_archive_step.workers,
+                        baseline_archive_step.output_path,
+                        baseline_archive_step.mode_config,
+                        baseline_archive_step.command_builder,
+                        cleanup_targets=(baseline_archive_step.output_path,),
+                    )
                 oxide_extract_step = None
                 baseline_extract_step = None
 
@@ -2116,6 +2137,7 @@ def run_bench_with_telemetry(
             "worker_modes": list(settings.worker_modes),
             "passes": settings.passes,
             "skip_extract": settings.skip_extract,
+            "skip_baseline": settings.skip_baseline,
             "rebuild_oxide": settings.rebuild_oxide,
             "modes": list(settings.modes),
             "workers": settings.threads,
@@ -2150,12 +2172,15 @@ def run_bench_with_telemetry(
 
             tool_groups: list[tuple[str, Step, Step | None]] = [
                 ("oxide", unit.oxide_archive, unit.oxide_extract),
-                (
-                    MODE_BASELINES[unit.mode],
-                    unit.baseline_archive,
-                    unit.baseline_extract,
-                ),
             ]
+            if unit.baseline_archive is not None:
+                tool_groups.append(
+                    (
+                        MODE_BASELINES[unit.mode],
+                        unit.baseline_archive,
+                        unit.baseline_extract,
+                    )
+                )
             rng.shuffle(tool_groups)
 
             for _tool_name, archive_step, extract_step in tool_groups:
@@ -2266,6 +2291,7 @@ def main() -> int:
                         "workers": settings.threads,
                         "worker_modes": list(settings.worker_modes),
                         "raw_oxide_presets": settings.raw_oxide_presets,
+                        "skip_baseline": settings.skip_baseline,
                         "host_telemetry": True,
                     }
                 )
