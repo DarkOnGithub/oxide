@@ -174,22 +174,7 @@ pub fn process_batch(
         ));
     }
 
-    let selected_dictionary = dictionary_bank.select_for_chunk(plan.algo, source);
-    let dictionary_id = selected_dictionary
-        .map(|dictionary| dictionary.id)
-        .unwrap_or(0);
-    let request = CompressionRequest {
-        data: source,
-        algo: plan.algo,
-        level: plan.level,
-        lzma_extreme: plan.lzma_extreme,
-        lzma_dictionary_size: plan.lzma_dictionary_size,
-        dictionary_id,
-        dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
-    };
-
     if raw_fallback_enabled
-        && !skip_compression
         && should_skip_full_compression_probe(source_len, plan)
         && is_likely_incompressible_sample(source, plan, dictionary_bank, scratch)?
     {
@@ -204,7 +189,21 @@ pub fn process_batch(
         ));
     }
 
-    if !skip_compression && supports_direct_buffer_output(plan.algo) {
+    let selected_dictionary = dictionary_bank.select_for_chunk(plan.algo, source);
+    let dictionary_id = selected_dictionary
+        .map(|dictionary| dictionary.id)
+        .unwrap_or(0);
+    let request = CompressionRequest {
+        data: source,
+        algo: plan.algo,
+        level: plan.level,
+        lzma_extreme: plan.lzma_extreme,
+        lzma_dictionary_size: plan.lzma_dictionary_size,
+        dictionary_id,
+        dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
+    };
+
+    if supports_direct_buffer_output(plan.algo) {
         let compression_started = Instant::now();
         let mut compressed = pool.acquire();
         apply_compression_request_with_scratch_into(

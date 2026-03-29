@@ -1,4 +1,3 @@
-
 use super::scratch::ZstdScratch;
 use crate::{OxideError, Result};
 
