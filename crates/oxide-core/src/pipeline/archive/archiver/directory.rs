@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, bounded, select};
+use crossbeam_channel::{bounded, select, Receiver, RecvTimeoutError, TryRecvError};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -931,7 +931,7 @@ fn train_directory_dictionary_bank(
             Ok(read) => read,
             Err(_) => continue,
         };
-        trainer.observe(&sample[..read]);
+        trainer.observe_with_path(&file.full_path, &sample[..read]);
     }
 
     trainer.build(

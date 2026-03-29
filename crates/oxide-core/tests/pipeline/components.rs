@@ -1,12 +1,11 @@
-use std::path::PathBuf;
-
-use oxide_core::MmapInput;
 use oxide_core::pipeline::{
-    PipelinePerformanceOptions,
     archive::ArchivePipeline,
     directory::{BlockCountPlanner, DirectoryBatchSubmitter},
+    PipelinePerformanceOptions,
 };
-use oxide_core::types::BatchData;
+use oxide_core::types::{BatchData, ChunkEncodingPlan, CompressionAlgo};
+use oxide_core::MmapInput;
+use std::path::PathBuf;
 use tempfile::tempdir;
 
 mod archive_tests {
@@ -201,7 +200,7 @@ mod directory_tests {
     }
 
     #[test]
-    fn submitter_merges_same_policy_bytes_even_when_paths_change() {
+    fn submitter_merges_same_policy_bytes_even_when_paths_change_for_lz4() {
         let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8);
         let mut batches = Vec::new();
 
@@ -225,7 +224,42 @@ mod directory_tests {
             .expect("finish should succeed");
 
         assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].source_path, PathBuf::from("root"));
+        assert_eq!(batches[0].source_path, PathBuf::from("root/a.json"));
         assert_eq!(batches[0].data.as_slice(), b"aaaabbbb");
+    }
+
+    #[test]
+    fn submitter_flushes_zstd_batches_when_extension_changes() {
+        let mut submitter = DirectoryBatchSubmitter::new_with_plan(
+            PathBuf::from("root"),
+            8,
+            ChunkEncodingPlan::new(CompressionAlgo::Zstd),
+        );
+        let mut batches = Vec::new();
+
+        submitter
+            .push_bytes("root/a.json", b"aaaa", false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("first push should succeed");
+        submitter
+            .push_bytes("root/b.html", b"bbbb", false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("second push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].source_path, PathBuf::from("root/a.json"));
+        assert_eq!(batches[1].source_path, PathBuf::from("root/b.html"));
+        assert_eq!(batches[0].data.as_slice(), b"aaaa");
+        assert_eq!(batches[1].data.as_slice(), b"bbbb");
     }
 }

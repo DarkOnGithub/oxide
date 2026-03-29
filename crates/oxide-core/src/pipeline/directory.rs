@@ -6,8 +6,9 @@ use bytes::Bytes;
 use jwalk::WalkDir;
 use memmap2::Mmap;
 
+use crate::dictionary::normalized_extension_from_path;
 use crate::format::should_force_raw_storage;
-use crate::types::{Batch, BatchData, ChunkEncodingPlan, Result};
+use crate::types::{Batch, BatchData, ChunkEncodingPlan, CompressionAlgo, Result};
 
 use super::types::{ArchiveListingEntry, ArchiveSourceKind};
 
@@ -61,6 +62,8 @@ pub struct DirectoryBatchSubmitter {
     next_block_id: usize,
     pending: Vec<u8>,
     pending_force_raw_storage: Option<bool>,
+    pending_source_path: Option<PathBuf>,
+    pending_extension: Option<String>,
 }
 
 impl DirectoryBatchSubmitter {
@@ -80,12 +83,14 @@ impl DirectoryBatchSubmitter {
             next_block_id: 0,
             pending: Vec::with_capacity(block_size.max(1)),
             pending_force_raw_storage: None,
+            pending_source_path: None,
+            pending_extension: None,
         }
     }
 
     pub fn push_bytes<P, F>(
         &mut self,
-        _source_path: P,
+        source_path: P,
         mut bytes: &[u8],
         force_raw_storage: bool,
         mut submit: F,
@@ -95,7 +100,7 @@ impl DirectoryBatchSubmitter {
         F: FnMut(Batch) -> Result<()>,
     {
         while !bytes.is_empty() {
-            self.prepare_pending_state(force_raw_storage, &mut submit)?;
+            self.prepare_pending_state(source_path.as_ref(), force_raw_storage, &mut submit)?;
 
             let room = self.block_size.saturating_sub(self.pending.len()).max(1);
             let take = room.min(bytes.len());
@@ -112,7 +117,7 @@ impl DirectoryBatchSubmitter {
 
     pub fn push_mapped<P, F>(
         &mut self,
-        _source_path: P,
+        source_path: P,
         map: Arc<Mmap>,
         start: usize,
         end: usize,
@@ -123,6 +128,7 @@ impl DirectoryBatchSubmitter {
         P: AsRef<Path>,
         F: FnMut(Batch) -> Result<()>,
     {
+        let source_path = source_path.as_ref();
         if end < start || end > map.len() {
             return Err(crate::OxideError::InvalidFormat(
                 "invalid mapped batch range",
@@ -131,7 +137,7 @@ impl DirectoryBatchSubmitter {
 
         let mut offset = start;
         while offset < end {
-            self.prepare_pending_state(force_raw_storage, &mut submit)?;
+            self.prepare_pending_state(source_path, force_raw_storage, &mut submit)?;
 
             if !self.pending.is_empty() {
                 let room = self.block_size.saturating_sub(self.pending.len()).max(1);
@@ -149,6 +155,7 @@ impl DirectoryBatchSubmitter {
             if remaining >= self.block_size {
                 let batch_end = offset + self.block_size;
                 self.submit_batch(
+                    source_path.to_path_buf(),
                     BatchData::Mapped {
                         map: Arc::clone(&map),
                         start: offset,
@@ -179,7 +186,12 @@ impl DirectoryBatchSubmitter {
         Ok(())
     }
 
-    fn prepare_pending_state<F>(&mut self, force_raw_storage: bool, submit: &mut F) -> Result<()>
+    fn prepare_pending_state<F>(
+        &mut self,
+        source_path: &Path,
+        force_raw_storage: bool,
+        submit: &mut F,
+    ) -> Result<()>
     where
         F: FnMut(Batch) -> Result<()>,
     {
@@ -193,7 +205,16 @@ impl DirectoryBatchSubmitter {
             Some(_) => {}
             None => {
                 self.pending_force_raw_storage = Some(force_raw_storage);
+                self.set_pending_source_path(source_path);
             }
+        }
+
+        if self.should_flush_for_source_path(source_path) {
+            self.flush_pending(submit)?;
+            self.pending_force_raw_storage = Some(force_raw_storage);
+            self.set_pending_source_path(source_path);
+        } else if self.pending_source_path.is_none() {
+            self.set_pending_source_path(source_path);
         }
 
         Ok(())
@@ -205,16 +226,35 @@ impl DirectoryBatchSubmitter {
     {
         let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(self.block_size));
         self.submit_batch(
+            self.pending_source_path
+                .clone()
+                .unwrap_or_else(|| self.source_path.clone()),
             BatchData::Owned(Bytes::from(chunk)),
             self.pending_force_raw_storage.unwrap_or(false),
             submit,
         )?;
         self.pending_force_raw_storage = None;
+        self.pending_source_path = None;
+        self.pending_extension = None;
         Ok(())
+    }
+
+    fn should_flush_for_source_path(&self, source_path: &Path) -> bool {
+        if self.pending.is_empty() || self.compression_plan.algo != CompressionAlgo::Zstd {
+            return false;
+        }
+
+        normalized_extension_from_path(source_path) != self.pending_extension
+    }
+
+    fn set_pending_source_path(&mut self, source_path: &Path) {
+        self.pending_source_path = Some(source_path.to_path_buf());
+        self.pending_extension = normalized_extension_from_path(source_path);
     }
 
     fn submit_batch<F>(
         &mut self,
+        source_path: PathBuf,
         data: BatchData,
         force_raw_storage: bool,
         submit: &mut F,
@@ -224,7 +264,7 @@ impl DirectoryBatchSubmitter {
     {
         let batch = Batch {
             id: self.next_block_id,
-            source_path: self.source_path.clone(),
+            source_path,
             data,
             stream_id: 0,
             compression_plan: self.compression_plan,
