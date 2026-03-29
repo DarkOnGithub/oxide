@@ -137,3 +137,44 @@ fn restore_multiple_files_completes_metadata_finalization() {
         );
     }
 }
+
+#[test]
+fn restore_multiple_files_across_chunk_boundaries() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    let manifest = ArchiveManifest::new(vec![
+        ArchiveListingEntry::file(
+            "nested/first.txt".to_string(),
+            4,
+            0o644,
+            ArchiveTimestamp::default(),
+            0,
+            0,
+            0,
+        ),
+        ArchiveListingEntry::file(
+            "nested/second.txt".to_string(),
+            4,
+            0o644,
+            ArchiveTimestamp::default(),
+            0,
+            0,
+            4,
+        ),
+    ]);
+
+    let mut writer = DirectoryRestoreWriter::create(root, manifest).expect("create writer");
+    writer.write_chunk(b"te").expect("write first chunk");
+    writer.write_chunk(b"stda").expect("write second chunk");
+    writer.write_chunk(b"ta").expect("write third chunk");
+    writer.finish().expect("finish restore");
+
+    assert_eq!(
+        fs::read(root.join("nested/first.txt")).expect("read first"),
+        b"test"
+    );
+    assert_eq!(
+        fs::read(root.join("nested/second.txt")).expect("read second"),
+        b"data"
+    );
+}
