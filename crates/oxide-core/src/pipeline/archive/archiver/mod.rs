@@ -264,7 +264,7 @@ fn train_file_dictionary_bank(
 
     let mut trainer = DictionaryTrainer::new(config.performance.dictionary_mode);
     for batch in batches {
-        trainer.observe(batch.data());
+        trainer.observe_path(batch.data(), &batch.source_path);
     }
 
     trainer.build(

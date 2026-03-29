@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use crate::{CompressionAlgo, OxideError, Result};
 
@@ -15,23 +16,25 @@ pub enum ArchiveDictionaryMode {
     Auto,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DictionaryClass {
     Text,
     StructuredText,
     Binary,
+    Extension(String),
 }
 
 impl DictionaryClass {
-    pub fn id(self) -> u8 {
+    pub fn legacy_id(&self) -> Option<u8> {
         match self {
-            Self::Text => 1,
-            Self::StructuredText => 2,
-            Self::Binary => 3,
+            Self::Text => Some(1),
+            Self::StructuredText => Some(2),
+            Self::Binary => Some(3),
+            Self::Extension(_) => None,
         }
     }
 
-    pub fn from_id(id: u8) -> Result<Self> {
+    pub fn from_legacy_id(id: u8) -> Result<Self> {
         match id {
             1 => Ok(Self::Text),
             2 => Ok(Self::StructuredText),
@@ -90,9 +93,20 @@ impl ArchiveDictionaryBank {
         &self,
         algo: CompressionAlgo,
         source: &[u8],
+        source_path: Option<&Path>,
     ) -> Option<&ArchiveDictionary> {
         if algo != CompressionAlgo::Zstd || source.is_empty() {
             return None;
+        }
+
+        if let Some(class) = source_path.and_then(classify_path) {
+            if let Some(dictionary) = self
+                .dictionaries
+                .iter()
+                .find(|dictionary| dictionary.algo == algo && dictionary.class == class)
+            {
+                return Some(dictionary);
+            }
         }
 
         let class = classify_sample(source);
@@ -102,7 +116,7 @@ impl ArchiveDictionaryBank {
     }
 
     pub fn validate(&self) -> Result<()> {
-        let mut seen_ids = BTreeMap::<u8, CompressionAlgo>::new();
+        let mut seen_ids = BTreeSet::<u8>::new();
         for dictionary in &self.dictionaries {
             if dictionary.id == 0 {
                 return Err(OxideError::InvalidFormat(
@@ -114,9 +128,7 @@ impl ArchiveDictionaryBank {
                     "archive dictionary payload must not be empty",
                 ));
             }
-            if let Some(existing_algo) = seen_ids.insert(dictionary.id, dictionary.algo)
-                && existing_algo != dictionary.algo
-            {
+            if !seen_ids.insert(dictionary.id) {
                 return Err(OxideError::InvalidFormat(
                     "archive dictionary ids must be unique per bank",
                 ));
@@ -147,18 +159,26 @@ impl DictionaryTrainer {
     }
 
     pub fn observe(&mut self, sample: &[u8]) {
+        self.observe_class(sample, classify_sample(sample));
+    }
+
+    pub fn observe_path(&mut self, sample: &[u8], path: &Path) {
+        let class = classify_path(path).unwrap_or_else(|| classify_sample(sample));
+        self.observe_class(sample, class);
+    }
+
+    fn observe_class(&mut self, sample: &[u8], class: DictionaryClass) {
         if self.mode == ArchiveDictionaryMode::Off || sample.is_empty() {
             return;
         }
 
-        let class = classify_sample(sample);
         let clipped_len = sample.len().min(DEFAULT_SAMPLE_SIZE);
         if clipped_len == 0 {
             return;
         }
 
         let current_bytes = *self.sample_bytes_by_class.get(&class).unwrap_or(&0);
-        let samples = self.samples_by_class.entry(class).or_default();
+        let samples = self.samples_by_class.entry(class.clone()).or_default();
         if samples.len() >= MAX_SAMPLES_PER_CLASS || current_bytes >= MAX_SAMPLE_BYTES_PER_CLASS {
             return;
         }
@@ -178,7 +198,7 @@ impl DictionaryTrainer {
             return Ok(ArchiveDictionaryBank::default());
         }
 
-        let mut dictionaries = Vec::new();
+        let mut trained = Vec::new();
         for (class, samples) in self.samples_by_class {
             if samples.len() < MIN_SAMPLES_PER_CLASS {
                 continue;
@@ -194,11 +214,21 @@ impl DictionaryTrainer {
                 continue;
             }
 
+            let sample_bytes = *self.sample_bytes_by_class.get(&class).unwrap_or(&0);
+            trained.push((class, dict, sample_bytes));
+        }
+
+        trained.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
+
+        let mut dictionaries = Vec::with_capacity(trained.len().min(u8::MAX as usize));
+        for (index, (class, bytes, _sample_bytes)) in
+            trained.into_iter().take(u8::MAX as usize).enumerate()
+        {
             let dictionary = ArchiveDictionary {
-                id: class.id(),
+                id: (index + 1) as u8,
                 algo,
                 class,
-                bytes: dict,
+                bytes,
             };
             dictionaries.push(dictionary);
         }
@@ -255,6 +285,25 @@ pub fn classify_sample(sample: &[u8]) -> DictionaryClass {
     } else {
         DictionaryClass::Binary
     }
+}
+
+pub fn classify_path(path: &Path) -> Option<DictionaryClass> {
+    normalized_extension_from_path(path).map(DictionaryClass::Extension)
+}
+
+pub fn normalized_extension_from_path(path: &Path) -> Option<String> {
+    let extension = path.extension()?.to_str()?;
+    normalized_extension(extension)
+}
+
+pub fn normalized_extension(extension: &str) -> Option<String> {
+    let extension = extension.trim();
+    let extension = extension.trim_start_matches('.');
+    if extension.is_empty() {
+        return None;
+    }
+
+    Some(extension.to_ascii_lowercase())
 }
 
 #[cfg(test)]
