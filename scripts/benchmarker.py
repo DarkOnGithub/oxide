@@ -87,6 +87,7 @@ class Settings:
     raw_oxide_presets: bool
     telemetry_dir: Path
     shuffle_seed: int
+    quiet: bool
 
 
 @dataclass(frozen=True)
@@ -403,6 +404,13 @@ def parse_args() -> Settings:
         ),
         help="Directory where JSONL/CSV telemetry for each run is written.",
     )
+    parser.add_argument(
+        "--quiet",
+        "--quieter",
+        dest="quiet",
+        action="store_true",
+        help="Print only pass/mode steps, per-step command times, and averages.",
+    )
 
     args = parser.parse_args()
 
@@ -433,6 +441,7 @@ def parse_args() -> Settings:
         raw_oxide_presets=args.raw_oxide_presets,
         telemetry_dir=Path(args.telemetry_dir),
         shuffle_seed=shuffle_seed,
+        quiet=args.quiet,
     )
 
 
@@ -1180,6 +1189,13 @@ def result_to_stats(rows: Sequence[ResultRow], source_bytes: int) -> list[ModeSt
     return stats_rows
 
 
+def format_quiet_step(row: ResultRow) -> str:
+    return (
+        f"{row.tool} {row.phase} ({row.mode}, workers={row.workers}) "
+        f"{row.elapsed_ns / 1_000_000_000:.3f}s"
+    )
+
+
 def efficiency_suite(tool: str) -> str:
     if tool in {"mksquashfs", "unsquashfs"}:
         return "squashfs"
@@ -1375,9 +1391,6 @@ def print_steps_table(
     console: Console, results: Sequence[ResultRow], source_bytes: int
 ) -> None:
     table = Table(title="Per-step results", box=box.SIMPLE_HEAVY)
-    table.caption = (
-        "Smaller source delta means better compression; lower time means faster."
-    )
     table.add_column("mode", style="bold")
     table.add_column("workers", justify="right")
     table.add_column("pass", justify="right")
@@ -1593,12 +1606,23 @@ def drop_caches() -> None:
 
 def build_oxide(settings: Settings) -> None:
     if settings.oxide_bin.exists() and not settings.rebuild_oxide:
-        print(f"--- Using existing Oxide binary: {settings.oxide_bin} ---")
+        if not settings.quiet:
+            print(f"--- Using existing Oxide binary: {settings.oxide_bin} ---")
         return
 
-    print("--- Building Oxide ---")
+    if not settings.quiet:
+        print("--- Building Oxide ---")
+        subprocess.run(
+            ["cargo", "build", "--release", "-p", "oxide-cli"], check=True, cwd=BASE_DIR
+        )
+        return
+
     subprocess.run(
-        ["cargo", "build", "--release", "-p", "oxide-cli"], check=True, cwd=BASE_DIR
+        ["cargo", "build", "--release", "-p", "oxide-cli"],
+        check=True,
+        cwd=BASE_DIR,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
 
@@ -2052,15 +2076,18 @@ def record_step(
     return row
 
 
-def print_results_table(results: Sequence[ResultRow], source_bytes: int) -> None:
-    modes = tuple(dict.fromkeys(row.mode for row in results))
+def print_results_table(
+    results: Sequence[ResultRow], source_bytes: int, quiet: bool
+) -> None:
     console = Console(width=130)
     stats_rows = result_to_stats(results, source_bytes)
-    worker_modes = tuple(dict.fromkeys(row.workers for row in results))
-    comparisons = mode_comparisons(stats_rows, modes, worker_modes)
-    print_steps_table(console, results, source_bytes)
-    print_analysis(console, stats_rows, comparisons)
-    print_efficiency_scores(console, stats_rows)
+    if not quiet:
+        modes = tuple(dict.fromkeys(row.mode for row in results))
+        worker_modes = tuple(dict.fromkeys(row.workers for row in results))
+        comparisons = mode_comparisons(stats_rows, modes, worker_modes)
+        print_steps_table(console, results, source_bytes)
+        print_analysis(console, stats_rows, comparisons)
+        print_efficiency_scores(console, stats_rows)
     print_averages(console, stats_rows)
 
 
@@ -2134,10 +2161,7 @@ def run_bench_with_telemetry(
             for _tool_name, archive_step, extract_step in tool_groups:
                 if settings.drop_caches:
                     drop_caches()
-                console.print(
-                    f"[bold]{archive_step.tool} archive[/bold] ({unit.mode}, workers={unit.workers})"
-                )
-                record_step(
+                archive_row = record_step(
                     settings,
                     archive_step,
                     unit.mode,
@@ -2146,14 +2170,17 @@ def run_bench_with_telemetry(
                     results,
                     telemetry,
                 )
+                if settings.quiet:
+                    console.print(format_quiet_step(archive_row))
+                else:
+                    console.print(
+                        f"[bold]{archive_step.tool} archive[/bold] ({unit.mode}, workers={unit.workers})"
+                    )
 
                 if extract_step is not None:
                     if settings.drop_caches:
                         drop_caches()
-                    console.print(
-                        f"[bold]{extract_step.tool} extract[/bold] ({unit.mode}, workers={unit.workers})"
-                    )
-                    record_step(
+                    extract_row = record_step(
                         settings,
                         extract_step,
                         unit.mode,
@@ -2162,6 +2189,12 @@ def run_bench_with_telemetry(
                         results,
                         telemetry,
                     )
+                    if settings.quiet:
+                        console.print(format_quiet_step(extract_row))
+                    else:
+                        console.print(
+                            f"[bold]{extract_step.tool} extract[/bold] ({unit.mode}, workers={unit.workers})"
+                        )
 
                 console.print("")
 
@@ -2180,7 +2213,8 @@ def main() -> int:
     telemetry_run_dir = settings.telemetry_dir / run_id
 
     try:
-        print_run_header(console, settings, telemetry_run_dir, source_bytes)
+        if not settings.quiet:
+            print_run_header(console, settings, telemetry_run_dir, source_bytes)
         build_oxide(settings)
         with TelemetryWriter(telemetry_run_dir) as telemetry:
             run_bench_with_telemetry(
@@ -2196,7 +2230,7 @@ def main() -> int:
         print(f"\nBenchmark aborted: {exc}", file=sys.stderr)
     finally:
         if results:
-            print_results_table(results, source_bytes)
+            print_results_table(results, source_bytes, settings.quiet)
 
             if telemetry_run_dir.exists():
                 stats_rows = result_to_stats(results, source_bytes)
