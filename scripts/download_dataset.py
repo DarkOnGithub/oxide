@@ -29,6 +29,8 @@ class DatasetSpec:
     source: str
     archive_type: str | None = None
     clone_depth: int | None = None
+    optional: bool = False
+    fallback_git: str | None = None
 
 
 COMPONENTS = {
@@ -50,7 +52,10 @@ COMPONENTS = {
     ),
     "logs": DatasetSpec(
         "logs", "archive",
-        "https://zenodo.org/api/records/3227177/files/HDFS_1.tar.gz/content", "tar"
+        "https://zenodo.org/api/records/3227177/files/HDFS_1.tar.gz/content",
+        "tar",
+        optional=True,
+        fallback_git="https://github.com/logpai/loghub.git",
     ),
     "div2k": DatasetSpec(
         "div2k", "archive",
@@ -74,16 +79,10 @@ TIERS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download archiver benchmark datasets by tier.")
-    parser.add_argument(
-        "tier",
-        nargs="?",
-        default="6gb",
-        choices=[*TIERS.keys(), "all"],
-        help="Dataset tier to download (default: 6gb).",
-    )
-    parser.add_argument("--output-dir", type=Path, default=Path("datasets"), help="Storage directory.")
-    parser.add_argument("--force", action="store_true", help="Overwrite existing data.")
-    parser.add_argument("--keep-archives", action="store_true", help="Keep downloaded archives after extraction.")
+    parser.add_argument("tier", nargs="?", default="6gb", choices=[*TIERS.keys(), "all"])
+    parser.add_argument("--output-dir", type=Path, default=Path("datasets"))
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--keep-archives", action="store_true")
     return parser.parse_args()
 
 
@@ -105,10 +104,8 @@ def filename_from_url(url: str, response=None) -> str:
             raw = cd.split("filename=", 1)[1].strip().strip('"')
             if raw:
                 return Path(raw).name
-
     parsed = urllib.parse.urlparse(url)
-    name = Path(parsed.path).name
-    return name or "download.bin"
+    return Path(parsed.path).name or "download.bin"
 
 
 def download_file(url: str, dest: Path | None = None) -> Path:
@@ -160,6 +157,25 @@ def extract_archive(archive_path: Path, target_dir: Path, archive_type: str) -> 
         raise ValueError(f"Unsupported archive type: {archive_type}")
 
 
+def clone_git(url: str, target_dir: Path, depth: int = 1) -> None:
+    subprocess.run(
+        ["git", "clone", "--depth", str(depth), url, str(target_dir)],
+        check=True,
+    )
+
+
+def prepare_logs_fallback(spec: DatasetSpec, target_dir: Path, force: bool) -> None:
+    if not spec.fallback_git:
+        raise RuntimeError("No fallback configured for logs")
+
+    print("Zenodo blocked with HTTP 403. Falling back to Loghub GitHub source tree.")
+    clone_git(spec.fallback_git, target_dir, depth=1)
+
+    hdfs_dir = target_dir / "HDFS"
+    if not hdfs_dir.exists():
+        raise RuntimeError("Fallback repo cloned, but HDFS subdirectory not found.")
+
+
 def download_component(spec: DatasetSpec, output_dir: Path, force: bool, keep_archives: bool) -> None:
     target_dir = output_dir / spec.name
     if target_dir.exists() and not force:
@@ -168,46 +184,49 @@ def download_component(spec: DatasetSpec, output_dir: Path, force: bool, keep_ar
 
     ensure_empty(target_dir, force)
 
-    if spec.kind == "archive":
-        target_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = download_file(spec.source, None)
-        archive_dest = target_dir / archive_path.name
-        shutil.move(str(archive_path), archive_dest)
-        extract_archive(archive_dest, target_dir, spec.archive_type or "zip")
-        if not keep_archives:
-            archive_dest.unlink()
+    try:
+        if spec.kind == "archive":
+            target_dir.mkdir(parents=True, exist_ok=True)
+            archive_path = download_file(spec.source, None)
+            archive_dest = target_dir / archive_path.name
+            shutil.move(str(archive_path), archive_dest)
+            extract_archive(archive_dest, target_dir, spec.archive_type or "zip")
+            if not keep_archives:
+                archive_dest.unlink()
 
-    elif spec.kind == "file":
-        target_dir.mkdir(parents=True, exist_ok=True)
-        dest_name = Path(urllib.parse.urlparse(spec.source).path).name
-        download_file(spec.source, target_dir / dest_name)
+        elif spec.kind == "file":
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest_name = Path(urllib.parse.urlparse(spec.source).path).name
+            download_file(spec.source, target_dir / dest_name)
 
-    elif spec.kind == "git":
-        cmd = [
-            "git", "clone",
-            "--depth", str(spec.clone_depth or 1),
-            spec.source,
-            str(target_dir),
-        ]
-        subprocess.run(cmd, check=True)
+        elif spec.kind == "git":
+            clone_git(spec.source, target_dir, spec.clone_depth or 1)
 
-    else:
-        raise ValueError(f"Unsupported component kind: {spec.kind}")
+        else:
+            raise ValueError(f"Unsupported component kind: {spec.kind}")
+
+    except urllib.error.HTTPError as e:
+        if spec.name == "logs" and e.code == 403:
+            ensure_empty(target_dir, True)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            prepare_logs_fallback(spec, target_dir, force)
+            return
+        if spec.optional:
+            print(f"Warning: failed to fetch optional dataset '{spec.name}': HTTP {e.code}")
+            return
+        raise
 
 
 def main() -> int:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.tier == "all":
-        selected_components = list(COMPONENTS.keys())
-    else:
-        selected_components = TIERS[args.tier]
+    selected_components = list(COMPONENTS.keys()) if args.tier == "all" else TIERS[args.tier]
 
     for comp_key in selected_components:
         download_component(COMPONENTS[comp_key], args.output_dir, args.force, args.keep_archives)
 
-    print(f"\nFinished preparing the {args.tier} suite.")
+    print(f"\\nFinished preparing the {args.tier} suite.")
     return 0
 
 
