@@ -66,9 +66,6 @@ fn reorder_limit_is_derived_from_ordered_queue_and_capped_by_blocks() {
 fn io_reader_moves_block_reads_off_the_orchestrator_path() {
     let archive = ArchiveReader::new_for_sequential_extract(Cursor::new(build_test_archive()))
         .expect("archive should open");
-    let header = archive
-        .block_descriptor(0)
-        .expect("first block descriptor should exist");
     let buffer_pool = Arc::new(BufferPool::new(16, 4));
     let (read_request_tx, read_request_rx) = crossbeam_channel::bounded(1);
     let (task_tx, task_rx) = crossbeam_channel::bounded(1);
@@ -82,7 +79,6 @@ fn io_reader_moves_block_reads_off_the_orchestrator_path() {
         .send(ReadRequest {
             index: 0,
             block_index: 0,
-            header,
         })
         .expect("read request should send");
     drop(read_request_tx);

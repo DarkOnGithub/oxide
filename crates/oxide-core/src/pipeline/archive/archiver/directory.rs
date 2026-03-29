@@ -173,6 +173,7 @@ where
     let mut raw_passthrough_blocks = 0u64;
     let mut writer_queue_peak = 0usize;
     let mut pending_results = ReorderBuffer::<CompressedBlock>::with_limit(total_blocks.max(1));
+    let mut dedup_index = BlockDedupIndex::new();
 
     let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
     let producer_root = discovery.root.clone();
@@ -413,7 +414,31 @@ where
         {
             match batch_rx.try_recv() {
                 Ok(batch) => {
-                    handle.submit(batch)?;
+                    match dedup_index.classify(&batch)? {
+                        DedupDecision::Unique => {
+                            handle.submit(batch)?;
+                        }
+                        DedupDecision::Reference(reference_target) => {
+                            record_result_to_writer_queue(
+                                Ok(CompressedBlock::reference(
+                                    batch.id,
+                                    batch.stream_id,
+                                    reference_target,
+                                    batch.len() as u64,
+                                )),
+                                &writer_tx,
+                                &writer_failure,
+                                &mut pending_results,
+                                &mut completed_bytes,
+                                &mut first_error,
+                                &mut raw_passthrough_blocks,
+                                &mut writer_queue_peak,
+                                &mut stage_timings.writer_enqueue_blocked,
+                                &mut retired_count,
+                            );
+                            received_count += 1;
+                        }
+                    }
                     submitted_count += 1;
                     progressed = true;
                 }
@@ -621,12 +646,6 @@ where
             "directory block count mismatch",
         ));
     }
-    let expected = handle.submitted_count();
-    if expected != submitted_count {
-        first_error.get_or_insert(crate::OxideError::InvalidFormat(
-            "submitted block count drift detected",
-        ));
-    }
     if !shutdown_called {
         handle.shutdown();
     }
@@ -729,7 +748,7 @@ where
         input_bytes_total,
         output_bytes_written,
         block_count,
-        final_runtime.completed as u32,
+        received_count as u32,
         final_runtime.workers,
         extensions,
         *options,

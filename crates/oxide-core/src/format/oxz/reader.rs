@@ -146,18 +146,17 @@ impl<R: Read + Seek> ArchiveReader<R> {
     ) -> Result<ChunkDescriptor> {
         let start = Instant::now();
         let descriptor = self.block_descriptor(index)?;
+        let resolved = self.resolve_data_descriptor(index, descriptor)?;
 
         if self.sequential_extract_state.map(|state| {
-            state.next_block_index == index
-                && state.next_payload_offset == descriptor.payload_offset
+            state.next_block_index == index && state.next_payload_offset == resolved.payload_offset
         }) != Some(true)
         {
-            self.reader
-                .seek(SeekFrom::Start(descriptor.payload_offset))?;
+            self.reader.seek(SeekFrom::Start(resolved.payload_offset))?;
         }
 
         buffer.clear();
-        buffer.resize(descriptor.encoded_len as usize, 0);
+        buffer.resize(resolved.encoded_len as usize, 0);
         self.reader.read_exact(buffer.as_mut_slice())?;
 
         if let Some(state) = self.sequential_extract_state.as_mut() {
@@ -174,7 +173,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             "oxz chunk read successfully",
         );
 
-        Ok(descriptor)
+        Ok(resolved)
     }
 
     pub fn iter_blocks(&mut self) -> BlockIterator<'_, R> {
@@ -227,7 +226,30 @@ impl<R: Read + Seek> ArchiveReader<R> {
             ));
         }
 
-        for descriptor in descriptors {
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            if let Some(reference_target) = descriptor.reference_target {
+                let reference_target = usize::try_from(reference_target).map_err(|_| {
+                    OxideError::InvalidFormat("reference chunk target exceeds usize range")
+                })?;
+                if reference_target >= index {
+                    return Err(OxideError::InvalidFormat(
+                        "reference chunk descriptors must target earlier blocks",
+                    ));
+                }
+                let target = descriptors[reference_target];
+                if target.is_reference() {
+                    return Err(OxideError::InvalidFormat(
+                        "reference chunk descriptors must target canonical data blocks",
+                    ));
+                }
+                if descriptor.raw_len != target.raw_len {
+                    return Err(OxideError::InvalidFormat(
+                        "reference chunk descriptors must preserve raw length",
+                    ));
+                }
+                continue;
+            }
+
             let compression_meta = descriptor.compression_meta()?;
             if compression_meta.dictionary_id != 0
                 && dictionary_bank
@@ -241,6 +263,45 @@ impl<R: Read + Seek> ArchiveReader<R> {
         }
 
         Ok(())
+    }
+
+    fn resolve_data_descriptor(
+        &self,
+        index: u32,
+        descriptor: ChunkDescriptor,
+    ) -> Result<ChunkDescriptor> {
+        let Some(reference_target) = descriptor.reference_target else {
+            return Ok(descriptor);
+        };
+
+        let reference_target = usize::try_from(reference_target)
+            .map_err(|_| OxideError::InvalidFormat("reference chunk target exceeds usize range"))?;
+        let index = usize::try_from(index)
+            .map_err(|_| OxideError::InvalidFormat("block index exceeds usize range"))?;
+        if reference_target >= index {
+            return Err(OxideError::InvalidFormat(
+                "reference chunk descriptors must target earlier blocks",
+            ));
+        }
+
+        let target = self
+            .chunk_descriptors
+            .get(reference_target)
+            .copied()
+            .ok_or(OxideError::InvalidFormat(
+                "reference chunk target out of range",
+            ))?;
+        if target.is_reference() {
+            return Err(OxideError::InvalidFormat(
+                "reference chunk descriptors must target canonical data blocks",
+            ));
+        }
+        if descriptor.raw_len != target.raw_len {
+            return Err(OxideError::InvalidFormat(
+                "reference chunk descriptors must preserve raw length",
+            ));
+        }
+        Ok(target)
     }
 }
 

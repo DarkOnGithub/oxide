@@ -77,6 +77,7 @@ where
     let reorder_limit = total_blocks.max(1);
     let mut pending_write = ReorderBuffer::<CompressedBlock>::with_limit(reorder_limit);
     let mut written_count = 0usize;
+    let mut dedup_index = BlockDedupIndex::new();
 
     let started_at = Instant::now();
     let mut last_emit_at = Instant::now();
@@ -100,7 +101,29 @@ where
             let Some(batch) = batches.next() else {
                 break;
             };
-            handle.submit(batch)?;
+            match dedup_index.classify(&batch)? {
+                DedupDecision::Unique => handle.submit(batch)?,
+                DedupDecision::Reference(reference_target) => {
+                    record_result_to_writer(
+                        Ok(CompressedBlock::reference(
+                            batch.id,
+                            batch.stream_id,
+                            reference_target,
+                            batch.len() as u64,
+                        )),
+                        &mut archive_writer,
+                        &mut pending_write,
+                        &mut written_count,
+                        &mut output_bytes_written,
+                        &mut completed_bytes,
+                        &mut first_error,
+                        &mut raw_passthrough_blocks,
+                        &mut pending_write_peak,
+                        &mut stage_timings.writer,
+                    );
+                    received_count += 1;
+                }
+            }
             submitted_count += 1;
         }
 
@@ -237,7 +260,7 @@ where
         input_bytes_total,
         output_bytes_written,
         block_count,
-        final_runtime.completed as u32,
+        received_count as u32,
         final_runtime.workers,
         extensions,
         *options,

@@ -133,6 +133,7 @@ impl<W: Write> ArchiveWriter<W> {
             dictionary_id: block.dictionary_id,
             original_len: block.original_len,
             crc32: block.crc32,
+            reference_target: block.reference_target,
         };
         self.stage_owned_block(owned)
     }
@@ -341,6 +342,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             dictionary_id: block.dictionary_id,
             original_len: block.original_len,
             crc32: block.crc32,
+            reference_target: block.reference_target,
         };
         self.stage_owned_block(owned)
     }
