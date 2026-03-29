@@ -66,6 +66,10 @@ pub struct ArchiveArgs {
     #[arg(long)]
     pub compression_level: Option<i32>,
 
+    /// Reuse an archive dictionary bank from an existing .oxz archive.
+    #[arg(long)]
+    pub dictionary_from: Option<PathBuf>,
+
     /// Archive tuning preset name from the preset config file.
     #[arg(long)]
     pub preset: Option<String>,

@@ -34,6 +34,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         compression,
         skip_compression,
         compression_level,
+        dictionary_from,
         preset,
         preset_file,
         pool_capacity,
@@ -96,8 +97,9 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         chunking,
         min_block_size,
         max_block_size,
+        dictionary_from.as_deref(),
         Arc::clone(&buffer_pool),
-    );
+    )?;
     let output_file = File::create(&output_path)?;
     let telemetry_options = RunTelemetryOptions {
         progress_interval: Duration::from_millis(settings.stats_interval_ms.max(50)),
@@ -228,8 +230,9 @@ fn build_archive_pipeline(
     chunking: Option<ChunkingArg>,
     min_block_size: Option<usize>,
     max_block_size: Option<usize>,
+    dictionary_from: Option<&std::path::Path>,
     buffer_pool: Arc<BufferPool>,
-) -> ArchivePipeline {
+) -> AppResult<ArchivePipeline> {
     let mut performance = PipelinePerformanceOptions::default();
     performance.compression_level = settings.compression_level;
     performance.lzma_extreme = settings.compression_extreme;
@@ -255,9 +258,10 @@ fn build_archive_pipeline(
         min_block_size,
         max_block_size,
     );
+    config.imported_dictionary_bank = dictionary_from.map(import_dictionary_bank).transpose()?;
     config.skip_compression = settings.skip_compression;
     config.performance = performance;
-    ArchivePipeline::new(config)
+    Ok(ArchivePipeline::new(config))
 }
 
 fn resolve_chunking_policy(
@@ -274,6 +278,11 @@ fn resolve_chunking_policy(
             max_block_size.unwrap_or(target_block_size.saturating_mul(2).max(target_block_size)),
         ),
     }
+}
+
+fn import_dictionary_bank(path: &std::path::Path) -> AppResult<oxide_core::ArchiveDictionaryBank> {
+    let reader = oxide_core::ArchiveReader::new(File::open(path)?)?;
+    Ok(reader.manifest().dictionary_bank().clone())
 }
 
 fn build_extract_pipeline(workers: usize) -> ArchivePipeline {

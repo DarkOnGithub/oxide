@@ -1363,6 +1363,60 @@ fn archive_writer_emits_reference_descriptors_for_duplicate_blocks()
     Ok(())
 }
 
+#[test]
+fn imported_dictionary_bank_is_reused_without_training() -> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    let base_root = source.path().join("seed");
+    let patch_path = source.path().join("patch.json");
+    let patch_data = br#"{"kind":"patch","message":"banana bandana banana patch"}"#.repeat(128);
+    std::fs::create_dir_all(&base_root)?;
+    for index in 0..16 {
+        std::fs::write(
+            base_root.join(format!("{index:02}.json")),
+            br#"{"kind":"base","message":"banana bandana banana banana"}"#,
+        )?;
+    }
+    std::fs::write(&patch_path, &patch_data)?;
+
+    let seed_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let seed_pipeline = build_dictionary_pipeline(8 * 1024, 2, seed_pool);
+    let seed_archive = seed_pipeline
+        .archive_path(&base_root, Vec::new(), RunTelemetryOptions::default(), None)?
+        .writer;
+    let seed_reader = ArchiveReader::new(Cursor::new(seed_archive))?;
+    let imported_bank = seed_reader.manifest().dictionary_bank().clone();
+    assert!(!imported_bank.is_empty());
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let mut config = ArchivePipelineConfig::new(8 * 1024, 2, buffer_pool, CompressionAlgo::Zstd);
+    config.imported_dictionary_bank = Some(imported_bank.clone());
+    let pipeline = ArchivePipeline::new(config);
+
+    let archive = pipeline
+        .archive_path(
+            &patch_path,
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let mut reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+
+    assert_eq!(reader.manifest().dictionary_bank(), &imported_bank);
+    let mut saw_dictionary_id = false;
+    for index in 0..reader.block_count() {
+        let (descriptor, _payload) = reader.read_block(index)?;
+        saw_dictionary_id |= descriptor.dictionary_id != 0;
+    }
+    assert!(saw_dictionary_id);
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, patch_data);
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn extract_path_preserves_file_metadata() -> Result<(), Box<dyn std::error::Error>> {
