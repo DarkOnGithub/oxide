@@ -1077,23 +1077,14 @@ def _print_manifest_entries(entries: List[Dict[str, object]], show_all: bool) ->
             print(f"  {description}")
 
 
-def _print_manifest_layout(parts: List[Dict[str, object]]) -> None:
-    print("Manifest layout")
-    entry_parts = [
-        part for part in parts if str(part.get("name", "")).startswith("entry[")
-    ]
-    other_parts = [part for part in parts if part not in entry_parts]
-    for part in other_parts:
-        print(f"  {_format_part(part)}")
-    if entry_parts:
-        first_index = entry_parts[0]["name"].split("[", 1)[1].split("]", 1)[0]
-        last_index = entry_parts[-1]["name"].split("[", 1)[1].split("]", 1)[0]
-        total_entry_bytes = sum(int(part["size"]) for part in entry_parts)
-        print(
-            "  "
-            f"entries[{first_index}..{last_index}]: {_format_bytes(total_entry_bytes)} "
-            f"({len(entry_parts):,} manifest entry records)"
-        )
+def _print_manifest_layout_summary(manifest: Dict[str, object]) -> None:
+    print("Manifest layout summary")
+    print(f"  manifest_magic: 4 B")
+    print(f"  manifest_version: 1 B")
+    print(f"  dictionary_count_varint: 1 B")
+    print(f"  entry_count_varint: 1 B")
+    print(f"  manifest_trailing: 0 B")
+    print(f"  entry_records: {manifest['entry_count']:,}")
 
 
 def _print_file_analysis(file_analysis: Dict[str, object]) -> None:
@@ -1187,11 +1178,11 @@ def print_human_report(
         f"  total_dictionary_bytes: {_format_bytes(int(manifest['total_dictionary_bytes']))}"
     )
     print()
-    _print_manifest_layout(manifest_layout["parts"])
+    _print_manifest_layout_summary(manifest)
     if manifest_layout["dictionaries"]:
         print()
         _print_part_group("Manifest dictionaries", manifest_layout["dictionaries"])
-    if manifest_layout["entries"]:
+    if show_all_entries and manifest_layout["entries"]:
         print()
         _print_manifest_entries(manifest_layout["entries"], show_all_entries)
     print()
