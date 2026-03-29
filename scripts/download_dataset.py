@@ -7,12 +7,20 @@ import shutil
 import ssl
 import subprocess
 import tarfile
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+
 SSL_CONTEXT = ssl.create_default_context()
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 
 @dataclass(frozen=True)
 class DatasetSpec:
@@ -22,25 +30,47 @@ class DatasetSpec:
     archive_type: str | None = None
     clone_depth: int | None = None
 
-# Individual data components
+
 COMPONENTS = {
-    "silesia": DatasetSpec("silesia", "archive", "https://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip", "zip"),
-    "enwik9": DatasetSpec("enwik9", "archive", "http://mattmahoney.net/dc/enwik9.zip", "zip"),
-    "linux": DatasetSpec("linux", "archive", "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.13.tar.xz", "tar"),
-    "nyctaxi": DatasetSpec("nyctaxi", "file", "https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2015-01.csv"),
-    "logs": DatasetSpec("logs", "archive", "https://zenodo.org/records/3227177/files/HDFS_1.tar.gz", "tar"),
-    "div2k": DatasetSpec("div2k", "archive", "http://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_valid_HR.zip", "zip"),
-    "chromium": DatasetSpec("chromium", "git", "https://chromium.googlesource.com/chromium/src", clone_depth=1),
+    "silesia": DatasetSpec(
+        "silesia", "archive",
+        "https://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip", "zip"
+    ),
+    "enwik9": DatasetSpec(
+        "enwik9", "archive",
+        "https://mattmahoney.net/dc/enwik9.zip", "zip"
+    ),
+    "linux": DatasetSpec(
+        "linux", "archive",
+        "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.13.tar.xz", "tar"
+    ),
+    "nyctaxi": DatasetSpec(
+        "nyctaxi", "file",
+        "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2015-01.parquet"
+    ),
+    "logs": DatasetSpec(
+        "logs", "archive",
+        "https://zenodo.org/api/records/3227177/files/HDFS_1.tar.gz/content", "tar"
+    ),
+    "div2k": DatasetSpec(
+        "div2k", "archive",
+        "https://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_valid_HR.zip", "zip"
+    ),
+    "chromium": DatasetSpec(
+        "chromium", "git",
+        "https://chromium.googlesource.com/chromium/src", clone_depth=1
+    ),
 }
 
-# Tiers mapping to components
+
 TIERS = {
     "200mb": ["silesia"],
     "1gb": ["enwik9"],
-    "5gb": ["silesia", "enwik9", "linux", "nyctaxi", "logs"], # Total ~4.9GB
-    "6gb": ["silesia", "enwik9", "linux", "nyctaxi", "logs", "div2k"], # Total ~6GB with Images
-    "10gb": ["chromium"], # Huge source tree
+    "5gb": ["silesia", "enwik9", "linux", "nyctaxi", "logs"],
+    "6gb": ["silesia", "enwik9", "linux", "nyctaxi", "logs", "div2k"],
+    "10gb": ["chromium"],
 }
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download archiver benchmark datasets by tier.")
@@ -53,68 +83,133 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, default=Path("datasets"), help="Storage directory.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing data.")
+    parser.add_argument("--keep-archives", action="store_true", help="Keep downloaded archives after extraction.")
     return parser.parse_args()
+
 
 def ensure_empty(path: Path, force: bool) -> None:
     if path.exists():
         if force:
-            shutil.rmtree(path) if path.is_dir() else path.unlink()
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
         else:
             raise FileExistsError(f"Target exists: {path}. Use --force to replace.")
 
-def download_file(url: str, dest: Path) -> None:
+
+def filename_from_url(url: str, response=None) -> str:
+    if response is not None:
+        cd = response.headers.get("Content-Disposition", "")
+        if "filename=" in cd:
+            raw = cd.split("filename=", 1)[1].strip().strip('"')
+            if raw:
+                return Path(raw).name
+
+    parsed = urllib.parse.urlparse(url)
+    name = Path(parsed.path).name
+    return name or "download.bin"
+
+
+def download_file(url: str, dest: Path | None = None) -> Path:
     print(f"Downloading {url}")
-    tmp_path = dest.with_suffix(dest.suffix + ".part")
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=600, context=SSL_CONTEXT) as resp:
+        if dest is None:
+            dest = Path(filename_from_url(resp.geturl(), resp))
+        tmp_path = dest.with_suffix(dest.suffix + ".part")
         with tmp_path.open("wb") as f:
             shutil.copyfileobj(resp, f, length=1024 * 1024)
     tmp_path.replace(dest)
+    return dest
+
+
+def is_within_directory(directory: Path, target: Path) -> bool:
+    try:
+        target.resolve().relative_to(directory.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def safe_extract_zip(archive_path: Path, target_dir: Path) -> None:
+    with zipfile.ZipFile(archive_path, "r") as zf:
+        for member in zf.infolist():
+            member_path = target_dir / member.filename
+            if not is_within_directory(target_dir, member_path):
+                raise RuntimeError(f"Unsafe zip path detected: {member.filename}")
+        zf.extractall(target_dir)
+
+
+def safe_extract_tar(archive_path: Path, target_dir: Path) -> None:
+    with tarfile.open(archive_path, "r:*") as tf:
+        for member in tf.getmembers():
+            member_path = target_dir / member.name
+            if not is_within_directory(target_dir, member_path):
+                raise RuntimeError(f"Unsafe tar path detected: {member.name}")
+        tf.extractall(target_dir)
+
 
 def extract_archive(archive_path: Path, target_dir: Path, archive_type: str) -> None:
     print(f"Extracting {archive_path.name}...")
     if archive_type == "zip":
-        with zipfile.ZipFile(archive_path, "r") as zf:
-            zf.extractall(target_dir)
+        safe_extract_zip(archive_path, target_dir)
     elif archive_type == "tar":
-        with tarfile.open(archive_path, "r:*") as tf:
-            tf.extractall(target_dir)
+        safe_extract_tar(archive_path, target_dir)
+    else:
+        raise ValueError(f"Unsupported archive type: {archive_type}")
 
-def download_component(spec: DatasetSpec, output_dir: Path, force: bool) -> None:
+
+def download_component(spec: DatasetSpec, output_dir: Path, force: bool, keep_archives: bool) -> None:
     target_dir = output_dir / spec.name
     if target_dir.exists() and not force:
         print(f"Skipping {spec.name} (already exists).")
         return
+
     ensure_empty(target_dir, force)
 
     if spec.kind == "archive":
         target_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = target_dir / Path(spec.source.split("?")[0]).name
-        download_file(spec.source, archive_path)
-        extract_archive(archive_path, target_dir, spec.archive_type or "zip")
-        archive_path.unlink()
+        archive_path = download_file(spec.source, None)
+        archive_dest = target_dir / archive_path.name
+        shutil.move(str(archive_path), archive_dest)
+        extract_archive(archive_dest, target_dir, spec.archive_type or "zip")
+        if not keep_archives:
+            archive_dest.unlink()
+
     elif spec.kind == "file":
         target_dir.mkdir(parents=True, exist_ok=True)
-        download_file(spec.source, target_dir / Path(spec.source).name)
+        dest_name = Path(urllib.parse.urlparse(spec.source).path).name
+        download_file(spec.source, target_dir / dest_name)
+
     elif spec.kind == "git":
-        cmd = ["git", "clone", "--depth", str(spec.clone_depth or 1), spec.source, str(target_dir)]
+        cmd = [
+            "git", "clone",
+            "--depth", str(spec.clone_depth or 1),
+            spec.source,
+            str(target_dir),
+        ]
         subprocess.run(cmd, check=True)
+
+    else:
+        raise ValueError(f"Unsupported component kind: {spec.kind}")
+
 
 def main() -> int:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    
-    selected_components = []
+
     if args.tier == "all":
         selected_components = list(COMPONENTS.keys())
     else:
         selected_components = TIERS[args.tier]
 
     for comp_key in selected_components:
-        download_component(COMPONENTS[comp_key], args.output_dir, args.force)
-    
+        download_component(COMPONENTS[comp_key], args.output_dir, args.force, args.keep_archives)
+
     print(f"\nFinished preparing the {args.tier} suite.")
     return 0
+
 
 if __name__ == "__main__":
     import sys
