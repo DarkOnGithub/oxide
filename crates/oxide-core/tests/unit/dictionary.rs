@@ -42,22 +42,3 @@ fn classify_path_detects_normalized_extension_dictionary_class() {
         Some(DictionaryClass::Extension("html".to_string()))
     );
 }
-
-#[test]
-fn trainer_groups_samples_by_extension() {
-    let mut trainer = DictionaryTrainer::new(ArchiveDictionaryMode::Auto);
-    for _ in 0..16 {
-        trainer.observe_path(
-            br#"{"kind":"log","message":"banana bandana banana"}"#,
-            Path::new("nested/data.json"),
-        );
-    }
-
-    let bank = trainer
-        .build(CompressionAlgo::Zstd, Some(6))
-        .expect("dictionary bank should build");
-
-    assert!(bank.dictionaries().iter().any(|dictionary| {
-        dictionary.class == DictionaryClass::Extension("json".to_string()) && dictionary.id != 0
-    }));
-}

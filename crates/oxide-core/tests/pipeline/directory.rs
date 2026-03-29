@@ -105,11 +105,10 @@ fn probe_plan_uses_extension_based_raw_storage() {
 
     assert_eq!(plans.len(), 1);
     assert!(plans[0].force_raw_storage);
-    assert_eq!(plans[0].max_block_size, 16);
 }
 
 #[test]
-fn probe_plan_keeps_target_block_size_for_small_compressible_files() {
+fn probe_plan_marks_compressible_files_as_non_raw_storage() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
     fs::write(root.join("alpha.txt"), b"alpha alpha alpha alpha\n").expect("write alpha");
@@ -124,7 +123,7 @@ fn probe_plan_keeps_target_block_size_for_small_compressible_files() {
     .expect("probe plans");
 
     assert_eq!(plans.len(), 1);
-    assert_eq!(plans[0].max_block_size, 128);
+    assert!(!plans[0].force_raw_storage);
 }
 
 #[test]
@@ -140,11 +139,9 @@ fn block_count_uses_fixed_size_blocks_without_extension_boundaries() {
         &[
             FileProbePlan {
                 force_raw_storage: false,
-                max_block_size: 4,
             },
             FileProbePlan {
                 force_raw_storage: false,
-                max_block_size: 4,
             },
         ],
         4,
@@ -167,11 +164,9 @@ fn block_count_accounts_for_raw_storage_policy_changes() {
         &[
             FileProbePlan {
                 force_raw_storage: false,
-                max_block_size: 8,
             },
             FileProbePlan {
                 force_raw_storage: true,
-                max_block_size: 8,
             },
         ],
         8,
@@ -195,15 +190,12 @@ fn block_count_does_not_merge_past_fixed_target_when_limit_is_larger() {
         &[
             FileProbePlan {
                 force_raw_storage: false,
-                max_block_size: 16,
             },
             FileProbePlan {
                 force_raw_storage: false,
-                max_block_size: 16,
             },
             FileProbePlan {
                 force_raw_storage: false,
-                max_block_size: 16,
             },
         ],
         8,

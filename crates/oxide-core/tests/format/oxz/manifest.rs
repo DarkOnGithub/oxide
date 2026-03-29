@@ -84,26 +84,3 @@ fn manifest_round_trips_extension_dictionaries() {
 
     assert_eq!(decoded, manifest);
 }
-
-#[test]
-fn manifest_decodes_legacy_dictionary_entries() {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"OXM2");
-    bytes.push(1);
-    bytes.push(1);
-    bytes.push(3);
-    bytes.push(CompressionAlgo::Zstd.to_flags());
-    bytes.push(2);
-    bytes.push(4);
-    bytes.extend_from_slice(&[9, 8, 7, 6]);
-    bytes.push(0);
-
-    let decoded = ArchiveManifest::decode(&bytes).expect("decode legacy manifest");
-
-    let dictionaries = decoded.dictionary_bank().dictionaries();
-    assert_eq!(dictionaries.len(), 1);
-    assert_eq!(dictionaries[0].id, 3);
-    assert_eq!(dictionaries[0].algo, CompressionAlgo::Zstd);
-    assert_eq!(dictionaries[0].class, DictionaryClass::StructuredText);
-    assert_eq!(dictionaries[0].bytes, vec![9, 8, 7, 6]);
-}

@@ -131,15 +131,6 @@ mod directory_tests {
     }
 
     #[test]
-    fn block_count_planner_ignores_extension_changes() {
-        let mut planner = BlockCountPlanner::new(8);
-        planner.push_file(std::path::Path::new("root/a.json"), 4, false);
-        planner.push_file(std::path::Path::new("root/b.html"), 4, false);
-
-        assert_eq!(planner.finish(), 1);
-    }
-
-    #[test]
     fn submitter_uses_mapped_batches_for_full_mmap_sized_blocks() {
         let temp = tempdir().expect("tempdir");
         let file_path = temp.path().join("payload.bin");
@@ -236,40 +227,5 @@ mod directory_tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].source_path, PathBuf::from("root"));
         assert_eq!(batches[0].data.as_slice(), b"aaaabbbb");
-    }
-
-    #[test]
-    fn submitter_respects_fixed_block_size_even_with_limit_override() {
-        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8);
-        let mut batches = Vec::new();
-
-        submitter
-            .push_bytes_with_limit("root/01.txt", b"aaaa", false, 16, |batch| {
-                batches.push(batch);
-                Ok(())
-            })
-            .expect("first push should succeed");
-        submitter
-            .push_bytes_with_limit("root/02.txt", b"bbbb", false, 16, |batch| {
-                batches.push(batch);
-                Ok(())
-            })
-            .expect("second push should succeed");
-        submitter
-            .push_bytes_with_limit("root/03.txt", b"cccc", false, 16, |batch| {
-                batches.push(batch);
-                Ok(())
-            })
-            .expect("third push should succeed");
-        submitter
-            .finish(|batch| {
-                batches.push(batch);
-                Ok(())
-            })
-            .expect("finish should succeed");
-
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].data.as_slice(), b"aaaabbbb");
-        assert_eq!(batches[1].data.as_slice(), b"cccc");
     }
 }

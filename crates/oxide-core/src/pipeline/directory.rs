@@ -50,7 +50,6 @@ pub(super) struct DirectoryDiscovery {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct FileProbePlan {
     pub(super) force_raw_storage: bool,
-    pub(super) max_block_size: usize,
 }
 
 /// Utility for grouping file data into batches while respecting raw-storage boundaries.
@@ -111,21 +110,6 @@ impl DirectoryBatchSubmitter {
         Ok(())
     }
 
-    pub fn push_bytes_with_limit<P, F>(
-        &mut self,
-        source_path: P,
-        bytes: &[u8],
-        force_raw_storage: bool,
-        _max_block_size: usize,
-        submit: F,
-    ) -> Result<()>
-    where
-        P: AsRef<Path>,
-        F: FnMut(Batch) -> Result<()>,
-    {
-        self.push_bytes(source_path, bytes, force_raw_storage, submit)
-    }
-
     pub fn push_mapped<P, F>(
         &mut self,
         _source_path: P,
@@ -182,23 +166,6 @@ impl DirectoryBatchSubmitter {
         }
 
         Ok(())
-    }
-
-    pub fn push_mapped_with_limit<P, F>(
-        &mut self,
-        source_path: P,
-        map: Arc<Mmap>,
-        start: usize,
-        end: usize,
-        force_raw_storage: bool,
-        _max_block_size: usize,
-        submit: F,
-    ) -> Result<()>
-    where
-        P: AsRef<Path>,
-        F: FnMut(Batch) -> Result<()>,
-    {
-        self.push_mapped(source_path, map, start, end, force_raw_storage, submit)
     }
 
     pub fn finish<F>(&mut self, submit: F) -> Result<()>
@@ -426,7 +393,7 @@ pub(super) fn manifest_from_discovery(
 
 pub(super) fn detect_file_probe_plans(
     discovery: &DirectoryDiscovery,
-    target_block_size: usize,
+    _target_block_size: usize,
     _compression_plan: ChunkEncodingPlan,
     _threads: usize,
 ) -> Result<Vec<FileProbePlan>> {
@@ -435,7 +402,6 @@ pub(super) fn detect_file_probe_plans(
         .iter()
         .map(|file| FileProbePlan {
             force_raw_storage: should_force_raw_storage(&file.full_path),
-            max_block_size: target_block_size.max(1),
         })
         .collect())
 }
@@ -462,11 +428,7 @@ pub(super) fn estimate_directory_block_count(
     for (index, file) in discovery.files.iter().enumerate() {
         let file_size = usize::try_from(file.size)
             .map_err(|_| crate::OxideError::InvalidFormat("file size exceeds usize range"))?;
-        planner.push_file(
-            &file.full_path,
-            file_size,
-            file_probe_plans[index].force_raw_storage,
-        );
+        planner.push_len(file_size, file_probe_plans[index].force_raw_storage);
     }
 
     u32::try_from(planner.finish())
@@ -563,21 +525,6 @@ impl BlockCountPlanner {
                 self.flush_pending();
             }
         }
-    }
-
-    pub fn push_file(&mut self, path: &Path, len: usize, force_raw_storage: bool) {
-        let _ = path;
-        self.push_len(len, force_raw_storage);
-    }
-
-    pub fn push_file_with_limit(
-        &mut self,
-        path: &Path,
-        len: usize,
-        force_raw_storage: bool,
-        _max_block_size: usize,
-    ) {
-        self.push_file(path, len, force_raw_storage);
     }
 
     pub fn finish(mut self) -> usize {

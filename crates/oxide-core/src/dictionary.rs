@@ -24,27 +24,7 @@ pub enum DictionaryClass {
     Extension(String),
 }
 
-impl DictionaryClass {
-    pub fn legacy_id(&self) -> Option<u8> {
-        match self {
-            Self::Text => Some(1),
-            Self::StructuredText => Some(2),
-            Self::Binary => Some(3),
-            Self::Extension(_) => None,
-        }
-    }
-
-    pub fn from_legacy_id(id: u8) -> Result<Self> {
-        match id {
-            1 => Ok(Self::Text),
-            2 => Ok(Self::StructuredText),
-            3 => Ok(Self::Binary),
-            _ => Err(OxideError::InvalidFormat(
-                "invalid archive dictionary class id",
-            )),
-        }
-    }
-}
+impl DictionaryClass {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveDictionary {
@@ -160,11 +140,6 @@ impl DictionaryTrainer {
 
     pub fn observe(&mut self, sample: &[u8]) {
         self.observe_class(sample, classify_sample(sample));
-    }
-
-    pub fn observe_path(&mut self, sample: &[u8], path: &Path) {
-        let class = classify_path(path).unwrap_or_else(|| classify_sample(sample));
-        self.observe_class(sample, class);
     }
 
     fn observe_class(&mut self, sample: &[u8], class: DictionaryClass) {
