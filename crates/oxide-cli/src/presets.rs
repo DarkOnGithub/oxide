@@ -3,11 +3,11 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use oxide_core::{ArchiveDictionaryMode, CompressionAlgo};
+use oxide_core::{ArchiveDictionaryMode, ChunkingPolicy, CompressionAlgo};
 use serde::Deserialize;
 
 use crate::AppResult;
-use crate::cli::{CompressionArg, parse_size};
+use crate::cli::{ChunkingArg, CompressionArg, parse_size};
 
 const DEFAULT_PRESETS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/presets.json");
 
@@ -18,6 +18,8 @@ pub struct ResolvedArchiveSettings {
     pub compression: CompressionAlgo,
     pub skip_compression: bool,
     pub dictionary_mode: ArchiveDictionaryMode,
+    pub chunking_policy: ChunkingPolicy,
+    pub dictionary_from: Option<std::path::PathBuf>,
     pub compression_level: Option<i32>,
     pub compression_extreme: bool,
     pub lzma_dictionary_size: Option<usize>,
@@ -40,6 +42,10 @@ pub struct ArchiveOverrides {
     pub compression: Option<CompressionAlgo>,
     pub skip_compression: bool,
     pub dictionary_mode: Option<ArchiveDictionaryMode>,
+    pub chunking_mode: Option<ChunkingArg>,
+    pub chunking_min_block_size: Option<usize>,
+    pub chunking_max_block_size: Option<usize>,
+    pub dictionary_from: Option<std::path::PathBuf>,
     pub compression_level: Option<i32>,
     pub block_size: Option<usize>,
     pub workers: Option<usize>,
@@ -111,6 +117,8 @@ struct ArchivePresetRegistry {
 struct ArchivePresetConfig {
     compression: Option<CompressionConfig>,
     dictionary_mode: Option<String>,
+    chunking: Option<ChunkingConfig>,
+    dictionary_from: Option<std::path::PathBuf>,
     block_size: Option<SizeValue>,
     workers: Option<usize>,
     pool_capacity: Option<SizeValue>,
@@ -134,6 +142,14 @@ struct CompressionConfig {
     dictionary_size: Option<SizeValue>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ChunkingConfig {
+    mode: Option<String>,
+    min_block_size: Option<SizeValue>,
+    max_block_size: Option<SizeValue>,
+}
+
 impl ArchivePresetConfig {
     fn merge_from(&mut self, other: &Self) {
         merge_nested_option(
@@ -144,6 +160,14 @@ impl ArchivePresetConfig {
             },
         );
         merge_option(&mut self.dictionary_mode, other.dictionary_mode.clone());
+        merge_nested_option(
+            &mut self.chunking,
+            other.chunking.clone(),
+            |current, incoming| {
+                current.merge_from(&incoming);
+            },
+        );
+        merge_option(&mut self.dictionary_from, other.dictionary_from.clone());
         merge_option(&mut self.block_size, other.block_size.clone());
         merge_option(&mut self.workers, other.workers);
         merge_option(&mut self.pool_capacity, other.pool_capacity.clone());
@@ -177,6 +201,13 @@ impl ArchivePresetConfig {
             .compression
             .ok_or_else(|| invalid_input("archive preset is missing compression"))?
             .resolve(overrides.compression, overrides.compression_level)?;
+        let block_size = resolve_usize(overrides.block_size, self.block_size, "block_size")?;
+        let preset_chunking_mode = self
+            .chunking
+            .as_ref()
+            .and_then(|chunking| chunking.mode.as_deref())
+            .map(parse_chunking_mode)
+            .transpose()?;
 
         Ok(ResolvedArchiveSettings {
             profile_name: preset_name.to_string(),
@@ -190,10 +221,20 @@ impl ArchivePresetConfig {
                     .transpose()?
                     .unwrap_or(ArchiveDictionaryMode::Off),
             ),
+            chunking_policy: resolve_chunking_policy(
+                block_size,
+                overrides.chunking_mode.or(preset_chunking_mode),
+                overrides.chunking_min_block_size,
+                overrides.chunking_max_block_size,
+                self.chunking.as_ref(),
+            )?,
+            dictionary_from: overrides
+                .dictionary_from
+                .or_else(|| self.dictionary_from.clone()),
             compression_level: compression.level,
             compression_extreme: compression.extreme,
             lzma_dictionary_size: compression.lzma_dictionary_size,
-            block_size: resolve_usize(overrides.block_size, self.block_size, "block_size")?,
+            block_size,
             workers: resolve_number(overrides.workers, self.workers, "workers")?,
             pool_capacity: resolve_usize(
                 overrides.pool_capacity,
@@ -259,6 +300,52 @@ fn parse_dictionary_mode(value: &str) -> Result<ArchiveDictionaryMode, io::Error
     }
 }
 
+fn parse_chunking_mode(value: &str) -> Result<ChunkingArg, io::Error> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "fixed" => Ok(ChunkingArg::Fixed),
+        "cdc" => Ok(ChunkingArg::Cdc),
+        other => Err(invalid_input(format!(
+            "unknown chunking mode '{other}': expected fixed or cdc"
+        ))),
+    }
+}
+
+fn resolve_chunking_policy(
+    block_size: usize,
+    override_mode: Option<ChunkingArg>,
+    override_min: Option<usize>,
+    override_max: Option<usize>,
+    preset_chunking: Option<&ChunkingConfig>,
+) -> Result<ChunkingPolicy, io::Error> {
+    let default_mode = preset_chunking
+        .and_then(|chunking| chunking.mode.as_deref())
+        .map(parse_chunking_mode)
+        .transpose()?;
+    let mode = override_mode.or(default_mode).unwrap_or(ChunkingArg::Fixed);
+
+    let preset_min = preset_chunking
+        .and_then(|chunking| chunking.min_block_size.as_ref())
+        .map(|value| value.parse("chunking.min_block_size"))
+        .transpose()?;
+    let preset_max = preset_chunking
+        .and_then(|chunking| chunking.max_block_size.as_ref())
+        .map(|value| value.parse("chunking.max_block_size"))
+        .transpose()?;
+
+    Ok(match mode {
+        ChunkingArg::Fixed => ChunkingPolicy::fixed_for_target(block_size),
+        ChunkingArg::Cdc => ChunkingPolicy::cdc(
+            block_size,
+            override_min
+                .or(preset_min)
+                .unwrap_or((block_size / 4).max(1)),
+            override_max
+                .or(preset_max)
+                .unwrap_or(block_size.saturating_mul(2).max(block_size)),
+        ),
+    })
+}
+
 impl CompressionConfig {
     fn merge_from(&mut self, other: &Self) {
         if other.compressor.is_some() {
@@ -300,6 +387,14 @@ impl CompressionConfig {
             extreme,
             lzma_dictionary_size,
         })
+    }
+}
+
+impl ChunkingConfig {
+    fn merge_from(&mut self, other: &Self) {
+        merge_option(&mut self.mode, other.mode.clone());
+        merge_option(&mut self.min_block_size, other.min_block_size.clone());
+        merge_option(&mut self.max_block_size, other.max_block_size.clone());
     }
 }
 
