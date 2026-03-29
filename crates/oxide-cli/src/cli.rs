@@ -38,6 +38,18 @@ pub struct ArchiveArgs {
     #[arg(long, value_parser = parse_size)]
     pub block_size: Option<usize>,
 
+    /// Chunking mode used to split file payloads into blocks.
+    #[arg(long, value_enum)]
+    pub chunking: Option<ChunkingArg>,
+
+    /// Minimum block size for CDC chunking.
+    #[arg(long, value_parser = parse_size)]
+    pub min_block_size: Option<usize>,
+
+    /// Maximum block size for CDC chunking.
+    #[arg(long, value_parser = parse_size)]
+    pub max_block_size: Option<usize>,
+
     /// Number of compression worker threads (0 = auto from physical cores).
     #[arg(long)]
     pub workers: Option<usize>,
@@ -155,6 +167,12 @@ pub enum CompressionArg {
     Lz4,
     Lzma,
     Zstd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChunkingArg {
+    Fixed,
+    Cdc,
 }
 
 impl From<CompressionArg> for CompressionAlgo {

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::io::MmapInput;
-use crate::io::chunking::ChunkingPolicy;
+use crate::io::chunking::{ChunkingMode, ChunkingPolicy, find_cdc_boundary};
 use crate::telemetry;
 use crate::telemetry::profile;
 use crate::telemetry::tags;
@@ -123,9 +123,12 @@ impl InputScanner {
         let mut start = 0usize;
         let source_path = path.to_path_buf();
         let mut id = 0usize;
+        let map = mmap.mapping().ok_or(crate::OxideError::InvalidFormat(
+            "missing mmap mapping for non-empty file",
+        ))?;
 
         while start < len {
-            let end = self.find_block_boundary(start, len);
+            let end = self.find_block_boundary_in_slice(&map[..], start);
             let batch_data = mmap.mapped_slice(start, end)?;
             batches.push(Batch {
                 id,
@@ -149,8 +152,27 @@ impl InputScanner {
         }
 
         let policy = self.chunking_policy;
+        if matches!(policy.mode, ChunkingMode::Cdc) {
+            return policy.upper_bound(start, len);
+        }
         let target = start.saturating_add(policy.target_size).min(len);
         let max_cut = policy.upper_bound(start, len);
         target.min(max_cut)
+    }
+
+    pub fn find_block_boundary_in_slice(&self, data: &[u8], start: usize) -> usize {
+        if start >= data.len() {
+            return data.len();
+        }
+
+        let policy = self.chunking_policy;
+        match policy.mode {
+            ChunkingMode::Fixed => {
+                let target = start.saturating_add(policy.target_size).min(data.len());
+                let max_cut = policy.upper_bound(start, data.len());
+                target.min(max_cut)
+            }
+            ChunkingMode::Cdc => find_cdc_boundary(policy, data, start),
+        }
     }
 }

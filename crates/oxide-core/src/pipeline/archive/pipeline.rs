@@ -39,7 +39,7 @@ impl ArchivePipeline {
     /// Creates a new archive pipeline.
     pub fn new(config: ArchivePipelineConfig) -> Self {
         Self {
-            scanner: InputScanner::new(config.target_block_size),
+            scanner: InputScanner::with_chunking_policy(config.chunking_policy),
             num_workers: config.workers.max(1),
             compression_algo: config.compression_algo,
             skip_compression: config.skip_compression,
@@ -51,6 +51,7 @@ impl ArchivePipeline {
     fn config(&self) -> ArchivePipelineConfig {
         ArchivePipelineConfig {
             target_block_size: self.scanner.target_block_size(),
+            chunking_policy: self.scanner.chunking_policy(),
             workers: self.num_workers,
             compression_algo: self.compression_algo,
             skip_compression: self.skip_compression,
