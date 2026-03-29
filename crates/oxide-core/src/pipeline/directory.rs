@@ -53,6 +53,9 @@ pub(super) struct FileProbePlan {
     pub(super) force_raw_storage: bool,
 }
 
+const DIRECTORY_FRAGMENT_MIN_FILE_SIZE: u64 = 4 * 1024;
+const DIRECTORY_FRAGMENT_MAX_FILE_SIZE: u64 = 256 * 1024;
+
 /// Utility for grouping file data into batches while respecting raw-storage boundaries.
 #[derive(Debug, Clone)]
 pub struct DirectoryBatchSubmitter {
@@ -385,9 +388,24 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
     })
 }
 
+#[cfg(test)]
 pub(super) fn manifest_from_discovery(
     discovery: &DirectoryDiscovery,
 ) -> crate::types::Result<crate::format::ArchiveManifest> {
+    let file_order = (0..discovery.files.len()).collect::<Vec<_>>();
+    manifest_from_discovery_with_file_order(discovery, &file_order)
+}
+
+pub(super) fn manifest_from_discovery_with_file_order(
+    discovery: &DirectoryDiscovery,
+    file_order: &[usize],
+) -> crate::types::Result<crate::format::ArchiveManifest> {
+    if discovery.files.len() != file_order.len() {
+        return Err(crate::OxideError::InvalidFormat(
+            "directory file order length mismatch",
+        ));
+    }
+
     let mut entries = Vec::with_capacity(
         discovery.directories.len() + discovery.symlinks.len() + discovery.files.len(),
     );
@@ -419,7 +437,13 @@ pub(super) fn manifest_from_discovery(
     );
 
     let mut content_offset = 0u64;
-    for file in &discovery.files {
+    for &file_index in file_order {
+        let file = discovery
+            .files
+            .get(file_index)
+            .ok_or(crate::OxideError::InvalidFormat(
+                "directory file order index out of range",
+            ))?;
         entries.push(ArchiveListingEntry::file(
             file.entry.rel_path.clone(),
             file.size,
@@ -450,8 +474,26 @@ pub(super) fn detect_file_probe_plans(
         .collect())
 }
 
+#[cfg(test)]
 pub(super) fn estimate_directory_block_count(
     discovery: &DirectoryDiscovery,
+    file_probe_plans: &[FileProbePlan],
+    block_size: usize,
+    compression_plan: ChunkEncodingPlan,
+) -> Result<u32> {
+    let file_order = (0..discovery.files.len()).collect::<Vec<_>>();
+    estimate_directory_block_count_with_file_order(
+        discovery,
+        &file_order,
+        file_probe_plans,
+        block_size,
+        compression_plan,
+    )
+}
+
+pub(super) fn estimate_directory_block_count_with_file_order(
+    discovery: &DirectoryDiscovery,
+    file_order: &[usize],
     file_probe_plans: &[FileProbePlan],
     block_size: usize,
     compression_plan: ChunkEncodingPlan,
@@ -462,19 +504,73 @@ pub(super) fn estimate_directory_block_count(
         ));
     }
 
+    if discovery.files.len() != file_order.len() {
+        return Err(crate::OxideError::InvalidFormat(
+            "directory file order length mismatch",
+        ));
+    }
+
     let mut planner = BlockCountPlanner::new_with_plan(block_size, compression_plan);
-    for (index, file) in discovery.files.iter().enumerate() {
+    for &file_index in file_order {
+        let file = discovery
+            .files
+            .get(file_index)
+            .ok_or(crate::OxideError::InvalidFormat(
+                "directory file order index out of range",
+            ))?;
         let file_size = usize::try_from(file.size)
             .map_err(|_| crate::OxideError::InvalidFormat("file size exceeds usize range"))?;
         planner.push_len(
             &file.full_path,
             file_size,
-            file_probe_plans[index].force_raw_storage,
+            file_probe_plans[file_index].force_raw_storage,
         );
     }
 
     u32::try_from(planner.finish())
         .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v2"))
+}
+
+pub(super) fn plan_directory_file_order(
+    discovery: &DirectoryDiscovery,
+    file_probe_plans: &[FileProbePlan],
+    block_size: usize,
+) -> Result<Vec<usize>> {
+    if discovery.files.len() != file_probe_plans.len() {
+        return Err(crate::OxideError::InvalidFormat(
+            "directory raw storage plan mismatch",
+        ));
+    }
+
+    let fragment_threshold = directory_fragment_file_size_threshold(block_size);
+    let mut regular = Vec::with_capacity(discovery.files.len());
+    let mut fragments = Vec::new();
+    let mut raw_fragments = Vec::new();
+
+    for (index, file) in discovery.files.iter().enumerate() {
+        let is_fragment = file.size <= fragment_threshold;
+        if !is_fragment {
+            regular.push(index);
+            continue;
+        }
+
+        if file_probe_plans[index].force_raw_storage {
+            raw_fragments.push(index);
+        } else {
+            fragments.push(index);
+        }
+    }
+
+    regular.extend(fragments);
+    regular.extend(raw_fragments);
+    Ok(regular)
+}
+
+fn directory_fragment_file_size_threshold(block_size: usize) -> u64 {
+    ((block_size.max(1) as u64) / 8).clamp(
+        DIRECTORY_FRAGMENT_MIN_FILE_SIZE,
+        DIRECTORY_FRAGMENT_MAX_FILE_SIZE,
+    )
 }
 
 #[cfg(test)]

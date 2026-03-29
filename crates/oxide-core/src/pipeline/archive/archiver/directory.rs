@@ -58,15 +58,18 @@ where
         producer_compression_plan,
         config.performance.producer_threads,
     )?;
+    let file_order =
+        directory::plan_directory_file_order(&discovery, &file_probe_plans, block_size)?;
 
-    let block_count = directory::estimate_directory_block_count(
+    let block_count = directory::estimate_directory_block_count_with_file_order(
         &discovery,
+        &file_order,
         &file_probe_plans,
         block_size,
         producer_compression_plan,
     )?;
     let dictionary_bank = train_directory_dictionary_bank(config, &discovery)?;
-    let manifest = directory::manifest_from_discovery(&discovery)?
+    let manifest = directory::manifest_from_discovery_with_file_order(&discovery, &file_order)?
         .with_dictionary_bank(dictionary_bank.clone());
     let input_bytes_total = discovery.input_bytes_total;
     let manifest_bytes = manifest.encode()?.len();
@@ -183,8 +186,14 @@ where
     let mut pending_results = ReorderBuffer::<CompressedBlock>::with_limit(total_blocks.max(1));
     let (batch_tx, batch_rx) = bounded::<Batch>(max_inflight_blocks.max(1));
     let producer_root = discovery.root.clone();
-    let producer_files = discovery.files.clone();
-    let producer_file_probe_plans = file_probe_plans;
+    let producer_files = file_order
+        .iter()
+        .map(|&index| discovery.files[index].clone())
+        .collect::<Vec<_>>();
+    let producer_file_probe_plans = file_order
+        .iter()
+        .map(|&index| file_probe_plans[index])
+        .collect::<Vec<_>>();
     let producer_block_size = block_size;
     let stream_read_buffer_size = config.performance.directory_stream_read_buffer_size.max(1);
     let producer_threads = config.performance.producer_threads.max(1);
