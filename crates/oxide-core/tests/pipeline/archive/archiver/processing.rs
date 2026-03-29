@@ -109,7 +109,7 @@ fn incompressible_probe_keeps_repetitive_data_compressible() {
 }
 
 #[test]
-fn lzma_probe_is_effectively_disabled() {
+fn lzma_probe_is_now_enabled() {
     let regular = crate::types::ChunkEncodingPlan::new(CompressionAlgo::Lzma)
         .with_level(Some(7))
         .with_lzma_extreme(false);
@@ -120,15 +120,15 @@ fn lzma_probe_is_effectively_disabled() {
     let regular_config = compression_probe_config(regular);
     let extreme_config = compression_probe_config(extreme);
 
-    assert_eq!(regular_config.min_source_len, usize::MAX);
-    assert_eq!(extreme_config.min_source_len, usize::MAX);
+    assert_eq!(regular_config.min_source_len, INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN);
+    assert_eq!(extreme_config.min_source_len, INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN);
     assert!(regular_config.sample_len < INCOMPRESSIBLE_PROBE_SAMPLE_LEN);
     assert_eq!(regular_config.sample_len, extreme_config.sample_len);
-    assert!(!should_skip_full_compression_probe(
+    assert!(should_skip_full_compression_probe(
         LZMA_PROBE_MIN_SOURCE_LEN,
         regular
     ));
-    assert!(!should_skip_full_compression_probe(
+    assert!(should_skip_full_compression_probe(
         LZMA_EXTREME_PROBE_MIN_SOURCE_LEN,
         extreme,
     ));
