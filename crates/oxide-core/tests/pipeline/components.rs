@@ -239,4 +239,38 @@ mod directory_tests {
         assert_eq!(batches[0].data.as_slice(), b"aaaa");
         assert_eq!(batches[1].data.as_slice(), b"bbbb");
     }
+
+    #[test]
+    fn submitter_merges_small_files_up_to_adaptive_limit() {
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 8);
+        let mut batches = Vec::new();
+
+        submitter
+            .push_bytes_with_limit("root/01.txt", b"aaaa", false, 16, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("first push should succeed");
+        submitter
+            .push_bytes_with_limit("root/02.txt", b"bbbb", false, 16, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("second push should succeed");
+        submitter
+            .push_bytes_with_limit("root/03.txt", b"cccc", false, 16, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("third push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].data.as_slice(), b"aaaabbbbcccc");
+    }
 }

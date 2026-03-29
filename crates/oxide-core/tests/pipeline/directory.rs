@@ -1,4 +1,7 @@
-use super::{detect_file_probe_plans, discover_directory_tree, estimate_directory_block_count};
+use super::{
+    FileProbePlan, detect_file_probe_plans, discover_directory_tree, estimate_directory_block_count,
+};
+use crate::{ChunkEncodingPlan, CompressionAlgo};
 use std::fs;
 use tempfile::tempdir;
 
@@ -92,10 +95,35 @@ fn probe_plan_uses_extension_based_raw_storage() {
     fs::write(root.join("photo.jpg"), [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).expect("write jpeg");
 
     let discovery = discover_directory_tree(root).expect("discover directory");
-    let plans = detect_file_probe_plans(&discovery, 1).expect("probe plans");
+    let plans = detect_file_probe_plans(
+        &discovery,
+        16,
+        ChunkEncodingPlan::new(CompressionAlgo::Zstd),
+        1,
+    )
+    .expect("probe plans");
 
     assert_eq!(plans.len(), 1);
     assert!(plans[0].force_raw_storage);
+}
+
+#[test]
+fn probe_plan_expands_blocks_for_small_compressible_files() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    fs::write(root.join("alpha.txt"), b"alpha alpha alpha alpha\n").expect("write alpha");
+
+    let discovery = discover_directory_tree(root).expect("discover directory");
+    let plans = detect_file_probe_plans(
+        &discovery,
+        128,
+        ChunkEncodingPlan::new(CompressionAlgo::Zstd),
+        1,
+    )
+    .expect("probe plans");
+
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].max_block_size, 256);
 }
 
 #[test]
@@ -106,8 +134,21 @@ fn block_count_accounts_for_extension_boundaries() {
     fs::write(root.join("beta.bin"), [0, 159, 146, 150, 42]).expect("write beta");
 
     let discovery = discover_directory_tree(root).expect("discover directory");
-    let raw_plan = vec![false; discovery.files.len()];
-    let block_count = estimate_directory_block_count(&discovery, &raw_plan, 4).expect("plan");
+    let block_count = estimate_directory_block_count(
+        &discovery,
+        &[
+            FileProbePlan {
+                force_raw_storage: false,
+                max_block_size: 4,
+            },
+            FileProbePlan {
+                force_raw_storage: false,
+                max_block_size: 4,
+            },
+        ],
+        4,
+    )
+    .expect("plan");
 
     assert_eq!(block_count, 4);
 }
@@ -120,8 +161,53 @@ fn block_count_accounts_for_raw_storage_policy_changes() {
     fs::write(root.join("second.jpg"), b"bbbbbb").expect("write second");
 
     let discovery = discover_directory_tree(root).expect("discover directory");
-    let raw_plan = vec![false, true];
-    let block_count = estimate_directory_block_count(&discovery, &raw_plan, 8).expect("plan");
+    let block_count = estimate_directory_block_count(
+        &discovery,
+        &[
+            FileProbePlan {
+                force_raw_storage: false,
+                max_block_size: 8,
+            },
+            FileProbePlan {
+                force_raw_storage: true,
+                max_block_size: 8,
+            },
+        ],
+        8,
+    )
+    .expect("plan");
 
     assert_eq!(block_count, 2);
+}
+
+#[test]
+fn block_count_merges_small_compressible_files_up_to_double_target() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    fs::write(root.join("01.txt"), b"aaaa").expect("write first");
+    fs::write(root.join("02.txt"), b"bbbb").expect("write second");
+    fs::write(root.join("03.txt"), b"cccc").expect("write third");
+
+    let discovery = discover_directory_tree(root).expect("discover directory");
+    let block_count = estimate_directory_block_count(
+        &discovery,
+        &[
+            FileProbePlan {
+                force_raw_storage: false,
+                max_block_size: 16,
+            },
+            FileProbePlan {
+                force_raw_storage: false,
+                max_block_size: 16,
+            },
+            FileProbePlan {
+                force_raw_storage: false,
+                max_block_size: 16,
+            },
+        ],
+        8,
+    )
+    .expect("plan");
+
+    assert_eq!(block_count, 1);
 }
