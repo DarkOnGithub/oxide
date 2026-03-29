@@ -19,6 +19,13 @@ const LZMA_PROBE_MIN_SOURCE_LEN: usize = 256 * 1024;
 const LZMA_EXTREME_PROBE_MIN_SOURCE_LEN: usize = 512 * 1024;
 const LZMA_PROBE_SAMPLE_LEN: usize = 8 * 1024;
 
+/// Minimum sample size for the entropy probe to be meaningful.
+const ENTROPY_PROBE_MIN_SAMPLE_LEN: usize = 512;
+/// Shannon entropy threshold above which data is considered incompressible.
+/// 8.0 = perfectly random; 7.5 is conservative enough to avoid false positives
+/// on highly compressible data while catching compressed/encrypted content.
+const ENTROPY_INCOMPRESSIBLE_THRESHOLD: f64 = 7.5;
+
 #[derive(Debug, Clone, Copy)]
 struct CompressionProbeConfig {
     min_source_len: usize,
@@ -55,6 +62,33 @@ fn should_skip_full_compression_probe(
     source_len >= compression_probe_config(plan).min_source_len
 }
 
+/// Fast entropy estimation using byte-frequency counting.
+/// Returns true if the sample has Shannon entropy above the incompressible
+/// threshold, indicating the data is likely already compressed or random.
+#[inline]
+fn is_likely_incompressible_entropy(source: &[u8], sample_len: usize) -> bool {
+    if sample_len < ENTROPY_PROBE_MIN_SAMPLE_LEN {
+        return false;
+    }
+
+    let sample = &source[..sample_len];
+    let mut freq = [0u32; 256];
+    for &byte in sample {
+        freq[byte as usize] += 1;
+    }
+
+    let len = sample_len as f64;
+    let mut entropy = 0.0f64;
+    for &count in &freq {
+        if count > 0 {
+            let p = count as f64 / len;
+            entropy -= p * p.log2();
+        }
+    }
+
+    entropy > ENTROPY_INCOMPRESSIBLE_THRESHOLD
+}
+
 fn is_likely_incompressible_sample(
     source: &[u8],
     plan: crate::types::ChunkEncodingPlan,
@@ -64,6 +98,13 @@ fn is_likely_incompressible_sample(
     let sample_len = source.len().min(compression_probe_config(plan).sample_len);
     if sample_len == 0 {
         return Ok(false);
+    }
+
+    // Fast path: use entropy estimation (~100x faster than trial compression).
+    // Only fires for very high entropy data (>7.5 bits/byte), so borderline
+    // cases still get the full compression probe.
+    if is_likely_incompressible_entropy(source, sample_len) {
+        return Ok(true);
     }
 
     let selected_dictionary = dictionary_bank.select_for_chunk(plan.algo, &source[..sample_len]);
