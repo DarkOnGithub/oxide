@@ -50,7 +50,7 @@ except ImportError as exc:
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OXIDE_PRESETS_PATH = BASE_DIR / "crates" / "oxide-cli" / "presets.json"
-SEVENZIP_EQUIVALENT_SOLID = False
+SEVENZIP_EQUIVALENT_SOLID = True
 BENCHMARK_BLOCK_SIZE_OVERRIDES: dict[str, str] = {
     "fast": "1M",
     "balanced": "1M",

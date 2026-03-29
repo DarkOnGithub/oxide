@@ -2,7 +2,7 @@ use std::fs;
 
 use oxide_core::CompressionAlgo;
 
-use super::{ArchiveOverrides, DEFAULT_PRESETS_PATH, PresetFile};
+use super::{ArchiveOverrides, PresetFile, DEFAULT_PRESETS_PATH};
 
 fn parse_fixture(json: &str) -> PresetFile {
     serde_json::from_str(json).expect("fixture should parse")
@@ -92,13 +92,13 @@ fn default_preset_file_balanced_ultra_and_extreme_use_expected_codecs() {
     assert_eq!(ultra.compression, CompressionAlgo::Lzma);
     assert_eq!(ultra.compression_level, Some(7));
     assert!(!ultra.compression_extreme);
-    assert_eq!(ultra.lzma_dictionary_size, Some(2 * 1024 * 1024));
-    assert_eq!(ultra.block_size, 2 * 1024 * 1024);
-    assert_eq!(ultra.pool_capacity, 2 * 1024 * 1024);
+    assert_eq!(ultra.lzma_dictionary_size, Some(8 * 1024 * 1024));
+    assert_eq!(ultra.block_size, 3 * 1024 * 1024);
+    assert_eq!(ultra.pool_capacity, 3 * 1024 * 1024);
     assert_eq!(extreme.compression, CompressionAlgo::Lzma);
     assert_eq!(extreme.compression_level, Some(9));
     assert!(!extreme.compression_extreme);
-    assert_eq!(extreme.lzma_dictionary_size, Some(4 * 1024 * 1024));
+    assert_eq!(extreme.lzma_dictionary_size, Some(8 * 1024 * 1024));
     assert_eq!(extreme.block_size, 4 * 1024 * 1024);
     assert_eq!(extreme.pool_capacity, 4 * 1024 * 1024);
 }
