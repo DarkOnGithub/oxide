@@ -193,7 +193,6 @@ enum OrderedWriteTask {
 struct ReadRequest {
     index: usize,
     block_index: u32,
-    header: ChunkDescriptor,
 }
 
 struct OrderedWriterOutcome<W> {
@@ -563,7 +562,7 @@ impl Extractor {
 
     fn decode_archive_to_writer<R, W>(
         &self,
-        mut archive: ArchiveReader<R>,
+        archive: ArchiveReader<R>,
         archive_read_elapsed: Duration,
         started_at: Instant,
         options: &RunTelemetryOptions,
@@ -748,7 +747,6 @@ impl Extractor {
                     .send(ReadRequest {
                         index: submitted,
                         block_index: block_index as u32,
-                        header,
                     })
                     .map_err(|_| {
                         crate::OxideError::CompressionError(
@@ -1035,11 +1033,11 @@ where
         let read_elapsed = read_started.elapsed();
 
         match read_result {
-            Ok(_) => {
+            Ok(header) => {
                 task_tx
                     .send(DecodeTask {
                         index: request.index,
-                        header: request.header,
+                        header,
                         block_data,
                         read_elapsed,
                     })

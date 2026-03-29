@@ -58,6 +58,21 @@ fn block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn reference_block_header_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let header = ChunkDescriptor::new_reference(128, 1024, 3);
+
+    let mut encoded = Vec::new();
+    header.write(&mut encoded)?;
+    assert_eq!(encoded.len(), CHUNK_DESCRIPTOR_SIZE);
+
+    let decoded = ChunkDescriptor::read(&mut Cursor::new(encoded), 128)?;
+    assert_eq!(decoded.reference_target, Some(3));
+    assert_eq!(decoded.encoded_len, 0);
+    assert_eq!(decoded.raw_len, 1024);
+    Ok(())
+}
+
+#[test]
 fn block_header_round_trip_preserves_raw_passthrough() -> Result<(), Box<dyn std::error::Error>> {
     let header = ChunkDescriptor::new_with_compression_meta(
         512,

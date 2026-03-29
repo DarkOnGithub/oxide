@@ -405,6 +405,8 @@ pub struct CompressedBlock {
     pub original_len: u64,
     /// CRC32C checksum of the compressed data.
     pub crc32: u32,
+    /// Optional prior block index when this block is stored as a deduplicated reference.
+    pub reference_target: Option<u32>,
 }
 
 impl CompressedBlock {
@@ -444,6 +446,7 @@ impl CompressedBlock {
                 compression_meta.dictionary_id
             },
             original_len,
+            reference_target: None,
         }
     }
 
@@ -487,6 +490,21 @@ impl CompressedBlock {
             raw_passthrough,
             dictionary_id: if raw_passthrough { 0 } else { dictionary_id },
             original_len,
+            reference_target: None,
+        }
+    }
+
+    pub fn reference(id: usize, stream_id: u32, reference_target: u32, original_len: u64) -> Self {
+        Self {
+            id,
+            stream_id,
+            data: CompressedPayload::Owned(Vec::new()),
+            compression: CompressionAlgo::Lz4,
+            raw_passthrough: false,
+            dictionary_id: 0,
+            original_len,
+            crc32: 0,
+            reference_target: Some(reference_target),
         }
     }
 
@@ -499,8 +517,15 @@ impl CompressedBlock {
         }
     }
 
+    pub fn is_reference(&self) -> bool {
+        self.reference_target.is_some()
+    }
+
     /// Verifies the stored CRC32C checksum against the current payload.
     pub fn verify_crc32(&self) -> bool {
+        if self.is_reference() {
+            return true;
+        }
         self.crc32 == compute_checksum(self.data.as_slice())
     }
 }

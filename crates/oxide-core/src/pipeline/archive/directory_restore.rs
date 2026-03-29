@@ -71,16 +71,6 @@ impl DirectoryRestoreStats {
         self.output_create_files += elapsed;
     }
 
-    fn record_output_data(&mut self, elapsed: Duration) {
-        self.output_write += elapsed;
-        self.output_data += elapsed;
-    }
-
-    fn record_output_flush(&mut self, elapsed: Duration) {
-        self.output_write += elapsed;
-        self.output_flush += elapsed;
-    }
-
     fn record_output_metadata_file(&mut self, elapsed: Duration) {
         self.output_write += elapsed;
         self.output_metadata += elapsed;

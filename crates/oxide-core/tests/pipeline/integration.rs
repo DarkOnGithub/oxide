@@ -1327,6 +1327,42 @@ fn directory_archiver_merges_small_compressible_files_into_larger_blocks()
     Ok(())
 }
 
+#[test]
+fn archive_writer_emits_reference_descriptors_for_duplicate_blocks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let file = write_fixture(b"abcdabcd")?;
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(4, 2, buffer_pool, CompressionAlgo::Lz4);
+
+    let archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+    let header = reader.global_header();
+    let chunk_table = &archive[header.chunk_table_offset as usize
+        ..(header.chunk_table_offset + u64::from(header.chunk_table_len)) as usize];
+    let descriptors = oxide_core::format::oxz::decode_chunk_table(
+        chunk_table,
+        header.payload_offset,
+        header.block_count,
+    )?;
+
+    assert_eq!(descriptors.len(), 2);
+    assert_eq!(descriptors[1].reference_target, Some(0));
+    assert_eq!(descriptors[1].encoded_len, 0);
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, b"abcdabcd");
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn extract_path_preserves_file_metadata() -> Result<(), Box<dyn std::error::Error>> {

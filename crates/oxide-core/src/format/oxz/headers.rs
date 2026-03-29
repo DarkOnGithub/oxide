@@ -9,6 +9,7 @@ use super::{
 };
 
 const FOOTER_VERSION: u16 = 2;
+const COMPRESSION_FLAG_REFERENCE: u8 = 1 << 4;
 
 const HEADER_FLAG_DIRECTORY: u16 = 1 << 0;
 const HEADER_FLAG_PATH_PREFIX: u16 = 1 << 1;
@@ -194,6 +195,7 @@ pub struct ChunkDescriptor {
     pub checksum: u32,
     pub compression_flags: u8,
     pub dictionary_id: u8,
+    pub reference_target: Option<u32>,
 }
 
 impl ChunkDescriptor {
@@ -231,12 +233,32 @@ impl ChunkDescriptor {
             } else {
                 compression_meta.dictionary_id
             },
+            reference_target: None,
+        }
+    }
+
+    pub fn new_reference(payload_offset: u64, raw_len: u32, reference_target: u32) -> Self {
+        Self {
+            payload_offset,
+            encoded_len: 0,
+            raw_len,
+            checksum: reference_target,
+            compression_flags: COMPRESSION_FLAG_REFERENCE,
+            dictionary_id: 0,
+            reference_target: Some(reference_target),
         }
     }
 
     pub fn from_block(block: &CompressedBlock, payload_offset: u64) -> Result<Self> {
         let raw_len = u32::try_from(block.original_len)
             .map_err(|_| OxideError::InvalidFormat("raw length exceeds u32 range"))?;
+        if let Some(reference_target) = block.reference_target {
+            return Ok(Self::new_reference(
+                payload_offset,
+                raw_len,
+                reference_target,
+            ));
+        }
         let encoded_len = u32::try_from(block.data.len())
             .map_err(|_| OxideError::InvalidFormat("encoded length exceeds u32 range"))?;
 
@@ -264,6 +286,10 @@ impl ChunkDescriptor {
         Ok(self.compression_meta()?.algo)
     }
 
+    pub fn is_reference(&self) -> bool {
+        self.reference_target.is_some()
+    }
+
     pub fn compression_meta(&self) -> Result<CompressionMeta> {
         Ok(CompressionMeta::from_flags(self.compression_flags)?
             .with_dictionary_id(self.dictionary_id))
@@ -279,20 +305,34 @@ impl ChunkDescriptor {
         let mut bytes = [0u8; CHUNK_DESCRIPTOR_SIZE];
         bytes[0..4].copy_from_slice(&self.encoded_len.to_le_bytes());
         bytes[4..8].copy_from_slice(&self.raw_len.to_le_bytes());
-        bytes[8..12].copy_from_slice(&self.checksum.to_le_bytes());
+        bytes[8..12].copy_from_slice(
+            self.reference_target
+                .unwrap_or(self.checksum)
+                .to_le_bytes()
+                .as_slice(),
+        );
         bytes[12] = self.compression_flags;
         bytes[13] = self.dictionary_id;
         bytes
     }
 
     fn from_bytes(bytes: [u8; CHUNK_DESCRIPTOR_SIZE], payload_offset: u64) -> Result<Self> {
+        let compression_flags = bytes[12];
+        let reference_target = if compression_flags & COMPRESSION_FLAG_REFERENCE != 0 {
+            Some(u32::from_le_bytes([
+                bytes[8], bytes[9], bytes[10], bytes[11],
+            ]))
+        } else {
+            None
+        };
         let descriptor = Self {
             payload_offset,
             encoded_len: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             raw_len: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
             checksum: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
-            compression_flags: bytes[12],
+            compression_flags,
             dictionary_id: bytes[13],
+            reference_target,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -300,6 +340,29 @@ impl ChunkDescriptor {
 
     fn validate(&self) -> Result<()> {
         self.payload_end()?;
+        if let Some(reference_target) = self.reference_target {
+            if self.compression_flags & !COMPRESSION_FLAG_REFERENCE != 0 {
+                return Err(OxideError::InvalidFormat(
+                    "reference chunk descriptor uses unsupported compression flags",
+                ));
+            }
+            if self.encoded_len != 0 {
+                return Err(OxideError::InvalidFormat(
+                    "reference chunk descriptors must not store payload bytes",
+                ));
+            }
+            if self.dictionary_id != 0 {
+                return Err(OxideError::InvalidFormat(
+                    "reference chunk descriptors must not reference archive dictionaries",
+                ));
+            }
+            if reference_target == u32::MAX {
+                return Err(OxideError::InvalidFormat(
+                    "reference chunk target index is invalid",
+                ));
+            }
+            return Ok(());
+        }
         let compression_meta = self.compression_meta()?;
         if compression_meta.raw_passthrough && self.dictionary_id != 0 {
             return Err(OxideError::InvalidFormat(
@@ -457,7 +520,7 @@ fn parse_prefix(bytes: [u8; GLOBAL_HEADER_SIZE]) -> Result<([u8; 4], u16, u16)> 
     }
 
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != OXZ_VERSION {
+    if version != 2 && version != OXZ_VERSION {
         return Err(OxideError::InvalidFormat("unsupported OXZ version"));
     }
 

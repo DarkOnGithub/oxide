@@ -220,7 +220,7 @@ impl<'a> Archiver<'a> {
         )
     }
 
-    pub fn prepare_file(&self, path: &Path, block_size: usize) -> Result<PreparedInput> {
+    pub fn prepare_file(&self, path: &Path, _block_size: usize) -> Result<PreparedInput> {
         let scanner = InputScanner::with_chunking_policy_and_plan(
             self.config.chunking_policy,
             ChunkEncodingPlan::new(self.config.compression_algo)
