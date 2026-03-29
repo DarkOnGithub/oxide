@@ -105,9 +105,14 @@ unsafe fn copy_overlap(dst: *mut u8, src: *const u8, len: usize, offset: usize) 
     ptr::copy_nonoverlapping(src, dst, seed);
 
     let mut written = seed;
-    while written < len {
+    while written + 16 <= len {
         let chunk = written.min(len - written);
         ptr::copy_nonoverlapping(dst, dst.add(written), chunk);
         written += chunk;
+    }
+
+    while written < len {
+        *dst.add(written) = *dst.add(written - offset);
+        written += 1;
     }
 }
