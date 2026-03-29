@@ -67,6 +67,31 @@ fn discovery_includes_hidden_files_and_directories() {
     assert_eq!(discovery.input_bytes_total, 4 + 10 + 6);
 }
 
+#[test]
+fn discovery_groups_compressible_files_before_raw_candidates() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+
+    fs::write(
+        root.join("01-photo.jpg"),
+        [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10],
+    )
+    .expect("write jpeg");
+    fs::write(root.join("02-notes.txt"), b"alpha alpha alpha\n").expect("write text");
+    fs::write(root.join("03-script.js"), b"console.log('hello');\n").expect("write script");
+
+    let discovery = discover_directory_tree(root).expect("discover directory");
+
+    assert_eq!(
+        discovery
+            .files
+            .iter()
+            .map(|entry| entry.entry.rel_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["03-script.js", "02-notes.txt", "01-photo.jpg"]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn discovery_preserves_symlinks_without_following_them() {
