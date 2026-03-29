@@ -1,8 +1,9 @@
 use std::fs;
+use std::path::PathBuf;
 
-use oxide_core::CompressionAlgo;
+use oxide_core::{ChunkingPolicy, CompressionAlgo};
 
-use super::{ArchiveOverrides, PresetFile, DEFAULT_PRESETS_PATH};
+use super::{ArchiveOverrides, DEFAULT_PRESETS_PATH, PresetFile};
 
 fn parse_fixture(json: &str) -> PresetFile {
     serde_json::from_str(json).expect("fixture should parse")
@@ -29,12 +30,21 @@ fn resolve_uses_named_preset_and_cli_overrides() {
               "producer_threads": 1,
               "directory_mmap_threshold": "8M",
               "writer_queue_blocks": 1024,
-              "result_wait_ms": 1
+              "result_wait_ms": 1,
+              "dictionary_from": "seed.oxz"
+              ,"chunking": {
+                "mode": "fixed"
+              }
             },
             "presets": {
               "fast": {},
               "compact": {
-                "block_size": "8M"
+                "block_size": "8M",
+                "chunking": {
+                  "mode": "cdc",
+                  "min_block_size": "2M",
+                  "max_block_size": "16M"
+                }
               }
             }
           }
@@ -59,6 +69,11 @@ fn resolve_uses_named_preset_and_cli_overrides() {
     assert_eq!(preset.compression, CompressionAlgo::Lz4);
     assert_eq!(preset.compression_level, None);
     assert_eq!(preset.block_size, 16 * 1024 * 1024);
+    assert_eq!(preset.dictionary_from, Some(PathBuf::from("seed.oxz")));
+    assert_eq!(
+        preset.chunking_policy,
+        ChunkingPolicy::cdc(16 * 1024 * 1024, 2 * 1024 * 1024, 16 * 1024 * 1024)
+    );
 }
 
 #[test]
@@ -89,17 +104,29 @@ fn default_preset_file_balanced_ultra_and_extreme_use_expected_codecs() {
     assert_eq!(balanced.compression_level, Some(6));
     assert!(!balanced.compression_extreme);
     assert_eq!(balanced.block_size, 2 * 1024 * 1024);
+    assert_eq!(
+        balanced.chunking_policy,
+        ChunkingPolicy::cdc(2 * 1024 * 1024, 512 * 1024, 4 * 1024 * 1024)
+    );
     assert_eq!(ultra.compression, CompressionAlgo::Lzma);
     assert_eq!(ultra.compression_level, Some(7));
     assert!(!ultra.compression_extreme);
     assert_eq!(ultra.lzma_dictionary_size, Some(8 * 1024 * 1024));
     assert_eq!(ultra.block_size, 3 * 1024 * 1024);
+    assert_eq!(
+        ultra.chunking_policy,
+        ChunkingPolicy::cdc(3 * 1024 * 1024, 768 * 1024, 6 * 1024 * 1024)
+    );
     assert_eq!(ultra.pool_capacity, 3 * 1024 * 1024);
     assert_eq!(extreme.compression, CompressionAlgo::Lzma);
     assert_eq!(extreme.compression_level, Some(9));
     assert!(!extreme.compression_extreme);
     assert_eq!(extreme.lzma_dictionary_size, Some(8 * 1024 * 1024));
     assert_eq!(extreme.block_size, 4 * 1024 * 1024);
+    assert_eq!(
+        extreme.chunking_policy,
+        ChunkingPolicy::cdc(4 * 1024 * 1024, 1024 * 1024, 8 * 1024 * 1024)
+    );
     assert_eq!(extreme.pool_capacity, 4 * 1024 * 1024);
 }
 

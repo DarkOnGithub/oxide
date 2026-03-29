@@ -4,14 +4,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oxide_core::{
-    ArchivePipeline, ArchivePipelineConfig, BufferPool, ChunkingPolicy, CompressionAlgo,
+    ArchivePipeline, ArchivePipelineConfig, BufferPool, CompressionAlgo,
     PipelinePerformanceOptions, RunTelemetryOptions,
 };
 
 use crate::AppResult;
 use crate::cli::{
-    ArchiveArgs, ChunkingArg, ExtractArgs, TreeArgs, default_extract_output_path,
-    default_output_path,
+    ArchiveArgs, ExtractArgs, TreeArgs, default_extract_output_path, default_output_path,
 };
 use crate::presets::{ArchiveOverrides, ResolvedArchiveSettings, resolve_archive_settings};
 use crate::progress::{ArchiveCliSink, ExtractCliSink, LiveRateStats};
@@ -58,6 +57,10 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
             compression: compression.map(Into::into),
             skip_compression,
             dictionary_mode: None,
+            chunking_mode: chunking,
+            chunking_min_block_size: min_block_size,
+            chunking_max_block_size: max_block_size,
+            dictionary_from,
             compression_level,
             block_size,
             workers,
@@ -94,10 +97,6 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         &settings,
         compression_workers,
         producer_threads,
-        chunking,
-        min_block_size,
-        max_block_size,
-        dictionary_from.as_deref(),
         Arc::clone(&buffer_pool),
     )?;
     let output_file = File::create(&output_path)?;
@@ -227,10 +226,6 @@ fn build_archive_pipeline(
     settings: &ResolvedArchiveSettings,
     workers: usize,
     producer_threads: usize,
-    chunking: Option<ChunkingArg>,
-    min_block_size: Option<usize>,
-    max_block_size: Option<usize>,
-    dictionary_from: Option<&std::path::Path>,
     buffer_pool: Arc<BufferPool>,
 ) -> AppResult<ArchivePipeline> {
     let mut performance = PipelinePerformanceOptions::default();
@@ -252,32 +247,15 @@ fn build_archive_pipeline(
         buffer_pool,
         settings.compression,
     );
-    config.chunking_policy = resolve_chunking_policy(
-        settings.block_size.max(1),
-        chunking.unwrap_or(ChunkingArg::Fixed),
-        min_block_size,
-        max_block_size,
-    );
-    config.imported_dictionary_bank = dictionary_from.map(import_dictionary_bank).transpose()?;
+    config.chunking_policy = settings.chunking_policy;
+    config.imported_dictionary_bank = settings
+        .dictionary_from
+        .as_deref()
+        .map(import_dictionary_bank)
+        .transpose()?;
     config.skip_compression = settings.skip_compression;
     config.performance = performance;
     Ok(ArchivePipeline::new(config))
-}
-
-fn resolve_chunking_policy(
-    target_block_size: usize,
-    chunking: ChunkingArg,
-    min_block_size: Option<usize>,
-    max_block_size: Option<usize>,
-) -> ChunkingPolicy {
-    match chunking {
-        ChunkingArg::Fixed => ChunkingPolicy::fixed_for_target(target_block_size),
-        ChunkingArg::Cdc => ChunkingPolicy::cdc(
-            target_block_size,
-            min_block_size.unwrap_or((target_block_size / 4).max(1)),
-            max_block_size.unwrap_or(target_block_size.saturating_mul(2).max(target_block_size)),
-        ),
-    }
 }
 
 fn import_dictionary_bank(path: &std::path::Path) -> AppResult<oxide_core::ArchiveDictionaryBank> {
