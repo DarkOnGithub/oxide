@@ -53,10 +53,6 @@ pub(super) struct FileProbePlan {
     pub(super) force_raw_storage: bool,
 }
 
-const DIRECTORY_SIZE_BUCKET_TINY: u64 = 16 * 1024;
-const DIRECTORY_SIZE_BUCKET_SMALL: u64 = 128 * 1024;
-const DIRECTORY_SIZE_BUCKET_MEDIUM: u64 = 1024 * 1024;
-
 /// Utility for grouping file data into batches while respecting raw-storage boundaries.
 #[derive(Debug, Clone)]
 pub struct DirectoryBatchSubmitter {
@@ -378,7 +374,7 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
 
     directories.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
     symlinks.sort_by(|left, right| left.entry.rel_path.cmp(&right.entry.rel_path));
-    sort_directory_files_for_solid_compression(&mut files);
+    files.sort_by(|left, right| left.entry.rel_path.cmp(&right.entry.rel_path));
 
     Ok(DirectoryDiscovery {
         root: root.to_path_buf(),
@@ -387,44 +383,6 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
         files,
         input_bytes_total,
     })
-}
-
-fn sort_directory_files_for_solid_compression(files: &mut [DirectoryFileSpec]) {
-    files.sort_by(|left, right| compare_directory_files_for_solid_compression(left, right));
-}
-
-fn compare_directory_files_for_solid_compression(
-    left: &DirectoryFileSpec,
-    right: &DirectoryFileSpec,
-) -> std::cmp::Ordering {
-    file_group_priority(left)
-        .cmp(&file_group_priority(right))
-        .then_with(|| {
-            normalized_extension_from_path(&left.full_path)
-                .cmp(&normalized_extension_from_path(&right.full_path))
-        })
-        .then_with(|| file_size_bucket(left.size).cmp(&file_size_bucket(right.size)))
-        .then_with(|| left.entry.rel_path.cmp(&right.entry.rel_path))
-}
-
-fn file_group_priority(file: &DirectoryFileSpec) -> u8 {
-    if should_force_raw_storage(&file.full_path) {
-        1
-    } else {
-        0
-    }
-}
-
-fn file_size_bucket(size: u64) -> u8 {
-    if size <= DIRECTORY_SIZE_BUCKET_TINY {
-        0
-    } else if size <= DIRECTORY_SIZE_BUCKET_SMALL {
-        1
-    } else if size <= DIRECTORY_SIZE_BUCKET_MEDIUM {
-        2
-    } else {
-        3
-    }
 }
 
 pub(super) fn manifest_from_discovery(
