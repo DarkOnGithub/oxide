@@ -255,6 +255,10 @@ fn train_file_dictionary_bank(
     config: &ArchivePipelineConfig,
     batches: &[crate::Batch],
 ) -> Result<ArchiveDictionaryBank> {
+    if let Some(dictionary_bank) = config.imported_dictionary_bank.as_ref() {
+        return Ok(dictionary_bank.clone());
+    }
+
     if config.skip_compression
         || config.compression_algo != crate::CompressionAlgo::Zstd
         || config.performance.dictionary_mode == ArchiveDictionaryMode::Off

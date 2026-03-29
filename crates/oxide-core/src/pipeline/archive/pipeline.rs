@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::buffer::BufferPool;
+use crate::dictionary::ArchiveDictionaryBank;
 use crate::io::InputScanner;
 use crate::telemetry::{
     ArchiveRun, ExtractReport, RunTelemetryOptions, TelemetryEvent, TelemetrySink,
@@ -31,6 +32,7 @@ pub struct ArchivePipeline {
     pub(crate) num_workers: usize,
     pub(crate) compression_algo: CompressionAlgo,
     pub(crate) skip_compression: bool,
+    pub(crate) imported_dictionary_bank: Option<ArchiveDictionaryBank>,
     pub(crate) buffer_pool: Arc<BufferPool>,
     pub(crate) performance: PipelinePerformanceOptions,
 }
@@ -43,6 +45,7 @@ impl ArchivePipeline {
             num_workers: config.workers.max(1),
             compression_algo: config.compression_algo,
             skip_compression: config.skip_compression,
+            imported_dictionary_bank: config.imported_dictionary_bank,
             buffer_pool: config.buffer_pool,
             performance: config.performance,
         }
@@ -55,6 +58,7 @@ impl ArchivePipeline {
             workers: self.num_workers,
             compression_algo: self.compression_algo,
             skip_compression: self.skip_compression,
+            imported_dictionary_bank: self.imported_dictionary_bank.clone(),
             buffer_pool: Arc::clone(&self.buffer_pool),
             performance: self.performance.clone(),
         }

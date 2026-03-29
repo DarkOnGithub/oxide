@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::buffer::BufferPool;
-use crate::dictionary::ArchiveDictionaryMode;
+use crate::dictionary::{ArchiveDictionaryBank, ArchiveDictionaryMode};
 use crate::io::ChunkingPolicy;
 use crate::types::CompressionAlgo;
 
@@ -300,6 +300,8 @@ pub struct ArchivePipelineConfig {
     pub compression_algo: CompressionAlgo,
     /// Whether compression should be skipped entirely.
     pub skip_compression: bool,
+    /// Optional prebuilt archive dictionary bank imported from another archive.
+    pub imported_dictionary_bank: Option<ArchiveDictionaryBank>,
     /// Performance tuning options.
     pub performance: PipelinePerformanceOptions,
 }
@@ -319,6 +321,7 @@ impl ArchivePipelineConfig {
             buffer_pool,
             compression_algo,
             skip_compression: false,
+            imported_dictionary_bank: None,
             performance: PipelinePerformanceOptions::default(),
         }
     }
