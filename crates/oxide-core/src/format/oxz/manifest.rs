@@ -4,7 +4,6 @@ use crate::{
 };
 
 const MANIFEST_MAGIC: [u8; 4] = *b"OXM2";
-const MANIFEST_VERSION_V1: u8 = 1;
 const MANIFEST_VERSION_V2: u8 = 2;
 const DICTIONARY_CLASS_EXTENSION: u8 = 4;
 
@@ -178,7 +177,7 @@ impl ArchiveManifest {
         cursor += MANIFEST_MAGIC.len();
         let version = bytes[cursor];
         cursor += 1;
-        if version != MANIFEST_VERSION_V1 && version != MANIFEST_VERSION_V2 {
+        if version != MANIFEST_VERSION_V2 {
             return Err(OxideError::InvalidFormat(
                 "unsupported archive manifest version",
             ));
@@ -199,18 +198,7 @@ impl ArchiveManifest {
             let id = bytes[cursor];
             let algo = CompressionAlgo::from_flags(bytes[cursor + 1])?;
             cursor += 2;
-            let class = if version == MANIFEST_VERSION_V1 {
-                if cursor >= bytes.len() {
-                    return Err(OxideError::InvalidFormat(
-                        "truncated archive dictionary class",
-                    ));
-                }
-                let class = DictionaryClass::from_legacy_id(bytes[cursor])?;
-                cursor += 1;
-                class
-            } else {
-                decode_dictionary_class(bytes, &mut cursor)?
-            };
+            let class = decode_dictionary_class(bytes, &mut cursor)?;
 
             let dictionary_len = decode_varint(bytes, &mut cursor)?;
             let dictionary_len = usize::try_from(dictionary_len).map_err(|_| {
@@ -456,28 +444,38 @@ fn decode_dictionary_class(bytes: &[u8], cursor: &mut usize) -> Result<Dictionar
 
     let class_id = bytes[*cursor];
     *cursor += 1;
-    if class_id != DICTIONARY_CLASS_EXTENSION {
-        return DictionaryClass::from_legacy_id(class_id);
-    }
+    match class_id {
+        1 => Ok(DictionaryClass::Text),
+        2 => Ok(DictionaryClass::StructuredText),
+        3 => Ok(DictionaryClass::Binary),
+        DICTIONARY_CLASS_EXTENSION => {
+            let extension_len = decode_varint(bytes, cursor)?;
+            let extension_len = usize::try_from(extension_len).map_err(|_| {
+                OxideError::InvalidFormat("manifest extension length exceeds usize range")
+            })?;
+            let extension_end =
+                cursor
+                    .checked_add(extension_len)
+                    .ok_or(OxideError::InvalidFormat(
+                        "manifest extension range overflow",
+                    ))?;
+            if extension_end > bytes.len() {
+                return Err(OxideError::InvalidFormat(
+                    "truncated archive dictionary extension",
+                ));
+            }
 
-    let extension_len = decode_varint(bytes, cursor)?;
-    let extension_len = usize::try_from(extension_len)
-        .map_err(|_| OxideError::InvalidFormat("manifest extension length exceeds usize range"))?;
-    let extension_end = cursor
-        .checked_add(extension_len)
-        .ok_or(OxideError::InvalidFormat(
-            "manifest extension range overflow",
-        ))?;
-    if extension_end > bytes.len() {
-        return Err(OxideError::InvalidFormat(
-            "truncated archive dictionary extension",
-        ));
+            let extension =
+                String::from_utf8(bytes[*cursor..extension_end].to_vec()).map_err(|_| {
+                    OxideError::InvalidFormat("archive dictionary extension is not utf8")
+                })?;
+            *cursor = extension_end;
+            Ok(DictionaryClass::Extension(extension))
+        }
+        _ => Err(OxideError::InvalidFormat(
+            "invalid archive dictionary class id",
+        )),
     }
-
-    let extension = String::from_utf8(bytes[*cursor..extension_end].to_vec())
-        .map_err(|_| OxideError::InvalidFormat("archive dictionary extension is not utf8"))?;
-    *cursor = extension_end;
-    Ok(DictionaryClass::Extension(extension))
 }
 
 fn validate_entries(entries: &[ArchiveListingEntry]) -> Result<()> {

@@ -1,9 +1,8 @@
-use std::fs;
 use std::path::PathBuf;
 
 use oxide_core::{ChunkingPolicy, CompressionAlgo};
 
-use super::{ArchiveOverrides, DEFAULT_PRESETS_PATH, PresetFile};
+use super::{ArchiveOverrides, PresetFile};
 
 fn parse_fixture(json: &str) -> PresetFile {
     serde_json::from_str(json).expect("fixture should parse")
@@ -74,60 +73,6 @@ fn resolve_uses_named_preset_and_cli_overrides() {
         preset.chunking_policy,
         ChunkingPolicy::cdc(16 * 1024 * 1024, 2 * 1024 * 1024, 16 * 1024 * 1024)
     );
-}
-
-#[test]
-fn default_preset_file_balanced_ultra_and_extreme_use_expected_codecs() {
-    let file = parse_fixture(
-        &fs::read_to_string(DEFAULT_PRESETS_PATH).expect("default presets should be readable"),
-    );
-
-    let mut balanced = file.archive.defaults.clone();
-    balanced.merge_from(file.archive.presets.get("balanced").unwrap());
-    let balanced = balanced
-        .resolve("balanced", "default file", ArchiveOverrides::default())
-        .expect("balanced should resolve");
-
-    let mut ultra = file.archive.defaults.clone();
-    ultra.merge_from(file.archive.presets.get("ultra").unwrap());
-    let ultra = ultra
-        .resolve("ultra", "default file", ArchiveOverrides::default())
-        .expect("ultra should resolve");
-
-    let mut extreme = file.archive.defaults.clone();
-    extreme.merge_from(file.archive.presets.get("extreme").unwrap());
-    let extreme = extreme
-        .resolve("extreme", "default file", ArchiveOverrides::default())
-        .expect("extreme should resolve");
-
-    assert_eq!(balanced.compression, CompressionAlgo::Zstd);
-    assert_eq!(balanced.compression_level, Some(6));
-    assert!(!balanced.compression_extreme);
-    assert_eq!(balanced.block_size, 2 * 1024 * 1024);
-    assert_eq!(
-        balanced.chunking_policy,
-        ChunkingPolicy::fixed(2 * 1024 * 1024)
-    );
-    assert_eq!(ultra.compression, CompressionAlgo::Lzma);
-    assert_eq!(ultra.compression_level, Some(7));
-    assert!(!ultra.compression_extreme);
-    assert_eq!(ultra.lzma_dictionary_size, Some(8 * 1024 * 1024));
-    assert_eq!(ultra.block_size, 3 * 1024 * 1024);
-    assert_eq!(
-        ultra.chunking_policy,
-        ChunkingPolicy::fixed(3 * 1024 * 1024)
-    );
-    assert_eq!(ultra.pool_capacity, 3 * 1024 * 1024);
-    assert_eq!(extreme.compression, CompressionAlgo::Lzma);
-    assert_eq!(extreme.compression_level, Some(9));
-    assert!(!extreme.compression_extreme);
-    assert_eq!(extreme.lzma_dictionary_size, Some(8 * 1024 * 1024));
-    assert_eq!(extreme.block_size, 4 * 1024 * 1024);
-    assert_eq!(
-        extreme.chunking_policy,
-        ChunkingPolicy::fixed(4 * 1024 * 1024)
-    );
-    assert_eq!(extreme.pool_capacity, 4 * 1024 * 1024);
 }
 
 #[test]

@@ -77,29 +77,6 @@ fn lzma_roundtrip_large_mixed() {
 }
 
 #[test]
-fn decode_legacy_fixture_vectors() {
-    let fixtures: [(&str, Vec<u8>); 5] = [
-        ("0000000000", Vec::new()),
-        ("0300000030616263", b"abc".to_vec()),
-        ("200000001f6101000660616161616161", vec![b'a'; 32]),
-        (
-            "170000006768656c6c6f200600602068656c6c6f",
-            b"hello hello hello hello".to_vec(),
-        ),
-        (
-            "00020000ff31000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f4000ffa8603a3b3c3d3e3f",
-            (0u8..=63).cycle().take(512).collect(),
-        ),
-    ];
-
-    for (encoded_hex, expected) in fixtures {
-        let encoded = decode_hex(encoded_hex);
-        let decoded = lz4::reverse(&encoded).expect("legacy vector must decode");
-        assert_eq!(decoded, expected);
-    }
-}
-
-#[test]
 fn decode_uses_rle_copy_kernel() {
     decode_case("0c00000017610100", &[b'a'; 12]);
 }

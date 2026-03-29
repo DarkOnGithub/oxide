@@ -520,7 +520,7 @@ fn parse_prefix(bytes: [u8; GLOBAL_HEADER_SIZE]) -> Result<([u8; 4], u16, u16)> 
     }
 
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != 2 && version != OXZ_VERSION {
+    if version != OXZ_VERSION {
         return Err(OxideError::InvalidFormat("unsupported OXZ version"));
     }
 
