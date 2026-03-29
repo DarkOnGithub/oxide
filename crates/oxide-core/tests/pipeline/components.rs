@@ -130,13 +130,13 @@ mod directory_tests {
     }
 
     #[test]
-    fn block_count_planner_flushes_zstd_batches_when_extension_changes() {
+    fn block_count_planner_keeps_zstd_batches_merged_across_extensions() {
         let mut planner =
             BlockCountPlanner::new_with_plan(8, ChunkEncodingPlan::new(CompressionAlgo::Zstd));
         planner.push_len("root/a.json", 4, false);
         planner.push_len("root/b.html", 4, false);
 
-        assert_eq!(planner.finish(), 2);
+        assert_eq!(planner.finish(), 1);
     }
 
     #[test]
@@ -239,7 +239,7 @@ mod directory_tests {
     }
 
     #[test]
-    fn submitter_flushes_zstd_batches_when_extension_changes() {
+    fn submitter_keeps_zstd_batches_merged_and_falls_back_to_root_source_path() {
         let mut submitter = DirectoryBatchSubmitter::new_with_plan(
             PathBuf::from("root"),
             8,
@@ -266,10 +266,8 @@ mod directory_tests {
             })
             .expect("finish should succeed");
 
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].source_path, PathBuf::from("root/a.json"));
-        assert_eq!(batches[1].source_path, PathBuf::from("root/b.html"));
-        assert_eq!(batches[0].data.as_slice(), b"aaaa");
-        assert_eq!(batches[1].data.as_slice(), b"bbbb");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].source_path, PathBuf::from("root"));
+        assert_eq!(batches[0].data.as_slice(), b"aaaabbbb");
     }
 }

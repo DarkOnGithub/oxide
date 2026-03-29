@@ -209,7 +209,7 @@ fn block_count_does_not_merge_past_fixed_target_when_limit_is_larger() {
 }
 
 #[test]
-fn block_count_accounts_for_zstd_extension_boundaries() {
+fn block_count_keeps_zstd_batches_merged_across_extension_changes() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
     fs::write(root.join("a.json"), b"aaaa").expect("write first");
@@ -231,5 +231,5 @@ fn block_count_accounts_for_zstd_extension_boundaries() {
     )
     .expect("plan");
 
-    assert_eq!(block_count, 2);
+    assert_eq!(block_count, 1);
 }
