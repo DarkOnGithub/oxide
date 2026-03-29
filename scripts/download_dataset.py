@@ -19,55 +19,63 @@ SSL_CONTEXT = ssl.create_default_context()
 
 @dataclass(frozen=True)
 class DatasetSpec:
-    tier: str
     name: str
-    kind: str  # "archive", "git", or "hg"
+    kind: str  # "archive", "file", "git", or "hg"
     source: str
     archive_type: str | None = None
     clone_depth: int | None = None
 
 
 DATASETS: dict[str, DatasetSpec] = {
-    "200mb": DatasetSpec(
-        tier="200mb",
+    "silesia": DatasetSpec(
         name="silesia",
         kind="archive",
         source="https://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip",
         archive_type="zip",
     ),
-    "1gb": DatasetSpec(
-        tier="1gb",
+    "enwik9": DatasetSpec(
+        name="enwik9",
+        kind="archive",
+        source="http://mattmahoney.net/dc/enwik9.zip",
+        archive_type="zip",
+    ),
+    "linux": DatasetSpec(
         name="linux",
-        kind="git",
-        source="https://github.com/torvalds/linux.git",
-        clone_depth=1,
+        kind="archive",
+        source="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.13.tar.xz",
+        archive_type="tar",
     ),
-    "5gb": DatasetSpec(
-        tier="5gb",
-        name="mozilla-central",
-        kind="hg",
-        source="https://hg.mozilla.org/mozilla-central/",
+    "nyctaxi": DatasetSpec(
+        name="nyctaxi",
+        kind="file",
+        # Note: Using 2015 data to guarantee a pure ~2GB CSV, as newer TLC data defaults to Parquet
+        source="https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2015-01.csv",
     ),
-    "10gb": DatasetSpec(
-        tier="10gb",
-        name="chromium-src",
-        kind="git",
-        source="https://chromium.googlesource.com/chromium/src",
-        clone_depth=1,
+    "logs": DatasetSpec(
+        name="logs",
+        kind="archive",
+        source="https://zenodo.org/records/3227177/files/HDFS_1.tar.gz",
+        archive_type="tar",
+    ),
+    "div2k": DatasetSpec(
+        name="div2k",
+        kind="archive",
+        source="http://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_valid_HR.zip",
+        archive_type="zip",
     ),
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Download a dataset by target size tier."
+        description="Download datasets for the archiver benchmark suite."
     )
     parser.add_argument(
-        "tier",
+        "dataset",
         nargs="?",
-        default="200mb",
+        default="all",
         choices=[*DATASETS.keys(), "all"],
-        help="Dataset tier to download (default: 200mb).",
+        help="Specific dataset to download (default: all).",
     )
     parser.add_argument(
         "--output-dir",
@@ -140,28 +148,34 @@ def download_dataset(spec: DatasetSpec, output_dir: Path, force: bool) -> None:
 
     if spec.kind == "archive":
         target_dir.mkdir(parents=True, exist_ok=True)
-        archive_name = Path(spec.source).name
+        archive_name = Path(spec.source.split("?")[0]).name
         archive_path = target_dir / archive_name
         download_file(spec.source, archive_path)
         extract_archive(archive_path, target_dir, spec.archive_type or "zip")
         archive_path.unlink(missing_ok=True)
+    elif spec.kind == "file":
+        target_dir.mkdir(parents=True, exist_ok=True)
+        file_name = Path(spec.source.split("?")[0]).name
+        file_path = target_dir / file_name
+        download_file(spec.source, file_path)
     elif spec.kind in {"git", "hg"}:
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         clone_repo(spec.kind, spec.source, target_dir, spec.clone_depth)
     else:
         raise ValueError(f"Unsupported dataset kind: {spec.kind}")
 
-    print(f"Done: {spec.tier} -> {target_dir}")
+    print(f"Done: {spec.name} -> {target_dir}\n")
 
 
 def main() -> int:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    tiers = list(DATASETS.values()) if args.tier == "all" else [DATASETS[args.tier]]
-    for spec in tiers:
+    targets = list(DATASETS.values()) if args.dataset == "all" else [DATASETS[args.dataset]]
+    for spec in targets:
         download_dataset(spec, args.output_dir, args.force)
 
+    print("All requested datasets have been successfully prepared.")
     return 0
 
 
