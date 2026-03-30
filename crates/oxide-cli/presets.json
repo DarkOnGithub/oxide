@@ -28,9 +28,7 @@
           "compressor": "lz4"
         },
         "chunking": {
-          "mode": "cdc",
-          "min_block_size": "768K",
-          "max_block_size": "6M"
+          "mode": "fixed"
         },
         "block_size": "3M",
         "workers": 0,
@@ -43,7 +41,7 @@
         "result_wait_ms": 1,
         "directory_mmap_threshold": "8M",
         "writer_queue_blocks": 768,
-        "dictionary_mode": "auto"
+        "dictionary_mode": "off"
       },
       "balanced": {
         "compression": {
@@ -51,7 +49,7 @@
           "level": 6
         },
         "chunking": {
-          "mode": "cdc",
+          "mode": "fixed",
           "min_block_size": "512K",
           "max_block_size": "4M"
         },

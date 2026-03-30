@@ -1,8 +1,9 @@
 use bytes::Bytes;
+use std::path::Path;
 
 use super::{
-    compression_probe_config, is_likely_incompressible_sample, process_batch,
-    should_skip_full_compression_probe, INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN,
+    compression_probe_config, incompressible_probe_offsets, is_likely_incompressible_sample,
+    process_batch, should_skip_full_compression_probe, INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN,
     INCOMPRESSIBLE_PROBE_SAMPLE_LEN, LZMA_EXTREME_PROBE_MIN_SOURCE_LEN, LZMA_PROBE_MIN_SOURCE_LEN,
 };
 use crate::buffer::BufferPool;
@@ -89,8 +90,14 @@ fn incompressible_probe_identifies_random_like_data() {
     let mut scratch = WorkerScratchArena::new();
     let dictionary_bank = ArchiveDictionaryBank::default();
 
-    let probe = is_likely_incompressible_sample(&sample, plan, &dictionary_bank, &mut scratch)
-        .expect("probe should succeed");
+    let probe = is_likely_incompressible_sample(
+        &sample,
+        Path::new("random.bin"),
+        plan,
+        &dictionary_bank,
+        &mut scratch,
+    )
+    .expect("probe should succeed");
 
     assert!(probe);
 }
@@ -102,10 +109,54 @@ fn incompressible_probe_keeps_repetitive_data_compressible() {
     let mut scratch = WorkerScratchArena::new();
     let dictionary_bank = ArchiveDictionaryBank::default();
 
-    let probe = is_likely_incompressible_sample(&sample, plan, &dictionary_bank, &mut scratch)
-        .expect("probe should succeed");
+    let probe = is_likely_incompressible_sample(
+        &sample,
+        Path::new("repetitive.txt"),
+        plan,
+        &dictionary_bank,
+        &mut scratch,
+    )
+    .expect("probe should succeed");
 
     assert!(!probe);
+}
+
+#[test]
+fn zstd_incompressible_probe_checks_multiple_windows() {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut sample = (0..INCOMPRESSIBLE_PROBE_SAMPLE_LEN)
+        .map(|_| {
+            state ^= state << 7;
+            state ^= state >> 9;
+            state ^= state << 8;
+            state as u8
+        })
+        .collect::<Vec<_>>();
+    sample.extend(vec![b'a'; INCOMPRESSIBLE_PROBE_SAMPLE_LEN * 2]);
+
+    let plan = ChunkEncodingPlan::new(CompressionAlgo::Zstd);
+    let mut scratch = WorkerScratchArena::new();
+    let dictionary_bank = ArchiveDictionaryBank::default();
+
+    let probe = is_likely_incompressible_sample(
+        &sample,
+        Path::new("mixed.txt"),
+        plan,
+        &dictionary_bank,
+        &mut scratch,
+    )
+    .expect("probe should succeed");
+
+    assert!(!probe);
+}
+
+#[test]
+fn incompressible_probe_offsets_cover_start_middle_and_end_for_large_inputs() {
+    assert_eq!(incompressible_probe_offsets(16 * 1024, 16 * 1024), vec![0]);
+    assert_eq!(
+        incompressible_probe_offsets(48 * 1024, 16 * 1024),
+        vec![0, 16 * 1024, 32 * 1024]
+    );
 }
 
 #[test]
