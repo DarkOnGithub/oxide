@@ -1,4 +1,4 @@
-use super::{BufferPool, MAX_RECYCLED_BUFFER_CAPACITY, retained_recycle_capacity};
+use super::{retained_recycle_capacity, BufferPool, MAX_RECYCLED_BUFFER_CAPACITY};
 
 #[test]
 fn recycle_capacity_scales_from_default_capacity() {
@@ -20,4 +20,13 @@ fn recycled_buffers_are_shrunk_before_reuse() {
 
     let recycled = pool.acquire();
     assert!(recycled.capacity() <= retained_recycle_capacity(1024 * 1024));
+}
+
+#[test]
+fn acquire_with_capacity_grows_recycled_buffers_to_requested_size() {
+    let pool = BufferPool::new(1024, 1);
+    drop(pool.acquire());
+
+    let recycled = pool.acquire_with_capacity(16 * 1024);
+    assert!(recycled.capacity() >= 16 * 1024);
 }

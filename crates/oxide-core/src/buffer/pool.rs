@@ -1,9 +1,9 @@
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
-use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
+use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 
 #[cfg(feature = "profiling")]
 use crate::telemetry::profile;
@@ -70,21 +70,29 @@ impl BufferPool {
     /// Returns a recycled buffer if available, otherwise creates a new one.
     /// The buffer will be automatically returned to the pool when dropped.
     pub fn acquire(&self) -> PooledBuffer {
+        self.acquire_with_capacity(self.default_capacity)
+    }
+
+    /// Acquires a buffer with enough capacity for at least `min_capacity` bytes.
+    pub fn acquire_with_capacity(&self, min_capacity: usize) -> PooledBuffer {
         let started_at = Instant::now();
+        let requested_capacity = min_capacity.max(self.default_capacity).max(1);
         let (result, capacity, buffer) = match self.receiver.try_recv() {
             Ok(mut buffer) => {
-                let capacity = buffer.capacity();
                 buffer.clear();
+                if buffer.capacity() < requested_capacity {
+                    buffer.reserve(requested_capacity - buffer.len());
+                }
+                let capacity = buffer.capacity();
                 self.metrics.recycled.fetch_add(1, Ordering::Relaxed);
                 ("recycled", capacity, buffer)
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
                 self.metrics.created.fetch_add(1, Ordering::Relaxed);
-                let capacity = self.default_capacity;
                 (
                     "created",
-                    capacity,
-                    Vec::with_capacity(self.default_capacity),
+                    requested_capacity,
+                    Vec::with_capacity(requested_capacity),
                 )
             }
         };
@@ -115,7 +123,7 @@ impl BufferPool {
         }
 
         PooledBuffer::new(buffer, self.recycler.clone(), Arc::clone(&self.metrics))
-            .with_default_capacity(self.default_capacity)
+            .with_recycle_capacity(requested_capacity)
     }
 
     /// Returns a snapshot of the current pool metrics.
@@ -166,7 +174,7 @@ pub struct PooledBuffer {
     buffer: Vec<u8>,
     recycler: Sender<Vec<u8>>,
     metrics: Arc<PoolMetricsInner>,
-    default_capacity: usize,
+    recycle_capacity: usize,
 }
 
 impl PooledBuffer {
@@ -175,12 +183,12 @@ impl PooledBuffer {
             buffer,
             recycler,
             metrics,
-            default_capacity: 0,
+            recycle_capacity: 0,
         }
     }
 
-    fn with_default_capacity(mut self, default_capacity: usize) -> Self {
-        self.default_capacity = default_capacity.max(1);
+    fn with_recycle_capacity(mut self, recycle_capacity: usize) -> Self {
+        self.recycle_capacity = recycle_capacity.max(1);
         self
     }
 
@@ -214,7 +222,7 @@ impl Drop for PooledBuffer {
         #[cfg(feature = "profiling")]
         let started_at = Instant::now();
         let mut buffer = std::mem::take(&mut self.buffer);
-        let retained_capacity = retained_recycle_capacity(self.default_capacity.max(1));
+        let retained_capacity = retained_recycle_capacity(self.recycle_capacity.max(1));
         buffer.clear();
         if buffer.capacity() > retained_capacity {
             buffer.shrink_to(retained_capacity);

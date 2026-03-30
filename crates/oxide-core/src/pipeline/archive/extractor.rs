@@ -193,6 +193,7 @@ enum OrderedWriteTask {
 struct ReadRequest {
     index: usize,
     block_index: u32,
+    encoded_len: usize,
 }
 
 struct OrderedWriterOutcome<W> {
@@ -753,6 +754,7 @@ impl Extractor {
                     .send(ReadRequest {
                         index: submitted,
                         block_index: block_index as u32,
+                        encoded_len: header.encoded_len as usize,
                     })
                     .map_err(|_| {
                         crate::OxideError::CompressionError(
@@ -1043,7 +1045,7 @@ where
 {
     while let Ok(request) = read_request_rx.recv() {
         let read_started = Instant::now();
-        let mut block_data = buffer_pool.acquire();
+        let mut block_data = buffer_pool.acquire_with_capacity(request.encoded_len);
         let read_result = archive.read_block_into(request.block_index, block_data.as_mut_vec());
         let read_elapsed = read_started.elapsed();
 
@@ -1349,7 +1351,7 @@ fn decode_block_payload_with_scratch(
     let decoded = if compression_meta.raw_passthrough {
         DecodedBlock::Pooled(block_data)
     } else if crate::compression::supports_direct_buffer_output(compression_meta.algo) {
-        let mut decoded = pool.acquire();
+        let mut decoded = pool.acquire_with_capacity(header.raw_len as usize);
         crate::compression::reverse_compression_request_with_scratch_into(
             crate::compression::DecompressionRequest {
                 data: block_data.as_slice(),

@@ -266,7 +266,7 @@ pub fn process_batch(
 
     if supports_direct_buffer_output(plan.algo) {
         let compression_started = Instant::now();
-        let mut compressed = pool.acquire();
+        let mut compressed = pool.acquire_with_capacity(source_len);
         apply_compression_request_with_scratch_into(
             request,
             scratch.compression(),
