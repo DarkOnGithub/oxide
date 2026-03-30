@@ -14,6 +14,9 @@ const PROFILE_TAG_STACK_WORKER: [&str; 1] = [tags::TAG_WORKER];
 /// and profiling events without depending on a specific backend.
 pub trait WorkerTelemetry: Send + Sync {
     fn on_queue_depth(&self, worker_id: usize, depth: usize);
+    fn on_runtime_sample(&self, queue_depth: usize, active_tasks: usize) {
+        let _ = (queue_depth, active_tasks);
+    }
     fn on_task_started(&self, worker_id: usize, task_kind: &str);
     fn on_task_finished(&self, worker_id: usize, task_kind: &str, elapsed: Duration);
     fn on_task_failed(&self, worker_id: usize, task_kind: &str, elapsed: Duration);
@@ -87,6 +90,21 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
             "error",
             elapsed_us,
             "worker task failed",
+        );
+    }
+
+    fn on_runtime_sample(&self, queue_depth: usize, active_tasks: usize) {
+        telemetry::set_gauge(tags::METRIC_WORKER_QUEUE_DEPTH, queue_depth as u64);
+        telemetry::set_gauge(tags::METRIC_WORKER_ACTIVE_COUNT, active_tasks as u64);
+
+        #[cfg(feature = "profiling")]
+        profile::event(
+            tags::PROFILE_WORKER,
+            &PROFILE_TAG_STACK_WORKER,
+            "runtime_sample",
+            "sample",
+            0,
+            "worker runtime sampled",
         );
     }
 

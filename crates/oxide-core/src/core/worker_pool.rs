@@ -134,6 +134,8 @@ struct WorkerPoolState {
     shutdown_requested: AtomicBool,
     submitted: AtomicUsize,
     completed: AtomicUsize,
+    active_tasks: AtomicUsize,
+    last_runtime_sample_us: AtomicU64,
     task_counts: Vec<AtomicUsize>,
     worker_started_offsets_us: Vec<AtomicU64>,
     worker_stopped_offsets_us: Vec<AtomicU64>,
@@ -142,6 +144,7 @@ struct WorkerPoolState {
 
 const IDLE_WAIT_MIN: Duration = Duration::from_micros(50);
 const IDLE_WAIT_MAX: Duration = Duration::from_micros(500);
+const RUNTIME_SAMPLE_INTERVAL_US: u64 = 50_000;
 
 impl WorkerPoolState {
     fn new(
@@ -165,6 +168,8 @@ impl WorkerPoolState {
             shutdown_requested: AtomicBool::new(false),
             submitted: AtomicUsize::new(0),
             completed: AtomicUsize::new(0),
+            active_tasks: AtomicUsize::new(0),
+            last_runtime_sample_us: AtomicU64::new(0),
             task_counts,
             worker_started_offsets_us,
             worker_stopped_offsets_us,
@@ -175,6 +180,30 @@ impl WorkerPoolState {
     fn should_shutdown(&self) -> bool {
         self.shutdown_requested.load(Ordering::Acquire)
             && self.completed.load(Ordering::Acquire) >= self.submitted.load(Ordering::Acquire)
+    }
+
+    fn sample_runtime_metrics(&self, force: bool) {
+        let now_us = self.started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        if !force {
+            let last = self.last_runtime_sample_us.load(Ordering::Acquire);
+            if now_us.saturating_sub(last) < RUNTIME_SAMPLE_INTERVAL_US {
+                return;
+            }
+            if self
+                .last_runtime_sample_us
+                .compare_exchange(last, now_us, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return;
+            }
+        } else {
+            self.last_runtime_sample_us.store(now_us, Ordering::Release);
+        }
+
+        self.telemetry.on_runtime_sample(
+            self.queue.pending(),
+            self.active_tasks.load(Ordering::Acquire),
+        );
     }
 }
 
@@ -403,9 +432,8 @@ fn run_worker_loop<F>(
     loop {
         if let Some(batch) = worker.steal() {
             idle_wait = IDLE_WAIT_MIN;
-            state
-                .telemetry
-                .on_queue_depth(worker.id(), worker.queue_depth());
+            state.active_tasks.fetch_add(1, Ordering::AcqRel);
+            state.sample_runtime_metrics(false);
             state.telemetry.on_task_started(worker.id(), "compress");
             let started_at = Instant::now();
 
@@ -439,6 +467,8 @@ fn run_worker_loop<F>(
                     .telemetry
                     .on_task_failed(worker.id(), "compress", elapsed),
             }
+            state.active_tasks.fetch_sub(1, Ordering::AcqRel);
+            state.sample_runtime_metrics(false);
 
             state.completed.fetch_add(1, Ordering::AcqRel);
             state.task_counts[worker.id()].fetch_add(1, Ordering::AcqRel);
@@ -449,15 +479,14 @@ fn run_worker_loop<F>(
             continue;
         }
 
-        state
-            .telemetry
-            .on_queue_depth(worker.id(), worker.queue_depth());
+        state.sample_runtime_metrics(false);
 
         if state.should_shutdown() {
             let worker_stopped_us =
                 state.started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
             state.worker_stopped_offsets_us[worker.id()]
                 .store(worker_stopped_us.saturating_add(1), Ordering::Release);
+            state.sample_runtime_metrics(true);
             break;
         }
 
@@ -468,4 +497,5 @@ fn run_worker_loop<F>(
     let worker_stopped_us = state.started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
     state.worker_stopped_offsets_us[worker.id()]
         .store(worker_stopped_us.saturating_add(1), Ordering::Release);
+    state.sample_runtime_metrics(true);
 }

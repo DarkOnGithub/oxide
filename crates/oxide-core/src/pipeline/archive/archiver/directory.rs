@@ -1,4 +1,4 @@
-use crossbeam_channel::{bounded, select, Receiver, RecvTimeoutError, TryRecvError};
+use crossbeam_channel::{bounded, select, Receiver, RecvTimeoutError, TryRecvError, TrySendError};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -892,23 +892,47 @@ pub fn record_result_to_writer_queue(
             };
 
             for block in ready {
-                let send_started = Instant::now();
-                let send_result = writer_tx.send(block);
-                *writer_enqueue_blocked += send_started.elapsed();
-                if send_result.is_err() {
-                    let writer_error = writer_failure
-                        .lock()
-                        .ok()
-                        .and_then(|mut failure| failure.take());
-                    let error = match writer_error {
-                        Some(message) => crate::OxideError::CompressionError(message),
-                        None => crate::OxideError::CompressionError(
-                            "directory writer queue closed before completion".to_string(),
-                        ),
-                    };
-                    fail_directory_queueing(first_error, pending_results, retired_count, error);
-                    *retired_count += 1;
-                    return;
+                match writer_tx.try_send(block) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(block)) => {
+                        let send_started = Instant::now();
+                        if writer_tx.send(block).is_err() {
+                            let writer_error = writer_failure
+                                .lock()
+                                .ok()
+                                .and_then(|mut failure| failure.take());
+                            let error = match writer_error {
+                                Some(message) => crate::OxideError::CompressionError(message),
+                                None => crate::OxideError::CompressionError(
+                                    "directory writer queue closed before completion".to_string(),
+                                ),
+                            };
+                            fail_directory_queueing(
+                                first_error,
+                                pending_results,
+                                retired_count,
+                                error,
+                            );
+                            *retired_count += 1;
+                            return;
+                        }
+                        *writer_enqueue_blocked += send_started.elapsed();
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        let writer_error = writer_failure
+                            .lock()
+                            .ok()
+                            .and_then(|mut failure| failure.take());
+                        let error = match writer_error {
+                            Some(message) => crate::OxideError::CompressionError(message),
+                            None => crate::OxideError::CompressionError(
+                                "directory writer queue closed before completion".to_string(),
+                            ),
+                        };
+                        fail_directory_queueing(first_error, pending_results, retired_count, error);
+                        *retired_count += 1;
+                        return;
+                    }
                 }
                 *writer_queue_peak = (*writer_queue_peak).max(writer_tx.len());
                 *retired_count += 1;
