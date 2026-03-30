@@ -93,21 +93,6 @@ impl WorkerTelemetry for DefaultWorkerTelemetry {
         );
     }
 
-    fn on_runtime_sample(&self, queue_depth: usize, active_tasks: usize) {
-        telemetry::set_gauge(tags::METRIC_WORKER_QUEUE_DEPTH, queue_depth as u64);
-        telemetry::set_gauge(tags::METRIC_WORKER_ACTIVE_COUNT, active_tasks as u64);
-
-        #[cfg(feature = "profiling")]
-        profile::event(
-            tags::PROFILE_WORKER,
-            &PROFILE_TAG_STACK_WORKER,
-            "runtime_sample",
-            "sample",
-            0,
-            "worker runtime sampled",
-        );
-    }
-
     fn on_worker_scratch_ready(&self, _worker_id: usize, _allocated_bytes: usize) {}
 
     fn on_worker_scratch_sample(&self, _worker_id: usize, _allocated_bytes: usize) {}

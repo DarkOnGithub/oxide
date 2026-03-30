@@ -123,7 +123,7 @@ impl BufferPool {
         }
 
         PooledBuffer::new(buffer, self.recycler.clone(), Arc::clone(&self.metrics))
-            .with_recycle_capacity(requested_capacity)
+            .with_recycle_capacity(self.default_capacity)
     }
 
     /// Returns a snapshot of the current pool metrics.
