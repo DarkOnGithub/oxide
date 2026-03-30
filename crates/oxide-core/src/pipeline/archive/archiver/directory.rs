@@ -52,14 +52,10 @@ where
         .with_level(config.performance.compression_level)
         .with_lzma_extreme(config.performance.lzma_extreme)
         .with_lzma_dictionary_size(config.performance.lzma_dictionary_size);
-    let file_probe_plans = directory::detect_file_probe_plans(
-        &discovery,
-        block_size,
-        producer_compression_plan,
-        config.performance.producer_threads,
-    )?;
-    let file_order =
-        directory::plan_directory_file_order(&discovery, &file_probe_plans, block_size)?;
+    let directory::DirectoryFilePlan {
+        probe_plans: file_probe_plans,
+        file_order,
+    } = directory::plan_directory_files(&discovery, block_size);
 
     let block_count = directory::estimate_directory_block_count_with_file_order(
         &discovery,
@@ -975,13 +971,13 @@ fn train_directory_dictionary_bank(
     }
 
     let mut trainer = DictionaryTrainer::new(dictionary_mode);
+    let mut sample = vec![0u8; 16 * 1024];
     for file in &discovery.files {
         let mut handle = match fs::File::open(&file.full_path) {
             Ok(handle) => handle,
             Err(_) => continue,
         };
 
-        let mut sample = vec![0u8; 16 * 1024];
         let read = match handle.read(sample.as_mut_slice()) {
             Ok(read) => read,
             Err(_) => continue,
