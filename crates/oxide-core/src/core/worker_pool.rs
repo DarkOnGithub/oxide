@@ -200,10 +200,10 @@ impl WorkerPoolState {
             self.last_runtime_sample_us.store(now_us, Ordering::Release);
         }
 
-        self.telemetry.on_runtime_sample(
-            self.queue.pending(),
-            self.active_tasks.load(Ordering::Acquire),
-        );
+        let queue_depth = self.queue.pending();
+        self.telemetry.on_queue_depth(0, queue_depth);
+        self.telemetry
+            .on_runtime_sample(queue_depth, self.active_tasks.load(Ordering::Acquire));
     }
 }
 

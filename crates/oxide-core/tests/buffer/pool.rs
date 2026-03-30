@@ -30,3 +30,12 @@ fn acquire_with_capacity_grows_recycled_buffers_to_requested_size() {
     let recycled = pool.acquire_with_capacity(16 * 1024);
     assert!(recycled.capacity() >= 16 * 1024);
 }
+
+#[test]
+fn acquire_with_capacity_keeps_recycle_retention_capped_to_pool_defaults() {
+    let pool = BufferPool::new(1024, 1);
+    drop(pool.acquire_with_capacity(16 * 1024));
+
+    let recycled = pool.acquire();
+    assert!(recycled.capacity() <= retained_recycle_capacity(1024));
+}
