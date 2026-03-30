@@ -246,16 +246,17 @@ impl DirectoryBatchSubmitter {
         F: FnMut(Batch) -> Result<()>,
     {
         let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(self.block_size));
+        let source_path = self
+            .pending_source_path
+            .take()
+            .unwrap_or_else(|| self.source_path.clone());
         self.submit_batch(
-            self.pending_source_path
-                .clone()
-                .unwrap_or_else(|| self.source_path.clone()),
+            source_path,
             BatchData::Owned(Bytes::from(chunk)),
             self.pending_force_raw_storage.unwrap_or(false),
             submit,
         )?;
         self.pending_force_raw_storage = None;
-        self.pending_source_path = None;
         self.pending_extension = None;
         Ok(())
     }
@@ -481,19 +482,51 @@ pub(super) fn manifest_from_discovery_with_file_order(
     Ok(crate::format::ArchiveManifest::new(entries))
 }
 
+#[cfg(test)]
 pub(super) fn detect_file_probe_plans(
     discovery: &DirectoryDiscovery,
     _target_block_size: usize,
     _compression_plan: ChunkEncodingPlan,
     _threads: usize,
 ) -> Result<Vec<FileProbePlan>> {
-    Ok(discovery
-        .files
-        .iter()
-        .map(|file| FileProbePlan {
-            force_raw_storage: should_force_raw_storage(&file.full_path),
-        })
-        .collect())
+    Ok(plan_directory_files(discovery, _target_block_size).probe_plans)
+}
+
+pub(super) struct DirectoryFilePlan {
+    pub(super) probe_plans: Vec<FileProbePlan>,
+    pub(super) file_order: Vec<usize>,
+}
+
+pub(super) fn plan_directory_files(
+    discovery: &DirectoryDiscovery,
+    block_size: usize,
+) -> DirectoryFilePlan {
+    let fragment_threshold = directory_fragment_file_size_threshold(block_size);
+    let mut probe_plans = Vec::with_capacity(discovery.files.len());
+    let mut regular = Vec::with_capacity(discovery.files.len());
+    let mut fragments = Vec::new();
+    let mut raw_fragments = Vec::new();
+
+    for (index, file) in discovery.files.iter().enumerate() {
+        let force_raw_storage = should_force_raw_storage(&file.full_path);
+        probe_plans.push(FileProbePlan { force_raw_storage });
+
+        if file.size > fragment_threshold {
+            regular.push(index);
+        } else if force_raw_storage {
+            raw_fragments.push(index);
+        } else {
+            fragments.push(index);
+        }
+    }
+
+    regular.extend(fragments);
+    regular.extend(raw_fragments);
+
+    DirectoryFilePlan {
+        probe_plans,
+        file_order: regular,
+    }
 }
 
 #[cfg(test)]
@@ -553,6 +586,7 @@ pub(super) fn estimate_directory_block_count_with_file_order(
         .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v2"))
 }
 
+#[cfg(test)]
 pub(super) fn plan_directory_file_order(
     discovery: &DirectoryDiscovery,
     file_probe_plans: &[FileProbePlan],
