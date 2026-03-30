@@ -690,19 +690,22 @@ impl Extractor {
                     archive_bytes_completed.saturating_add(header.encoded_len as u64);
 
                 if !decode_plan.includes(block_index) {
-                    emit_extract_progress_if_due(
-                        source_kind,
-                        started_at,
-                        archive_bytes_completed,
-                        decoded_bytes_completed,
-                        block_capacity as u32,
-                        received as u32,
-                        runtime_state.snapshot(),
-                        emit_every,
-                        &mut last_emit_at,
-                        false,
-                        sink,
-                    );
+                    let force = false;
+                    if progress_emit_due(&last_emit_at, emit_every, force) {
+                        emit_extract_progress_if_due(
+                            source_kind,
+                            started_at,
+                            archive_bytes_completed,
+                            decoded_bytes_completed,
+                            block_capacity as u32,
+                            received as u32,
+                            runtime_state.snapshot(),
+                            emit_every,
+                            &mut last_emit_at,
+                            force,
+                            sink,
+                        );
+                    }
                     continue;
                 }
 
@@ -727,19 +730,22 @@ impl Extractor {
                         )
                     })?;
                     decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
-                    emit_extract_progress_if_due(
-                        source_kind,
-                        started_at,
-                        archive_bytes_completed,
-                        decoded_bytes_completed,
-                        block_capacity as u32,
-                        received as u32,
-                        runtime_state.snapshot(),
-                        emit_every,
-                        &mut last_emit_at,
-                        false,
-                        sink,
-                    );
+                    let force = false;
+                    if progress_emit_due(&last_emit_at, emit_every, force) {
+                        emit_extract_progress_if_due(
+                            source_kind,
+                            started_at,
+                            archive_bytes_completed,
+                            decoded_bytes_completed,
+                            block_capacity as u32,
+                            received as u32,
+                            runtime_state.snapshot(),
+                            emit_every,
+                            &mut last_emit_at,
+                            force,
+                            sink,
+                        );
+                    }
                 }
 
                 let submit_started = Instant::now();
@@ -785,19 +791,22 @@ impl Extractor {
                 }
 
                 decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
-                emit_extract_progress_if_due(
-                    source_kind,
-                    started_at,
-                    archive_bytes_completed,
-                    decoded_bytes_completed,
-                    block_capacity as u32,
-                    received as u32,
-                    runtime_state.snapshot(),
-                    emit_every,
-                    &mut last_emit_at,
-                    false,
-                    sink,
-                );
+                let force = false;
+                if progress_emit_due(&last_emit_at, emit_every, force) {
+                    emit_extract_progress_if_due(
+                        source_kind,
+                        started_at,
+                        archive_bytes_completed,
+                        decoded_bytes_completed,
+                        block_capacity as u32,
+                        received as u32,
+                        runtime_state.snapshot(),
+                        emit_every,
+                        &mut last_emit_at,
+                        force,
+                        sink,
+                    );
+                }
             }
 
             if submitted != block_capacity && first_error.is_none() {
@@ -827,19 +836,22 @@ impl Extractor {
                     )
                 })?;
                 decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
-                emit_extract_progress_if_due(
-                    source_kind,
-                    started_at,
-                    archive_bytes_completed,
-                    decoded_bytes_completed,
-                    block_capacity as u32,
-                    received as u32,
-                    runtime_state.snapshot(),
-                    emit_every,
-                    &mut last_emit_at,
-                    false,
-                    sink,
-                );
+                let force = false;
+                if progress_emit_due(&last_emit_at, emit_every, force) {
+                    emit_extract_progress_if_due(
+                        source_kind,
+                        started_at,
+                        archive_bytes_completed,
+                        decoded_bytes_completed,
+                        block_capacity as u32,
+                        received as u32,
+                        runtime_state.snapshot(),
+                        emit_every,
+                        &mut last_emit_at,
+                        force,
+                        sink,
+                    );
+                }
             }
 
             Ok(())
@@ -879,16 +891,19 @@ impl Extractor {
             .push_elapsed
             .saturating_sub(reorder_stats.write_elapsed);
         if options.emit_final_progress {
-            emit_extract_progress(
-                source_kind,
-                started_at,
-                archive_bytes_completed,
-                decoded_bytes_completed,
-                block_capacity as u32,
-                received as u32,
-                runtime_state.snapshot(),
-                sink,
-            );
+            let force = true;
+            if progress_emit_due(&last_emit_at, emit_every, force) {
+                emit_extract_progress(
+                    source_kind,
+                    started_at,
+                    archive_bytes_completed,
+                    decoded_bytes_completed,
+                    block_capacity as u32,
+                    received as u32,
+                    runtime_state.snapshot(),
+                    sink,
+                );
+            }
         }
 
         Ok((

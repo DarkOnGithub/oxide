@@ -125,6 +125,30 @@ where
 
         if shutdown_called && received_count == submitted_count {
             if options.emit_final_progress {
+                let force = true;
+                if progress_emit_due(&last_emit_at, emit_every, force) {
+                    emit_archive_progress_if_due(
+                        handle.runtime_snapshot(),
+                        processing_totals.snapshot(),
+                        source_kind,
+                        started_at,
+                        input_bytes_total,
+                        completed_bytes,
+                        output_bytes_written,
+                        block_count,
+                        emit_every,
+                        &mut last_emit_at,
+                        force,
+                        sink,
+                    );
+                }
+            }
+            break;
+        }
+
+        if drained == 0 {
+            let force = false;
+            if progress_emit_due(&last_emit_at, emit_every, force) {
                 emit_archive_progress_if_due(
                     handle.runtime_snapshot(),
                     processing_totals.snapshot(),
@@ -136,28 +160,10 @@ where
                     block_count,
                     emit_every,
                     &mut last_emit_at,
-                    true,
+                    force,
                     sink,
                 );
             }
-            break;
-        }
-
-        if drained == 0 {
-            emit_archive_progress_if_due(
-                handle.runtime_snapshot(),
-                processing_totals.snapshot(),
-                source_kind,
-                started_at,
-                input_bytes_total,
-                completed_bytes,
-                output_bytes_written,
-                block_count,
-                emit_every,
-                &mut last_emit_at,
-                false,
-                sink,
-            );
             let wait_started = Instant::now();
             recv_result_to_writer(
                 &handle,
@@ -175,20 +181,23 @@ where
             );
             stage_timings.result_wait += wait_started.elapsed();
         }
-        emit_archive_progress_if_due(
-            handle.runtime_snapshot(),
-            processing_totals.snapshot(),
-            source_kind,
-            started_at,
-            input_bytes_total,
-            completed_bytes,
-            output_bytes_written,
-            block_count,
-            emit_every,
-            &mut last_emit_at,
-            false,
-            sink,
-        );
+        let force = false;
+        if progress_emit_due(&last_emit_at, emit_every, force) {
+            emit_archive_progress_if_due(
+                handle.runtime_snapshot(),
+                processing_totals.snapshot(),
+                source_kind,
+                started_at,
+                input_bytes_total,
+                completed_bytes,
+                output_bytes_written,
+                block_count,
+                emit_every,
+                &mut last_emit_at,
+                force,
+                sink,
+            );
+        }
     }
 
     let final_runtime = handle.runtime_snapshot();

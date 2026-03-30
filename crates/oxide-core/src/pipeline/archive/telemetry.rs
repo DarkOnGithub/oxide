@@ -48,6 +48,11 @@ pub fn record_extract_run_telemetry(elapsed: Duration, stage_timings: ExtractSta
     let _ = stage_timings;
 }
 
+#[inline]
+pub fn progress_emit_due(last_emit_at: &Instant, emit_every: Duration, force: bool) -> bool {
+    force || last_emit_at.elapsed() >= emit_every
+}
+
 pub fn emit_archive_progress_if_due(
     runtime: PoolRuntimeSnapshot,
     processing: ProcessingThroughputSnapshot,
@@ -62,7 +67,7 @@ pub fn emit_archive_progress_if_due(
     force: bool,
     sink: &mut dyn TelemetrySink,
 ) {
-    if force || last_emit_at.elapsed() >= emit_every {
+    if progress_emit_due(last_emit_at, emit_every, force) {
         let elapsed = started_at.elapsed();
         let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
         let input_done = input_bytes_completed.min(input_bytes_total);
@@ -112,7 +117,7 @@ pub fn emit_extract_progress_if_due(
     force: bool,
     sink: &mut dyn TelemetrySink,
 ) {
-    if force || last_emit_at.elapsed() >= emit_every {
+    if progress_emit_due(last_emit_at, emit_every, force) {
         emit_extract_progress(
             source_kind,
             started_at,
