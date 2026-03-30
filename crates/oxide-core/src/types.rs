@@ -277,14 +277,14 @@ impl CompressedPayload {
 
     /// Copies bytes into a pooled buffer.
     pub fn copy_from_slice_in_pool(data: &[u8], pool: &BufferPool) -> Self {
-        let mut pooled = pool.acquire();
+        let mut pooled = pool.acquire_with_capacity(data.len());
         pooled.extend_from_slice(data);
         Self::Pooled(pooled)
     }
 
     /// Moves an owned vector into a pooled buffer slot for reuse.
     pub fn from_vec_in_pool(mut data: Vec<u8>, pool: &BufferPool) -> Self {
-        let mut pooled = pool.acquire();
+        let mut pooled = pool.acquire_with_capacity(data.capacity().max(data.len()));
         std::mem::swap(pooled.as_mut_vec(), &mut data);
         Self::Pooled(pooled)
     }

@@ -1,7 +1,6 @@
 use super::{
-    MIN_DECODE_QUEUE_CAPACITY, MIN_ORDERED_WRITE_QUEUE_CAPACITY, ReadRequest,
     decode_queue_capacity, join_io_reader, ordered_write_queue_capacity, reorder_pending_limit,
-    spawn_io_reader,
+    spawn_io_reader, ReadRequest, MIN_DECODE_QUEUE_CAPACITY, MIN_ORDERED_WRITE_QUEUE_CAPACITY,
 };
 use crate::{
     ArchiveManifest, ArchiveReader, ArchiveWriter, BufferPool, CompressedBlock, CompressionAlgo,
@@ -79,6 +78,7 @@ fn io_reader_moves_block_reads_off_the_orchestrator_path() {
         .send(ReadRequest {
             index: 0,
             block_index: 0,
+            encoded_len: 5,
         })
         .expect("read request should send");
     drop(read_request_tx);
