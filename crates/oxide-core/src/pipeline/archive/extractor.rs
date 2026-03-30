@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 
 use crate::buffer::{BufferPool, PooledBuffer};
 use crate::compression::CompressionScratchArena;
@@ -1160,14 +1160,25 @@ fn forward_processed_decode_result(
     match outcome {
         ProcessedDecodeResult::Block { index, bytes } => {
             if let Some(tx) = ordered_write_tx.as_ref() {
-                let enqueue_started = Instant::now();
-                let send_result = tx.send(OrderedWriteTask::Block { index, bytes });
-                stage_timings.writer_enqueue_blocked += enqueue_started.elapsed();
-                match send_result {
+                match tx.try_send(OrderedWriteTask::Block { index, bytes }) {
                     Ok(()) => {
                         *ordered_write_queue_peak = (*ordered_write_queue_peak).max(tx.len());
                     }
-                    Err(_) => {
+                    Err(TrySendError::Full(task)) => {
+                        let enqueue_started = Instant::now();
+                        let send_result = tx.send(task);
+                        stage_timings.writer_enqueue_blocked += enqueue_started.elapsed();
+                        if send_result.is_ok() {
+                            *ordered_write_queue_peak = (*ordered_write_queue_peak).max(tx.len());
+                            return Ok(());
+                        }
+                        *ordered_writer_disconnected = true;
+                        *ordered_write_tx = None;
+                        return Err(crate::OxideError::CompressionError(
+                            "ordered write queue closed before completion".to_string(),
+                        ));
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
                         *ordered_writer_disconnected = true;
                         *ordered_write_tx = None;
                         return Err(crate::OxideError::CompressionError(
