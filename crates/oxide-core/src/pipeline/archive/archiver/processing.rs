@@ -1,4 +1,5 @@
 use std::time::Instant;
+use std::{path::Path, vec::Vec};
 
 use crate::buffer::BufferPool;
 use crate::compression::{
@@ -88,8 +89,27 @@ fn is_likely_incompressible_entropy(source: &[u8], sample_len: usize) -> bool {
     entropy > ENTROPY_INCOMPRESSIBLE_THRESHOLD
 }
 
+fn incompressible_probe_offsets(source_len: usize, sample_len: usize) -> Vec<usize> {
+    let sample_len = sample_len.min(source_len);
+    if sample_len == 0 {
+        return Vec::new();
+    }
+
+    let max_start = source_len.saturating_sub(sample_len);
+    let mut offsets = vec![0];
+    if max_start >= sample_len {
+        offsets.push(max_start / 2);
+        offsets.push(max_start);
+        offsets.sort_unstable();
+        offsets.dedup();
+    }
+
+    offsets
+}
+
 fn is_likely_incompressible_sample(
     source: &[u8],
+    source_path: &Path,
     plan: crate::types::ChunkEncodingPlan,
     dictionary_bank: &ArchiveDictionaryBank,
     scratch: &mut WorkerScratchArena,
@@ -99,34 +119,56 @@ fn is_likely_incompressible_sample(
         return Ok(false);
     }
 
-    // Fast path: use entropy estimation (~100x faster than trial compression).
-    // Only fires for very high entropy data (>7.5 bits/byte), so borderline
-    // cases still get the full compression probe.
-    if is_likely_incompressible_entropy(source, sample_len) {
-        return Ok(true);
+    if plan.algo != CompressionAlgo::Zstd {
+        if is_likely_incompressible_entropy(source, sample_len) {
+            return Ok(true);
+        }
+
+        let probe = apply_compression_request_with_scratch(
+            CompressionRequest {
+                data: &source[..sample_len],
+                algo: plan.algo,
+                level: plan.level,
+                lzma_extreme: plan.lzma_extreme,
+                lzma_dictionary_size: plan.lzma_dictionary_size,
+                dictionary_id: 0,
+                dictionary: None,
+            },
+            scratch.compression(),
+        )?;
+
+        let likely_incompressible = probe.len() >= sample_len;
+        recycle_compression_buffer(plan.algo, probe, scratch.compression());
+        return Ok(likely_incompressible);
     }
 
-    let selected_dictionary =
-        dictionary_bank.select_for_chunk(plan.algo, &source[..sample_len], None);
-    let probe = apply_compression_request_with_scratch(
-        CompressionRequest {
-            data: &source[..sample_len],
-            algo: plan.algo,
-            level: plan.level,
-            lzma_extreme: plan.lzma_extreme,
-            lzma_dictionary_size: plan.lzma_dictionary_size,
-            dictionary_id: selected_dictionary
-                .map(|dictionary| dictionary.id)
-                .unwrap_or(0),
-            dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
-        },
-        scratch.compression(),
-    )?;
+    for offset in incompressible_probe_offsets(source.len(), sample_len) {
+        let sample = &source[offset..offset + sample_len];
+        let selected_dictionary =
+            dictionary_bank.select_for_chunk(plan.algo, sample, Some(source_path));
+        let probe = apply_compression_request_with_scratch(
+            CompressionRequest {
+                data: sample,
+                algo: plan.algo,
+                level: plan.level,
+                lzma_extreme: plan.lzma_extreme,
+                lzma_dictionary_size: plan.lzma_dictionary_size,
+                dictionary_id: selected_dictionary
+                    .map(|dictionary| dictionary.id)
+                    .unwrap_or(0),
+                dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
+            },
+            scratch.compression(),
+        )?;
 
-    let likely_incompressible = probe.len() >= sample_len;
-    recycle_compression_buffer(plan.algo, probe, scratch.compression());
+        let likely_incompressible = probe.len() >= sample_len;
+        recycle_compression_buffer(plan.algo, probe, scratch.compression());
+        if !likely_incompressible {
+            return Ok(false);
+        }
+    }
 
-    Ok(likely_incompressible)
+    Ok(true)
 }
 
 pub fn process_batch(
@@ -177,7 +219,7 @@ pub fn process_batch(
 
     if raw_fallback_enabled
         && should_skip_full_compression_probe(source_len, plan)
-        && is_likely_incompressible_sample(source, plan, dictionary_bank, scratch)?
+        && is_likely_incompressible_sample(source, &source_path, plan, dictionary_bank, scratch)?
     {
         processing_totals.record(source_len as u64, std::time::Duration::ZERO);
         return Ok(CompressedBlock::with_chunk_encoding(

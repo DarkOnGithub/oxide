@@ -9,6 +9,8 @@ const MAX_SAMPLES_PER_CLASS: usize = 256;
 const MAX_SAMPLE_BYTES_PER_CLASS: usize = 4 * 1024 * 1024;
 const MIN_SAMPLES_PER_CLASS: usize = 8;
 
+pub(crate) const DICTIONARY_SAMPLE_WINDOW_SIZE: usize = DEFAULT_SAMPLE_SIZE;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ArchiveDictionaryMode {
     #[default]
@@ -139,19 +141,23 @@ impl DictionaryTrainer {
     }
 
     pub fn observe(&mut self, sample: &[u8]) {
-        self.observe_class(sample, classify_sample(sample));
+        for window in dictionary_sample_windows(sample) {
+            self.observe_class(window, classify_sample(window));
+        }
     }
 
     pub fn observe_with_path<P>(&mut self, path: P, sample: &[u8])
     where
         P: AsRef<Path>,
     {
-        let sample_class = classify_sample(sample);
-        self.observe_class(sample, sample_class.clone());
+        for window in dictionary_sample_windows(sample) {
+            let sample_class = classify_sample(window);
+            self.observe_class(window, sample_class.clone());
 
-        if let Some(path_class) = classify_path(path.as_ref()) {
-            if path_class != sample_class {
-                self.observe_class(sample, path_class);
+            if let Some(path_class) = classify_path(path.as_ref()) {
+                if path_class != sample_class {
+                    self.observe_class(window, path_class);
+                }
             }
         }
     }
@@ -293,6 +299,36 @@ pub fn normalized_extension(extension: &str) -> Option<String> {
     }
 
     Some(extension.to_ascii_lowercase())
+}
+
+pub(crate) fn dictionary_sample_offsets(sample_len: usize) -> Vec<usize> {
+    let window_size = DICTIONARY_SAMPLE_WINDOW_SIZE.min(sample_len);
+    if window_size == 0 {
+        return Vec::new();
+    }
+
+    let max_start = sample_len.saturating_sub(window_size);
+    let mut offsets = vec![0];
+    if max_start >= window_size.saturating_mul(2) {
+        offsets.push(max_start / 2);
+        offsets.push(max_start);
+        offsets.sort_unstable();
+        offsets.dedup();
+    }
+
+    offsets
+}
+
+fn dictionary_sample_windows(sample: &[u8]) -> Vec<&[u8]> {
+    dictionary_sample_offsets(sample.len())
+        .into_iter()
+        .map(|offset| {
+            let end = offset
+                .saturating_add(DICTIONARY_SAMPLE_WINDOW_SIZE)
+                .min(sample.len());
+            &sample[offset..end]
+        })
+        .collect()
 }
 
 #[cfg(test)]
