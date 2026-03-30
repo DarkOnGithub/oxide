@@ -459,6 +459,31 @@ where
 
         if shutdown_called && received_count == submitted_count {
             if options.emit_final_progress {
+                let force = true;
+                if progress_emit_due(&last_emit_at, emit_every, force) {
+                    emit_archive_progress_if_due(
+                        handle.runtime_snapshot(),
+                        processing_totals.snapshot(),
+                        ArchiveSourceKind::Directory,
+                        started_at,
+                        input_bytes_total,
+                        completed_bytes,
+                        output_bytes_written,
+                        block_count,
+                        emit_every,
+                        &mut last_emit_at,
+                        force,
+                        sink,
+                    );
+                }
+            }
+            break;
+        }
+
+        if !progressed {
+            output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
+            let force = false;
+            if progress_emit_due(&last_emit_at, emit_every, force) {
                 emit_archive_progress_if_due(
                     handle.runtime_snapshot(),
                     processing_totals.snapshot(),
@@ -470,29 +495,10 @@ where
                     block_count,
                     emit_every,
                     &mut last_emit_at,
-                    true,
+                    force,
                     sink,
                 );
             }
-            break;
-        }
-
-        if !progressed {
-            output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
-            emit_archive_progress_if_due(
-                handle.runtime_snapshot(),
-                processing_totals.snapshot(),
-                ArchiveSourceKind::Directory,
-                started_at,
-                input_bytes_total,
-                completed_bytes,
-                output_bytes_written,
-                block_count,
-                emit_every,
-                &mut last_emit_at,
-                false,
-                sink,
-            );
 
             let worker_inflight = submitted_count.saturating_sub(received_count);
             let can_submit = can_submit_more_work(
@@ -586,20 +592,23 @@ where
         }
 
         output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
-        emit_archive_progress_if_due(
-            handle.runtime_snapshot(),
-            processing_totals.snapshot(),
-            ArchiveSourceKind::Directory,
-            started_at,
-            input_bytes_total,
-            completed_bytes,
-            output_bytes_written,
-            block_count,
-            emit_every,
-            &mut last_emit_at,
-            false,
-            sink,
-        );
+        let force = false;
+        if progress_emit_due(&last_emit_at, emit_every, force) {
+            emit_archive_progress_if_due(
+                handle.runtime_snapshot(),
+                processing_totals.snapshot(),
+                ArchiveSourceKind::Directory,
+                started_at,
+                input_bytes_total,
+                completed_bytes,
+                output_bytes_written,
+                block_count,
+                emit_every,
+                &mut last_emit_at,
+                force,
+                sink,
+            );
+        }
     }
 
     let producer_outcome = match producer_handle.join() {
@@ -654,20 +663,23 @@ where
             &mut received_count,
         )?;
         output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
-        emit_archive_progress_if_due(
-            handle.runtime_snapshot(),
-            processing_totals.snapshot(),
-            ArchiveSourceKind::Directory,
-            started_at,
-            input_bytes_total,
-            completed_bytes,
-            output_bytes_written,
-            block_count,
-            emit_every,
-            &mut last_emit_at,
-            options.emit_final_progress && received_count == submitted_count,
-            sink,
-        );
+        let force = options.emit_final_progress && received_count == submitted_count;
+        if progress_emit_due(&last_emit_at, emit_every, force) {
+            emit_archive_progress_if_due(
+                handle.runtime_snapshot(),
+                processing_totals.snapshot(),
+                ArchiveSourceKind::Directory,
+                started_at,
+                input_bytes_total,
+                completed_bytes,
+                output_bytes_written,
+                block_count,
+                emit_every,
+                &mut last_emit_at,
+                force,
+                sink,
+            );
+        }
     }
 
     let final_runtime = handle.runtime_snapshot();
