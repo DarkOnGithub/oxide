@@ -102,8 +102,20 @@ impl DirectoryBatchSubmitter {
         P: AsRef<Path>,
         F: FnMut(Batch) -> Result<()>,
     {
+        let source_path = source_path.as_ref();
+        let source_extension = if self.compression_plan.algo == CompressionAlgo::Zstd {
+            normalized_extension_from_path(source_path)
+        } else {
+            None
+        };
+
         while !bytes.is_empty() {
-            self.prepare_pending_state(source_path.as_ref(), force_raw_storage, &mut submit)?;
+            self.prepare_pending_state(
+                source_path,
+                source_extension.as_deref(),
+                force_raw_storage,
+                &mut submit,
+            )?;
 
             let room = self.block_size.saturating_sub(self.pending.len()).max(1);
             let take = room.min(bytes.len());
@@ -132,6 +144,11 @@ impl DirectoryBatchSubmitter {
         F: FnMut(Batch) -> Result<()>,
     {
         let source_path = source_path.as_ref();
+        let source_extension = if self.compression_plan.algo == CompressionAlgo::Zstd {
+            normalized_extension_from_path(source_path)
+        } else {
+            None
+        };
         if end < start || end > map.len() {
             return Err(crate::OxideError::InvalidFormat(
                 "invalid mapped batch range",
@@ -140,7 +157,12 @@ impl DirectoryBatchSubmitter {
 
         let mut offset = start;
         while offset < end {
-            self.prepare_pending_state(source_path, force_raw_storage, &mut submit)?;
+            self.prepare_pending_state(
+                source_path,
+                source_extension.as_deref(),
+                force_raw_storage,
+                &mut submit,
+            )?;
 
             if !self.pending.is_empty() {
                 let room = self.block_size.saturating_sub(self.pending.len()).max(1);
@@ -192,6 +214,7 @@ impl DirectoryBatchSubmitter {
     fn prepare_pending_state<F>(
         &mut self,
         source_path: &Path,
+        source_extension: Option<&str>,
         force_raw_storage: bool,
         submit: &mut F,
     ) -> Result<()>
@@ -204,16 +227,16 @@ impl DirectoryBatchSubmitter {
                     self.flush_pending(submit)?;
                 }
                 self.pending_force_raw_storage = Some(force_raw_storage);
-                self.set_pending_source_path(source_path);
+                self.set_pending_source_path(source_path, source_extension);
             }
             Some(_) => {}
             None => {
                 self.pending_force_raw_storage = Some(force_raw_storage);
-                self.set_pending_source_path(source_path);
+                self.set_pending_source_path(source_path, source_extension);
             }
         }
 
-        self.update_pending_source_path(source_path);
+        self.update_pending_source_path(source_path, source_extension);
 
         Ok(())
     }
@@ -237,14 +260,14 @@ impl DirectoryBatchSubmitter {
         Ok(())
     }
 
-    fn set_pending_source_path(&mut self, source_path: &Path) {
+    fn set_pending_source_path(&mut self, source_path: &Path, source_extension: Option<&str>) {
         self.pending_source_path = Some(source_path.to_path_buf());
-        self.pending_extension = normalized_extension_from_path(source_path);
+        self.pending_extension = source_extension.map(str::to_owned);
     }
 
-    fn update_pending_source_path(&mut self, source_path: &Path) {
+    fn update_pending_source_path(&mut self, source_path: &Path, source_extension: Option<&str>) {
         if self.pending_source_path.is_none() {
-            self.set_pending_source_path(source_path);
+            self.set_pending_source_path(source_path, source_extension);
             return;
         }
 
@@ -252,8 +275,7 @@ impl DirectoryBatchSubmitter {
             return;
         }
 
-        let source_extension = normalized_extension_from_path(source_path);
-        if source_extension != self.pending_extension {
+        if source_extension != self.pending_extension.as_deref() {
             self.pending_source_path = Some(self.source_path.clone());
             self.pending_extension = None;
         }
