@@ -1,4 +1,8 @@
 const CDC_WINDOW_SIZE: usize = 16;
+// The rolling-window slot math below uses bit masking instead of modulo, so the
+// window size must remain a power of two.
+const _: () = assert!(CDC_WINDOW_SIZE.is_power_of_two());
+const CDC_WINDOW_MASK: usize = CDC_WINDOW_SIZE - 1;
 
 /// Chunk boundary mode used by the scanner and planner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +90,7 @@ pub(crate) fn find_cdc_boundary(policy: ChunkingPolicy, data: &[u8], start: usiz
     let mut hash = 0u64;
     let mut window = [0u8; CDC_WINDOW_SIZE];
     let mut filled = 0usize;
+    let mut slot = 0usize;
 
     for index in start..upper_bound {
         let byte = data[index];
@@ -93,13 +98,15 @@ pub(crate) fn find_cdc_boundary(policy: ChunkingPolicy, data: &[u8], start: usiz
             hash = hash.rotate_left(1) ^ CDC_TABLE[byte as usize];
             window[filled] = byte;
             filled += 1;
+            if filled == CDC_WINDOW_SIZE {
+                slot = (index + 1) & CDC_WINDOW_MASK;
+            }
         } else {
-            let slot = index % CDC_WINDOW_SIZE;
             let outgoing = window[slot];
             window[slot] = byte;
-            hash = hash.rotate_left(1)
-                ^ CDC_TABLE[byte as usize]
-                ^ CDC_TABLE[outgoing as usize].rotate_left(CDC_WINDOW_SIZE as u32);
+            hash =
+                hash.rotate_left(1) ^ CDC_TABLE[byte as usize] ^ CDC_OUT_TABLE[outgoing as usize];
+            slot = (slot + 1) & CDC_WINDOW_MASK;
         }
 
         let chunk_size = index + 1 - start;
@@ -152,3 +159,77 @@ const fn build_cdc_table() -> [u64; 256] {
 }
 
 const CDC_TABLE: [u64; 256] = build_cdc_table();
+
+const fn build_cdc_out_table() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    let mut index = 0usize;
+    while index < 256 {
+        table[index] = CDC_TABLE[index].rotate_left(CDC_WINDOW_SIZE as u32);
+        index += 1;
+    }
+    table
+}
+
+const CDC_OUT_TABLE: [u64; 256] = build_cdc_out_table();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reference_find_cdc_boundary(policy: ChunkingPolicy, data: &[u8], start: usize) -> usize {
+        if start >= data.len() {
+            return data.len();
+        }
+
+        let upper_bound = policy.upper_bound(start, data.len());
+        if upper_bound <= start.saturating_add(policy.min_size) {
+            return upper_bound;
+        }
+
+        let mut hash = 0u64;
+        let mut window = [0u8; CDC_WINDOW_SIZE];
+        let mut filled = 0usize;
+
+        for index in start..upper_bound {
+            let byte = data[index];
+            if filled < CDC_WINDOW_SIZE {
+                hash = hash.rotate_left(1) ^ CDC_TABLE[byte as usize];
+                window[filled] = byte;
+                filled += 1;
+            } else {
+                let slot = index % CDC_WINDOW_SIZE;
+                let outgoing = window[slot];
+                window[slot] = byte;
+                hash = hash.rotate_left(1)
+                    ^ CDC_TABLE[byte as usize]
+                    ^ CDC_TABLE[outgoing as usize].rotate_left(CDC_WINDOW_SIZE as u32);
+            }
+
+            let chunk_size = index + 1 - start;
+            if chunk_size >= policy.min_size
+                && chunk_size < policy.max_size
+                && (hash & policy.cdc_mask) == 0
+            {
+                return index + 1;
+            }
+        }
+
+        upper_bound
+    }
+
+    #[test]
+    fn cdc_boundary_matches_reference_for_unaligned_starts() {
+        let policy = ChunkingPolicy::cdc(32, 8, 64);
+        let data = (0..512)
+            .map(|index| ((index * 97 + 13) % 251) as u8)
+            .collect::<Vec<_>>();
+
+        for start in [1usize, 7, 15, 16, 17, 31, 47, 63, 95] {
+            assert_eq!(
+                find_cdc_boundary(policy, &data, start),
+                reference_find_cdc_boundary(policy, &data, start),
+                "mismatch at start {start}"
+            );
+        }
+    }
+}

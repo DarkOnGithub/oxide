@@ -1,5 +1,5 @@
+use std::path::Path;
 use std::time::Instant;
-use std::{path::Path, vec::Vec};
 
 use crate::buffer::BufferPool;
 use crate::compression::{
@@ -89,22 +89,38 @@ fn is_likely_incompressible_entropy(source: &[u8], sample_len: usize) -> bool {
     entropy > ENTROPY_INCOMPRESSIBLE_THRESHOLD
 }
 
-fn incompressible_probe_offsets(source_len: usize, sample_len: usize) -> Vec<usize> {
+#[inline]
+fn incompressible_probe_offsets_storage(
+    source_len: usize,
+    sample_len: usize,
+) -> ([usize; 3], usize) {
     let sample_len = sample_len.min(source_len);
     if sample_len == 0 {
-        return Vec::new();
+        return ([0; 3], 0);
     }
 
     let max_start = source_len.saturating_sub(sample_len);
-    let mut offsets = vec![0];
+    let mut offsets = [0usize; 3];
+    let mut len = 1usize;
     if max_start >= sample_len {
-        offsets.push(max_start / 2);
-        offsets.push(max_start);
-        offsets.sort_unstable();
-        offsets.dedup();
+        let middle = max_start / 2;
+        if middle != 0 {
+            offsets[len] = middle;
+            len += 1;
+        }
+        if max_start != 0 && max_start != middle {
+            offsets[len] = max_start;
+            len += 1;
+        }
     }
 
-    offsets
+    (offsets, len)
+}
+
+#[cfg(test)]
+fn incompressible_probe_offsets(source_len: usize, sample_len: usize) -> Vec<usize> {
+    let (offsets, len) = incompressible_probe_offsets_storage(source_len, sample_len);
+    offsets[..len].to_vec()
 }
 
 fn is_likely_incompressible_sample(
@@ -142,7 +158,8 @@ fn is_likely_incompressible_sample(
         return Ok(likely_incompressible);
     }
 
-    for offset in incompressible_probe_offsets(source.len(), sample_len) {
+    let (offsets, offset_count) = incompressible_probe_offsets_storage(source.len(), sample_len);
+    for &offset in &offsets[..offset_count] {
         let sample = &source[offset..offset + sample_len];
         let selected_dictionary =
             dictionary_bank.select_for_chunk(plan.algo, sample, Some(source_path));
@@ -161,9 +178,9 @@ fn is_likely_incompressible_sample(
             scratch.compression(),
         )?;
 
-        let likely_incompressible = probe.len() >= sample_len;
+        let sample_likely_incompressible = probe.len() >= sample_len;
         recycle_compression_buffer(plan.algo, probe, scratch.compression());
-        if !likely_incompressible {
+        if !sample_likely_incompressible {
             return Ok(false);
         }
     }

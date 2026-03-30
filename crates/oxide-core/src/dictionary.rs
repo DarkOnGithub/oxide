@@ -81,6 +81,10 @@ impl ArchiveDictionaryBank {
             return None;
         }
 
+        if self.dictionaries.is_empty() {
+            return None;
+        }
+
         if let Some(class) = source_path.and_then(classify_path) {
             if let Some(dictionary) = self
                 .dictionaries
@@ -141,25 +145,26 @@ impl DictionaryTrainer {
     }
 
     pub fn observe(&mut self, sample: &[u8]) {
-        for window in dictionary_sample_windows(sample) {
+        for_each_dictionary_sample_window(sample, |window| {
             self.observe_class(window, classify_sample(window));
-        }
+        });
     }
 
     pub fn observe_with_path<P>(&mut self, path: P, sample: &[u8])
     where
         P: AsRef<Path>,
     {
-        for window in dictionary_sample_windows(sample) {
+        let path_class = classify_path(path.as_ref());
+        for_each_dictionary_sample_window(sample, |window| {
             let sample_class = classify_sample(window);
             self.observe_class(window, sample_class.clone());
 
-            if let Some(path_class) = classify_path(path.as_ref()) {
-                if path_class != sample_class {
-                    self.observe_class(window, path_class);
+            if let Some(path_class) = path_class.as_ref() {
+                if *path_class != sample_class {
+                    self.observe_class(window, path_class.clone());
                 }
             }
-        }
+        });
     }
 
     fn observe_class(&mut self, sample: &[u8], class: DictionaryClass) {
@@ -301,34 +306,41 @@ pub fn normalized_extension(extension: &str) -> Option<String> {
     Some(extension.to_ascii_lowercase())
 }
 
+#[cfg(test)]
 pub(crate) fn dictionary_sample_offsets(sample_len: usize) -> Vec<usize> {
-    let window_size = DICTIONARY_SAMPLE_WINDOW_SIZE.min(sample_len);
-    if window_size == 0 {
-        return Vec::new();
-    }
-
-    let max_start = sample_len.saturating_sub(window_size);
-    let mut offsets = vec![0];
-    if max_start >= window_size.saturating_mul(2) {
-        offsets.push(max_start / 2);
-        offsets.push(max_start);
-        offsets.sort_unstable();
-        offsets.dedup();
-    }
-
+    let mut offsets = Vec::with_capacity(3);
+    for_each_dictionary_sample_offset(sample_len, |offset| offsets.push(offset));
     offsets
 }
 
-fn dictionary_sample_windows(sample: &[u8]) -> Vec<&[u8]> {
-    dictionary_sample_offsets(sample.len())
-        .into_iter()
-        .map(|offset| {
-            let end = offset
-                .saturating_add(DICTIONARY_SAMPLE_WINDOW_SIZE)
-                .min(sample.len());
-            &sample[offset..end]
-        })
-        .collect()
+#[inline]
+fn for_each_dictionary_sample_offset(sample_len: usize, mut visit: impl FnMut(usize)) {
+    let window_size = DICTIONARY_SAMPLE_WINDOW_SIZE.min(sample_len);
+    if window_size == 0 {
+        return;
+    }
+
+    let max_start = sample_len.saturating_sub(window_size);
+    visit(0);
+    if max_start >= window_size.saturating_mul(2) {
+        let middle = max_start / 2;
+        if middle != 0 {
+            visit(middle);
+        }
+        if max_start != 0 && max_start != middle {
+            visit(max_start);
+        }
+    }
+}
+
+#[inline]
+fn for_each_dictionary_sample_window(sample: &[u8], mut visit: impl FnMut(&[u8])) {
+    for_each_dictionary_sample_offset(sample.len(), |offset| {
+        let end = offset
+            .saturating_add(DICTIONARY_SAMPLE_WINDOW_SIZE)
+            .min(sample.len());
+        visit(&sample[offset..end]);
+    });
 }
 
 #[cfg(test)]
