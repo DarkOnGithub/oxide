@@ -240,6 +240,7 @@ fn build_archive_pipeline(
     performance.directory_mmap_threshold_bytes = settings.directory_mmap_threshold.max(1);
     performance.writer_result_queue_blocks = settings.writer_queue_blocks.max(1);
     performance.result_wait_timeout = Duration::from_millis(settings.result_wait_ms.max(1));
+    performance.block_dedup_window_blocks = settings.block_dedup_window_blocks;
 
     let mut config = ArchivePipelineConfig::new(
         settings.block_size.max(1),

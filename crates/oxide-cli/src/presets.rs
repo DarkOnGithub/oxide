@@ -3,7 +3,9 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use oxide_core::{ArchiveDictionaryMode, ChunkingPolicy, CompressionAlgo};
+use oxide_core::{
+    ArchiveDictionaryMode, ChunkingPolicy, CompressionAlgo, DEFAULT_DEDUP_WINDOW_BLOCKS,
+};
 use serde::Deserialize;
 
 use crate::AppResult;
@@ -35,6 +37,7 @@ pub struct ResolvedArchiveSettings {
     pub directory_mmap_threshold: usize,
     pub writer_queue_blocks: usize,
     pub result_wait_ms: u64,
+    pub block_dedup_window_blocks: usize,
 }
 
 #[derive(Debug, Default)]
@@ -131,6 +134,7 @@ struct ArchivePresetConfig {
     directory_mmap_threshold: Option<SizeValue>,
     writer_queue_blocks: Option<usize>,
     result_wait_ms: Option<u64>,
+    block_dedup_window_blocks: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -189,6 +193,10 @@ impl ArchivePresetConfig {
         );
         merge_option(&mut self.writer_queue_blocks, other.writer_queue_blocks);
         merge_option(&mut self.result_wait_ms, other.result_wait_ms);
+        merge_option(
+            &mut self.block_dedup_window_blocks,
+            other.block_dedup_window_blocks,
+        );
     }
 
     fn resolve(
@@ -286,6 +294,9 @@ impl ArchivePresetConfig {
                 self.result_wait_ms,
                 "result_wait_ms",
             )?,
+            block_dedup_window_blocks: self
+                .block_dedup_window_blocks
+                .unwrap_or(DEFAULT_DEDUP_WINDOW_BLOCKS),
         })
     }
 }

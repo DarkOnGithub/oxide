@@ -1,6 +1,6 @@
 use crate::dictionary::{ArchiveDictionaryBank, ArchiveDictionaryMode, DictionaryTrainer};
 use crate::format::{
-    should_force_raw_storage, ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter,
+    ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter, should_force_raw_storage,
 };
 use crate::io::InputScanner;
 use crate::pipeline::types::{ArchivePipelineConfig, ArchiveSourceKind};
@@ -66,13 +66,21 @@ impl<'a> Archiver<'a> {
                 blocks_total,
             },
         ));
+        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            |writer, manifest| ArchiveWriter::with_manifest(writer, Some(manifest)),
+            |writer, manifest| {
+                ArchiveWriter::with_limits_and_manifest(
+                    writer,
+                    crate::format::DEFAULT_REORDER_PENDING_LIMIT,
+                    dedupe_window_blocks,
+                    Some(manifest),
+                )
+            },
         )
     }
 
@@ -102,13 +110,21 @@ impl<'a> Archiver<'a> {
                 blocks_total,
             },
         ));
+        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            |writer, manifest| SeekableArchiveWriter::with_manifest(writer, Some(manifest)),
+            |writer, manifest| {
+                SeekableArchiveWriter::with_limits_and_manifest(
+                    writer,
+                    crate::format::DEFAULT_REORDER_PENDING_LIMIT,
+                    dedupe_window_blocks,
+                    Some(manifest),
+                )
+            },
         )
     }
 
@@ -120,16 +136,18 @@ impl<'a> Archiver<'a> {
         sink: &mut dyn TelemetrySink,
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
+        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
         archive_directory_streaming_with_writer(
             self.config,
             root,
             writer,
             options,
             sink,
-            |writer, manifest, reorder_limit| {
-                ArchiveWriter::with_reorder_limit_and_manifest(
+            move |writer, manifest, reorder_limit| {
+                ArchiveWriter::with_limits_and_manifest(
                     writer,
                     reorder_limit,
+                    dedupe_window_blocks,
                     Some(manifest),
                 )
             },
@@ -144,16 +162,18 @@ impl<'a> Archiver<'a> {
         sink: &mut dyn TelemetrySink,
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
+        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
         archive_directory_streaming_with_writer(
             self.config,
             root,
             writer,
             options,
             sink,
-            |writer, manifest, reorder_limit| {
-                SeekableArchiveWriter::with_reorder_limit_and_manifest(
+            move |writer, manifest, reorder_limit| {
+                SeekableArchiveWriter::with_limits_and_manifest(
                     writer,
                     reorder_limit,
+                    dedupe_window_blocks,
                     Some(manifest),
                 )
             },
@@ -169,13 +189,21 @@ impl<'a> Archiver<'a> {
         block_size: usize,
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
+        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            |writer, manifest| ArchiveWriter::with_manifest(writer, Some(manifest)),
+            |writer, manifest| {
+                ArchiveWriter::with_limits_and_manifest(
+                    writer,
+                    crate::format::DEFAULT_REORDER_PENDING_LIMIT,
+                    dedupe_window_blocks,
+                    Some(manifest),
+                )
+            },
         )
     }
 
@@ -188,13 +216,21 @@ impl<'a> Archiver<'a> {
         block_size: usize,
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
+        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            |writer, manifest| SeekableArchiveWriter::with_manifest(writer, Some(manifest)),
+            |writer, manifest| {
+                SeekableArchiveWriter::with_limits_and_manifest(
+                    writer,
+                    crate::format::DEFAULT_REORDER_PENDING_LIMIT,
+                    dedupe_window_blocks,
+                    Some(manifest),
+                )
+            },
         )
     }
 

@@ -264,6 +264,9 @@ pub struct PipelinePerformanceOptions {
     pub directory_mmap_threshold_bytes: usize,
     /// Capacity of the writer result queue (in blocks).
     pub writer_result_queue_blocks: usize,
+    /// Maximum number of recently written blocks tracked for block-level deduplication.
+    /// Set to 0 to disable writer-side deduplication.
+    pub block_dedup_window_blocks: usize,
 }
 
 impl Default for PipelinePerformanceOptions {
@@ -281,6 +284,7 @@ impl Default for PipelinePerformanceOptions {
             producer_threads: 1,
             directory_mmap_threshold_bytes: 8 * 1024 * 1024,
             writer_result_queue_blocks: 1024,
+            block_dedup_window_blocks: 131_072,
         }
     }
 }

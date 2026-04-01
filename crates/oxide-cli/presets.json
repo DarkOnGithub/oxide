@@ -17,6 +17,7 @@
       "directory_mmap_threshold": "8M",
       "writer_queue_blocks": 1024,
       "result_wait_ms": 1,
+      "block_dedup_window_blocks": 131072,
       "dictionary_mode": "auto",
       "chunking": {
         "mode": "fixed"
@@ -41,6 +42,7 @@
         "result_wait_ms": 1,
         "directory_mmap_threshold": "8M",
         "writer_queue_blocks": 768,
+        "block_dedup_window_blocks": 0,
         "dictionary_mode": "off"
       },
       "balanced": {
