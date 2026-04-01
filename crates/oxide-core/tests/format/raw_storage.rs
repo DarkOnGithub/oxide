@@ -13,6 +13,15 @@ fn raw_storage_extension_policy_matches_known_compressed_types() {
     assert!(should_force_raw_storage_by_extension(Path::new(
         "archive.tar.zst"
     )));
+    assert!(should_force_raw_storage_by_extension(Path::new(
+        "objects.pack"
+    )));
+    assert!(should_force_raw_storage_by_extension(Path::new(
+        "objects.idx"
+    )));
+    assert!(should_force_raw_storage_by_extension(Path::new(
+        "objects.rev"
+    )));
     assert!(!should_force_raw_storage_by_extension(Path::new(
         "notes.txt"
     )));
