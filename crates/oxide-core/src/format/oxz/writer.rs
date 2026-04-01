@@ -10,8 +10,8 @@ use crate::types::duration_to_us;
 use crate::{ArchiveSourceKind, CompressedBlock, OxideError, Result};
 
 use super::{
-    encode_chunk_table, ArchiveManifest, ChunkDescriptor, Footer, GlobalHeader, ReorderBuffer,
-    DEFAULT_REORDER_PENDING_LIMIT, GLOBAL_HEADER_SIZE,
+    ArchiveManifest, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT, Footer, GLOBAL_HEADER_SIZE,
+    GlobalHeader, ReorderBuffer, encode_chunk_table,
 };
 
 pub trait ArchiveBlockWriter {
@@ -28,7 +28,7 @@ pub trait ArchiveBlockWriter {
     fn write_footer(self) -> Result<Self::InnerWriter>;
 }
 
-const DEFAULT_DEDUP_WINDOW_BLOCKS: usize = 131_072;
+pub const DEFAULT_DEDUP_WINDOW_BLOCKS: usize = 131_072;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BlockDedupeKey {
@@ -139,12 +139,26 @@ impl<W: Write> ArchiveWriter<W> {
     }
 
     pub fn with_manifest(writer: W, manifest: Option<ArchiveManifest>) -> Self {
-        Self::with_reorder_limit_and_manifest(writer, DEFAULT_REORDER_PENDING_LIMIT, manifest)
+        Self::with_limits_and_manifest(
+            writer,
+            DEFAULT_REORDER_PENDING_LIMIT,
+            DEFAULT_DEDUP_WINDOW_BLOCKS,
+            manifest,
+        )
     }
 
     pub fn with_reorder_limit_and_manifest(
         writer: W,
         max_pending: usize,
+        manifest: Option<ArchiveManifest>,
+    ) -> Self {
+        Self::with_limits_and_manifest(writer, max_pending, DEFAULT_DEDUP_WINDOW_BLOCKS, manifest)
+    }
+
+    pub fn with_limits_and_manifest(
+        writer: W,
+        max_pending: usize,
+        dedupe_window_blocks: usize,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
         Self {
@@ -157,7 +171,7 @@ impl<W: Write> ArchiveWriter<W> {
             reorder: ReorderBuffer::with_limit(max_pending),
             next_payload_offset: GLOBAL_HEADER_SIZE as u64,
             pending_descriptors: Vec::new(),
-            block_deduper: BlockDeduper::default(),
+            block_deduper: BlockDeduper::new(dedupe_window_blocks),
         }
     }
 
@@ -344,12 +358,26 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
     }
 
     pub fn with_manifest(writer: W, manifest: Option<ArchiveManifest>) -> Self {
-        Self::with_reorder_limit_and_manifest(writer, DEFAULT_REORDER_PENDING_LIMIT, manifest)
+        Self::with_limits_and_manifest(
+            writer,
+            DEFAULT_REORDER_PENDING_LIMIT,
+            DEFAULT_DEDUP_WINDOW_BLOCKS,
+            manifest,
+        )
     }
 
     pub fn with_reorder_limit_and_manifest(
         writer: W,
         max_pending: usize,
+        manifest: Option<ArchiveManifest>,
+    ) -> Self {
+        Self::with_limits_and_manifest(writer, max_pending, DEFAULT_DEDUP_WINDOW_BLOCKS, manifest)
+    }
+
+    pub fn with_limits_and_manifest(
+        writer: W,
+        max_pending: usize,
+        dedupe_window_blocks: usize,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
         Self {
@@ -362,7 +390,7 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             reorder: ReorderBuffer::with_limit(max_pending),
             next_payload_offset: GLOBAL_HEADER_SIZE as u64,
             pending_descriptors: Vec::new(),
-            block_deduper: BlockDeduper::default(),
+            block_deduper: BlockDeduper::new(dedupe_window_blocks),
         }
     }
 

@@ -352,3 +352,46 @@ fn rejects_invalid_zstd_level() {
         "invalid compression.level '99' for zstd: expected an integer between 1 and 22"
     );
 }
+
+#[test]
+fn resolves_block_dedup_window_blocks_from_config() {
+    let file = parse_fixture(
+        r#"{
+          "archive": {
+            "default_preset": "fast",
+            "defaults": {
+              "compression": {
+                "compressor": "lz4"
+              },
+              "block_size": "2M",
+              "workers": 0,
+              "pool_capacity": "1M",
+              "pool_buffers": 512,
+              "stats_interval_ms": 250,
+              "inflight_bytes": "2G",
+              "inflight_blocks_per_worker": 256,
+              "stream_read_buffer": "64M",
+              "producer_threads": 1,
+              "directory_mmap_threshold": "8M",
+              "writer_queue_blocks": 1024,
+              "result_wait_ms": 1,
+              "block_dedup_window_blocks": 4096
+            },
+            "presets": {
+              "fast": {
+                "block_dedup_window_blocks": 0
+              }
+            }
+          }
+        }"#,
+    );
+
+    let preset = file.archive.presets.get("fast").unwrap();
+    let mut merged = file.archive.defaults.clone();
+    merged.merge_from(preset);
+    let resolved = merged
+        .resolve("fast", "fixture", ArchiveOverrides::default())
+        .expect("settings should resolve");
+
+    assert_eq!(resolved.block_dedup_window_blocks, 0);
+}

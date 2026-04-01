@@ -16,4 +16,5 @@ pub use headers::{
 pub use manifest::ArchiveManifest;
 pub use reader::{ArchiveReader, BlockIterator};
 pub use reorder::ReorderBuffer;
+pub use writer::DEFAULT_DEDUP_WINDOW_BLOCKS;
 pub use writer::{ArchiveBlockWriter, ArchiveWriter, SeekableArchiveWriter};
