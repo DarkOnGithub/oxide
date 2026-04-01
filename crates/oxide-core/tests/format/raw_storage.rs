@@ -13,17 +13,11 @@ fn raw_storage_extension_policy_matches_known_compressed_types() {
     assert!(should_force_raw_storage_by_extension(Path::new(
         "archive.tar.zst"
     )));
-    assert!(should_force_raw_storage_by_extension(Path::new(
-        "objects.pack"
-    )));
-    assert!(should_force_raw_storage_by_extension(Path::new(
-        "objects.idx"
-    )));
-    assert!(should_force_raw_storage_by_extension(Path::new(
-        "objects.rev"
-    )));
     assert!(!should_force_raw_storage_by_extension(Path::new(
         "notes.txt"
+    )));
+    assert!(!should_force_raw_storage_by_extension(Path::new(
+        "objects.pack"
     )));
     assert!(!should_force_raw_storage_by_extension(Path::new(
         "bitmap.bmp"
@@ -34,5 +28,14 @@ fn raw_storage_extension_policy_matches_known_compressed_types() {
 #[test]
 fn raw_storage_policy_uses_path_only() {
     assert!(should_force_raw_storage(Path::new("photo.jpg")));
+    assert!(should_force_raw_storage(Path::new(
+        ".git/objects/pack/pack-123.pack"
+    )));
+    assert!(should_force_raw_storage(Path::new(
+        ".git/objects/pack/pack-123.idx"
+    )));
+    assert!(!should_force_raw_storage(Path::new(
+        "fixtures/objects.pack"
+    )));
     assert!(!should_force_raw_storage(Path::new("payload.bin")));
 }
