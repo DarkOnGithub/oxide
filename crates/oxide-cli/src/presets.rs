@@ -12,6 +12,7 @@ use crate::AppResult;
 use crate::cli::{ChunkingArg, CompressionArg, parse_size};
 
 const DEFAULT_PRESETS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/presets.json");
+const MAX_BLOCK_DEDUP_WINDOW_BLOCKS: usize = 1 << 20;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedArchiveSettings {
@@ -217,6 +218,11 @@ impl ArchivePresetConfig {
             .map(parse_chunking_mode)
             .transpose()?;
 
+        let block_dedup_window_blocks = self
+            .block_dedup_window_blocks
+            .unwrap_or(DEFAULT_DEDUP_WINDOW_BLOCKS);
+        validate_block_dedup_window_blocks(block_dedup_window_blocks)?;
+
         Ok(ResolvedArchiveSettings {
             profile_name: preset_name.to_string(),
             profile_source: source_label.to_string(),
@@ -294,11 +300,19 @@ impl ArchivePresetConfig {
                 self.result_wait_ms,
                 "result_wait_ms",
             )?,
-            block_dedup_window_blocks: self
-                .block_dedup_window_blocks
-                .unwrap_or(DEFAULT_DEDUP_WINDOW_BLOCKS),
+            block_dedup_window_blocks,
         })
     }
+}
+
+fn validate_block_dedup_window_blocks(value: usize) -> Result<(), io::Error> {
+    if value > MAX_BLOCK_DEDUP_WINDOW_BLOCKS {
+        return Err(invalid_input(format!(
+            "invalid block_dedup_window_blocks '{value}': expected a value between 0 and {MAX_BLOCK_DEDUP_WINDOW_BLOCKS}"
+        )));
+    }
+
+    Ok(())
 }
 
 fn parse_dictionary_mode(value: &str) -> Result<ArchiveDictionaryMode, io::Error> {

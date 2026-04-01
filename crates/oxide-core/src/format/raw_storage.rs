@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Component, Path};
 
 #[inline]
 fn matches_force_raw_storage_label(label: &str) -> bool {
@@ -21,7 +22,6 @@ fn matches_force_raw_storage_label(label: &str) -> bool {
             | "gz"
             | "heic"
             | "heif"
-            | "idx"
             | "jar"
             | "jpeg"
             | "jpg"
@@ -37,11 +37,9 @@ fn matches_force_raw_storage_label(label: &str) -> bool {
             | "ogg"
             | "opus"
             | "oxz"
-            | "pack"
             | "png"
             | "pptx"
             | "rar"
-            | "rev"
             | "rpm"
             | "snap"
             | "sz"
@@ -68,8 +66,30 @@ pub fn should_force_raw_storage_by_extension(path: &Path) -> bool {
     matches_force_raw_storage_label(&ext.to_ascii_lowercase())
 }
 
+fn is_git_pack_artifact(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+
+    if !matches!(ext.to_ascii_lowercase().as_str(), "idx" | "pack" | "rev") {
+        return false;
+    }
+
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        if component != Component::Normal(OsStr::new(".git")) {
+            continue;
+        }
+
+        return matches!(components.next(), Some(Component::Normal(part)) if part == OsStr::new("objects"))
+            && matches!(components.next(), Some(Component::Normal(part)) if part == OsStr::new("pack"));
+    }
+
+    false
+}
+
 pub fn should_force_raw_storage(path: &Path) -> bool {
-    should_force_raw_storage_by_extension(path)
+    should_force_raw_storage_by_extension(path) || is_git_pack_artifact(path)
 }
 
 #[cfg(test)]
