@@ -327,11 +327,11 @@ impl WorkerPoolHandle {
     }
 
     /// Receives one worker result, waiting up to `timeout`.
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<Result<CompressedBlock>> {
-        match self.results_rx.recv_timeout(timeout) {
-            Ok(result) => Some(result),
-            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => None,
-        }
+    pub fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> std::result::Result<Result<CompressedBlock>, RecvTimeoutError> {
+        self.results_rx.recv_timeout(timeout)
     }
 
     pub(crate) fn results_receiver(&self) -> &Receiver<Result<CompressedBlock>> {
