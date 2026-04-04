@@ -25,7 +25,7 @@ fn run() -> AppResult {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Archive(args) => commands::archive(args)?,
+        Commands::Archive(args) => commands::archive(*args)?,
         Commands::Extract(args) => commands::extract(args)?,
         Commands::Tree(args) => commands::tree(args)?,
     }

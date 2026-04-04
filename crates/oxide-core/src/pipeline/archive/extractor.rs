@@ -363,9 +363,7 @@ impl Extractor {
         let (decoded, writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
-            started_at,
-            options,
-            sink,
+            ExtractContext { started_at, options, sink },
             None,
             writer,
         )?;
@@ -419,9 +417,7 @@ impl Extractor {
         let (mut decoded, mut writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
-            started_at,
-            options,
-            sink,
+            ExtractContext { started_at, options, sink },
             None,
             writer,
         )?;
@@ -471,9 +467,7 @@ impl Extractor {
         let (decoded, mut writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
-            started_at,
-            options,
-            sink,
+            ExtractContext { started_at, options, sink },
             None,
             writer,
         )?;
@@ -497,7 +491,26 @@ impl Extractor {
             entry_count: restore_stats.entry_count,
         })
     }
+}
 
+struct ExtractContext<'a> {
+    started_at: Instant,
+    options: &'a RunTelemetryOptions,
+    sink: &'a mut dyn TelemetrySink,
+}
+
+struct DecodeResultContext<'a> {
+    stage_timings: &'a mut ExtractStageTimings,
+    total_blocks: usize,
+    received_indices: &'a mut [bool],
+    runtime_state: &'a DecodeRuntimeState,
+    decoded_bytes_completed: &'a mut u64,
+    received: &'a mut usize,
+    first_error: &'a mut Option<crate::OxideError>,
+}
+
+impl Extractor {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn extract_directory_to_path_filtered_with_metrics<R, S, T>(
         &self,
         reader: R,
@@ -534,9 +547,7 @@ impl Extractor {
         let (decoded, mut writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
-            started_at,
-            options,
-            sink,
+            ExtractContext { started_at, options, sink },
             Some(&selected_ranges),
             writer,
         )?;
@@ -565,9 +576,7 @@ impl Extractor {
         &self,
         archive: ArchiveReader<R>,
         archive_read_elapsed: Duration,
-        started_at: Instant,
-        options: &RunTelemetryOptions,
-        sink: &mut dyn TelemetrySink,
+        ctx: ExtractContext<'_>,
         selected_ranges: Option<&[Range<u64>]>,
         writer: W,
     ) -> Result<(DecodeStreamOutcome, W)>
@@ -599,7 +608,7 @@ impl Extractor {
             bounded::<(usize, Duration, Result<DecodedBlock>)>(queue_capacity);
         let (ordered_write_tx, ordered_write_rx) =
             bounded::<OrderedWriteTask>(ordered_write_queue_capacity);
-        let runtime_state = Arc::new(DecodeRuntimeState::new(worker_count, started_at));
+        let runtime_state = Arc::new(DecodeRuntimeState::new(worker_count, ctx.started_at));
         let mut worker_handles = Vec::with_capacity(worker_count);
         let ordered_writer_handle = spawn_ordered_writer(
             writer,
@@ -678,7 +687,7 @@ impl Extractor {
         let mut decoded_bytes_completed = 0u64;
         let mut received_indices = vec![false; block_capacity];
         let mut last_emit_at = Instant::now();
-        let emit_every = options.progress_interval.max(Duration::from_millis(100));
+        let emit_every = ctx.options.progress_interval.max(Duration::from_millis(100));
         let mut decode_task_queue_peak = 0usize;
         let mut decode_result_queue_peak = 0usize;
         let mut ordered_write_queue_peak = 0usize;
@@ -693,34 +702,34 @@ impl Extractor {
                 if !decode_plan.includes(block_index) {
                     let force = false;
                     if progress_emit_due(&last_emit_at, emit_every, force) {
-                        emit_extract_progress_if_due(
+                        emit_extract_progress_if_due(ExtractProgressIfDueCtx {
                             source_kind,
-                            started_at,
+                            started_at: ctx.started_at,
                             archive_bytes_completed,
                             decoded_bytes_completed,
-                            block_capacity as u32,
-                            received as u32,
-                            runtime_state.snapshot(),
+                            blocks_total: block_capacity as u32,
+                            blocks_completed: received as u32,
+                            runtime: runtime_state.snapshot(),
                             emit_every,
-                            &mut last_emit_at,
+                            last_emit_at: &mut last_emit_at,
                             force,
-                            sink,
-                        );
+                            sink: ctx.sink,
+                        });
                     }
                     continue;
                 }
 
                 while submitted.saturating_sub(received) >= queue_capacity {
-                    receive_decode_result(
-                        &result_rx,
-                        &mut stage_timings,
-                        block_capacity,
-                        &mut received_indices,
-                        &runtime_state,
-                        &mut decoded_bytes_completed,
-                        &mut received,
-                        &mut first_error,
-                    )
+                    let mut decode_ctx = DecodeResultContext {
+                        stage_timings: &mut stage_timings,
+                        total_blocks: block_capacity,
+                        received_indices: &mut received_indices,
+                        runtime_state: &runtime_state,
+                        decoded_bytes_completed: &mut decoded_bytes_completed,
+                        received: &mut received,
+                        first_error: &mut first_error,
+                    };
+                    receive_decode_result(&result_rx, &mut decode_ctx)
                     .and_then(|outcome| {
                         forward_processed_decode_result(
                             outcome,
@@ -733,19 +742,19 @@ impl Extractor {
                     decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
                     let force = false;
                     if progress_emit_due(&last_emit_at, emit_every, force) {
-                        emit_extract_progress_if_due(
+                        emit_extract_progress_if_due(ExtractProgressIfDueCtx {
                             source_kind,
-                            started_at,
+                            started_at: ctx.started_at,
                             archive_bytes_completed,
                             decoded_bytes_completed,
-                            block_capacity as u32,
-                            received as u32,
-                            runtime_state.snapshot(),
+                            blocks_total: block_capacity as u32,
+                            blocks_completed: received as u32,
+                            runtime: runtime_state.snapshot(),
                             emit_every,
-                            &mut last_emit_at,
+                            last_emit_at: &mut last_emit_at,
                             force,
-                            sink,
-                        );
+                            sink: ctx.sink,
+                        });
                     }
                 }
 
@@ -795,19 +804,19 @@ impl Extractor {
                 decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
                 let force = false;
                 if progress_emit_due(&last_emit_at, emit_every, force) {
-                    emit_extract_progress_if_due(
+                    emit_extract_progress_if_due(ExtractProgressIfDueCtx {
                         source_kind,
-                        started_at,
+                        started_at: ctx.started_at,
                         archive_bytes_completed,
                         decoded_bytes_completed,
-                        block_capacity as u32,
-                        received as u32,
-                        runtime_state.snapshot(),
+                        blocks_total: block_capacity as u32,
+                        blocks_completed: received as u32,
+                        runtime: runtime_state.snapshot(),
                         emit_every,
-                        &mut last_emit_at,
+                        last_emit_at: &mut last_emit_at,
                         force,
-                        sink,
-                    );
+                        sink: ctx.sink,
+                    });
                 }
             }
 
@@ -818,16 +827,16 @@ impl Extractor {
             }
 
             while received < submitted {
-                receive_decode_result(
-                    &result_rx,
-                    &mut stage_timings,
-                    block_capacity,
-                    &mut received_indices,
-                    &runtime_state,
-                    &mut decoded_bytes_completed,
-                    &mut received,
-                    &mut first_error,
-                )
+                let mut decode_ctx = DecodeResultContext {
+                    stage_timings: &mut stage_timings,
+                    total_blocks: block_capacity,
+                    received_indices: &mut received_indices,
+                    runtime_state: &runtime_state,
+                    decoded_bytes_completed: &mut decoded_bytes_completed,
+                    received: &mut received,
+                    first_error: &mut first_error,
+                };
+                receive_decode_result(&result_rx, &mut decode_ctx)
                 .and_then(|outcome| {
                     forward_processed_decode_result(
                         outcome,
@@ -840,19 +849,19 @@ impl Extractor {
                 decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
                 let force = false;
                 if progress_emit_due(&last_emit_at, emit_every, force) {
-                    emit_extract_progress_if_due(
+                    emit_extract_progress_if_due(ExtractProgressIfDueCtx {
                         source_kind,
-                        started_at,
+                        started_at: ctx.started_at,
                         archive_bytes_completed,
                         decoded_bytes_completed,
-                        block_capacity as u32,
-                        received as u32,
-                        runtime_state.snapshot(),
+                        blocks_total: block_capacity as u32,
+                        blocks_completed: received as u32,
+                        runtime: runtime_state.snapshot(),
                         emit_every,
-                        &mut last_emit_at,
+                        last_emit_at: &mut last_emit_at,
                         force,
-                        sink,
-                    );
+                        sink: ctx.sink,
+                    });
                 }
             }
 
@@ -892,18 +901,18 @@ impl Extractor {
         stage_timings.merge += reorder_stats
             .push_elapsed
             .saturating_sub(reorder_stats.write_elapsed);
-        if options.emit_final_progress {
+        if ctx.options.emit_final_progress {
             let force = true;
             if progress_emit_due(&last_emit_at, emit_every, force) {
                 emit_extract_progress(
                     source_kind,
-                    started_at,
+                    ctx.started_at,
                     archive_bytes_completed,
                     decoded_bytes_completed,
                     block_capacity as u32,
                     received as u32,
                     runtime_state.snapshot(),
-                    sink,
+                    ctx.sink,
                 );
             }
         }
@@ -1081,13 +1090,7 @@ where
 
 fn receive_decode_result(
     result_rx: &Receiver<(usize, Duration, Result<DecodedBlock>)>,
-    stage_timings: &mut ExtractStageTimings,
-    total_blocks: usize,
-    received_indices: &mut [bool],
-    runtime_state: &DecodeRuntimeState,
-    decoded_bytes_completed: &mut u64,
-    received: &mut usize,
-    first_error: &mut Option<crate::OxideError>,
+    ctx: &mut DecodeResultContext<'_>,
 ) -> Result<ProcessedDecodeResult> {
     let wait_started = Instant::now();
     let result = result_rx.recv().map_err(|_| {
@@ -1095,16 +1098,16 @@ fn receive_decode_result(
             "decode result channel closed before completion".to_string(),
         )
     })?;
-    stage_timings.decode_wait += wait_started.elapsed();
-    stage_timings.archive_read += result.1;
+    ctx.stage_timings.decode_wait += wait_started.elapsed();
+    ctx.stage_timings.archive_read += result.1;
     process_decode_result(
         result,
-        total_blocks,
-        received_indices,
-        runtime_state,
-        decoded_bytes_completed,
-        received,
-        first_error,
+        ctx.total_blocks,
+        ctx.received_indices,
+        ctx.runtime_state,
+        ctx.decoded_bytes_completed,
+        ctx.received,
+        ctx.first_error,
     )
 }
 

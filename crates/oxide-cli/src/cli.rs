@@ -18,7 +18,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Archive a file or directory into an .oxz archive.
-    Archive(ArchiveArgs),
+    Archive(Box<ArchiveArgs>),
     /// Extract an .oxz archive to a file or directory.
     Extract(ExtractArgs),
     /// Print the contents of an .oxz archive as a tree with sizes.

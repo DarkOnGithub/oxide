@@ -22,7 +22,7 @@ use crate::types::{Batch, ChunkEncodingPlan, CompressedBlock, Result};
 use super::super::telemetry::*;
 use super::super::types::*;
 use super::super::types::{CompressionTuning, PipelineQueueStats};
-use super::processing::process_batch;
+use super::processing::{process_batch, ProcessBatchConfig};
 use super::utils::*;
 
 const AUTO_DICTIONARY_MIN_DIRECTORY_FILES: usize = 8;
@@ -92,16 +92,13 @@ where
     let worker_processing_totals = Arc::clone(&processing_totals);
     let worker_dictionary_bank = Arc::clone(&dictionary_bank);
     let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
-        process_batch(
-            batch,
-            pool,
-            compression,
+        let config = ProcessBatchConfig {
             skip_compression,
             raw_fallback_enabled,
-            worker_dictionary_bank.as_ref(),
-            worker_processing_totals.as_ref(),
-            scratch,
-        )
+            dictionary_bank: worker_dictionary_bank.as_ref(),
+            processing_totals: worker_processing_totals.as_ref(),
+        };
+        process_batch(batch, pool, compression, &config, scratch)
     });
 
     let writer_queue_capacity = config
@@ -429,20 +426,19 @@ where
             }
         }
 
-        let drained = drain_worker_results(
-            &results_rx,
-            result_drain_budget,
-            &writer_tx,
-            &writer_failure,
-            &mut pending_results,
-            &mut completed_bytes,
-            &mut first_error,
-            &mut raw_passthrough_blocks,
-            &mut writer_queue_peak,
-            &mut stage_timings.writer_enqueue_blocked,
-            &mut retired_count,
-            &mut received_count,
-        );
+        let mut writer_state = DirectoryWriterState {
+            writer_tx: &writer_tx,
+            writer_failure: &writer_failure,
+            pending_results: &mut pending_results,
+            completed_bytes: &mut completed_bytes,
+            first_error: &mut first_error,
+            raw_passthrough_blocks: &mut raw_passthrough_blocks,
+            writer_queue_peak: &mut writer_queue_peak,
+            writer_enqueue_blocked: &mut stage_timings.writer_enqueue_blocked,
+            retired_count: &mut retired_count,
+            received_count: &mut received_count,
+        };
+        let drained = drain_worker_results(&results_rx, result_drain_budget, &mut writer_state);
         progressed |= drained > 0;
 
         if !shutdown_called && producer_done {
@@ -454,20 +450,20 @@ where
             if options.emit_final_progress {
                 let force = true;
                 if progress_emit_due(&last_emit_at, emit_every, force) {
-                    emit_archive_progress_if_due(
-                        handle.runtime_snapshot(),
-                        processing_totals.snapshot(),
-                        ArchiveSourceKind::Directory,
+                    emit_archive_progress_if_due(ArchiveProgressCtx {
+                        runtime: handle.runtime_snapshot(),
+                        processing: processing_totals.snapshot(),
+                        source_kind: ArchiveSourceKind::Directory,
                         started_at,
                         input_bytes_total,
-                        completed_bytes,
-                        output_bytes_written,
-                        block_count,
+                        input_bytes_completed: completed_bytes,
+                        output_bytes_completed: output_bytes_written,
+                        blocks_total: block_count,
                         emit_every,
-                        &mut last_emit_at,
+                        last_emit_at: &mut last_emit_at,
                         force,
                         sink,
-                    );
+                    });
                 }
             }
             break;
@@ -477,20 +473,20 @@ where
             output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
             let force = false;
             if progress_emit_due(&last_emit_at, emit_every, force) {
-                emit_archive_progress_if_due(
-                    handle.runtime_snapshot(),
-                    processing_totals.snapshot(),
-                    ArchiveSourceKind::Directory,
+                emit_archive_progress_if_due(ArchiveProgressCtx {
+                    runtime: handle.runtime_snapshot(),
+                    processing: processing_totals.snapshot(),
+                    source_kind: ArchiveSourceKind::Directory,
                     started_at,
                     input_bytes_total,
-                    completed_bytes,
-                    output_bytes_written,
-                    block_count,
+                    input_bytes_completed: completed_bytes,
+                    output_bytes_completed: output_bytes_written,
+                    blocks_total: block_count,
                     emit_every,
-                    &mut last_emit_at,
+                    last_emit_at: &mut last_emit_at,
                     force,
                     sink,
-                );
+                });
             }
 
             let worker_inflight = submitted_count.saturating_sub(received_count);
@@ -518,19 +514,19 @@ where
                     }
                     recv(results_rx) -> result => {
                         stage_timings.result_wait += wait_started.elapsed();
-                        recv_worker_result(
-                            result,
-                            &writer_tx,
-                            &writer_failure,
-                            &mut pending_results,
-                            &mut completed_bytes,
-                            &mut first_error,
-                            &mut raw_passthrough_blocks,
-                            &mut writer_queue_peak,
-                            &mut stage_timings.writer_enqueue_blocked,
-                            &mut retired_count,
-                            &mut received_count,
-                        )?;
+                        let mut writer_state = DirectoryWriterState {
+                            writer_tx: &writer_tx,
+                            writer_failure: &writer_failure,
+                            pending_results: &mut pending_results,
+                            completed_bytes: &mut completed_bytes,
+                            first_error: &mut first_error,
+                            raw_passthrough_blocks: &mut raw_passthrough_blocks,
+                            writer_queue_peak: &mut writer_queue_peak,
+                            writer_enqueue_blocked: &mut stage_timings.writer_enqueue_blocked,
+                            retired_count: &mut retired_count,
+                            received_count: &mut received_count,
+                        };
+                        recv_worker_result(result, &mut writer_state)?;
                     }
                     default(wait_timeout) => {}
                 }
@@ -544,19 +540,19 @@ where
                         if worker_inflight >= max_inflight_blocks {
                             stage_timings.submit_wait += waited;
                         }
-                        recv_worker_result(
-                            Ok(result),
-                            &writer_tx,
-                            &writer_failure,
-                            &mut pending_results,
-                            &mut completed_bytes,
-                            &mut first_error,
-                            &mut raw_passthrough_blocks,
-                            &mut writer_queue_peak,
-                            &mut stage_timings.writer_enqueue_blocked,
-                            &mut retired_count,
-                            &mut received_count,
-                        )?;
+                        let mut writer_state = DirectoryWriterState {
+                            writer_tx: &writer_tx,
+                            writer_failure: &writer_failure,
+                            pending_results: &mut pending_results,
+                            completed_bytes: &mut completed_bytes,
+                            first_error: &mut first_error,
+                            raw_passthrough_blocks: &mut raw_passthrough_blocks,
+                            writer_queue_peak: &mut writer_queue_peak,
+                            writer_enqueue_blocked: &mut stage_timings.writer_enqueue_blocked,
+                            retired_count: &mut retired_count,
+                            received_count: &mut received_count,
+                        };
+                        recv_worker_result(Ok(result), &mut writer_state)?;
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => {
@@ -587,20 +583,20 @@ where
         output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
         let force = false;
         if progress_emit_due(&last_emit_at, emit_every, force) {
-            emit_archive_progress_if_due(
-                handle.runtime_snapshot(),
-                processing_totals.snapshot(),
-                ArchiveSourceKind::Directory,
+            emit_archive_progress_if_due(ArchiveProgressCtx {
+                runtime: handle.runtime_snapshot(),
+                processing: processing_totals.snapshot(),
+                source_kind: ArchiveSourceKind::Directory,
                 started_at,
                 input_bytes_total,
-                completed_bytes,
-                output_bytes_written,
-                block_count,
+                input_bytes_completed: completed_bytes,
+                output_bytes_completed: output_bytes_written,
+                blocks_total: block_count,
                 emit_every,
-                &mut last_emit_at,
+                last_emit_at: &mut last_emit_at,
                 force,
                 sink,
-            );
+            });
         }
     }
 
@@ -642,36 +638,36 @@ where
         let wait_started = Instant::now();
         let result = results_rx.recv();
         stage_timings.result_wait += wait_started.elapsed();
-        recv_worker_result(
-            result,
-            &writer_tx,
-            &writer_failure,
-            &mut pending_results,
-            &mut completed_bytes,
-            &mut first_error,
-            &mut raw_passthrough_blocks,
-            &mut writer_queue_peak,
-            &mut stage_timings.writer_enqueue_blocked,
-            &mut retired_count,
-            &mut received_count,
-        )?;
+        let mut writer_state = DirectoryWriterState {
+            writer_tx: &writer_tx,
+            writer_failure: &writer_failure,
+            pending_results: &mut pending_results,
+            completed_bytes: &mut completed_bytes,
+            first_error: &mut first_error,
+            raw_passthrough_blocks: &mut raw_passthrough_blocks,
+            writer_queue_peak: &mut writer_queue_peak,
+            writer_enqueue_blocked: &mut stage_timings.writer_enqueue_blocked,
+            retired_count: &mut retired_count,
+            received_count: &mut received_count,
+        };
+        recv_worker_result(result, &mut writer_state)?;
         output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
         let force = options.emit_final_progress && received_count == submitted_count;
         if progress_emit_due(&last_emit_at, emit_every, force) {
-            emit_archive_progress_if_due(
-                handle.runtime_snapshot(),
-                processing_totals.snapshot(),
-                ArchiveSourceKind::Directory,
+            emit_archive_progress_if_due(ArchiveProgressCtx {
+                runtime: handle.runtime_snapshot(),
+                processing: processing_totals.snapshot(),
+                source_kind: ArchiveSourceKind::Directory,
                 started_at,
                 input_bytes_total,
-                completed_bytes,
-                output_bytes_written,
-                block_count,
+                input_bytes_completed: completed_bytes,
+                output_bytes_completed: output_bytes_written,
+                blocks_total: block_count,
                 emit_every,
-                &mut last_emit_at,
+                last_emit_at: &mut last_emit_at,
                 force,
                 sink,
-            );
+            });
         }
     }
 
@@ -777,41 +773,33 @@ fn submission_drain_budget(max_inflight_blocks: usize, writer_queue_capacity: us
     writer_queue_capacity
         .max(SUBMISSION_DRAIN_BUDGET)
         .min(max_inflight_blocks.max(1))
-        .min(256)
-        .max(1)
+        .clamp(1, 256)
+}
+
+pub struct DirectoryWriterState<'a> {
+    writer_tx: &'a crossbeam_channel::Sender<CompressedBlock>,
+    writer_failure: &'a Arc<Mutex<Option<String>>>,
+    pending_results: &'a mut ReorderBuffer<CompressedBlock>,
+    completed_bytes: &'a mut u64,
+    first_error: &'a mut Option<crate::OxideError>,
+    raw_passthrough_blocks: &'a mut u64,
+    writer_queue_peak: &'a mut usize,
+    writer_enqueue_blocked: &'a mut Duration,
+    retired_count: &'a mut usize,
+    received_count: &'a mut usize,
 }
 
 fn drain_worker_results(
     results_rx: &Receiver<Result<CompressedBlock>>,
     max_results: usize,
-    writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
-    writer_failure: &Arc<Mutex<Option<String>>>,
-    pending_results: &mut ReorderBuffer<CompressedBlock>,
-    completed_bytes: &mut u64,
-    first_error: &mut Option<crate::OxideError>,
-    raw_passthrough_blocks: &mut u64,
-    writer_queue_peak: &mut usize,
-    writer_enqueue_blocked: &mut Duration,
-    retired_count: &mut usize,
-    received_count: &mut usize,
+    state: &mut DirectoryWriterState<'_>,
 ) -> usize {
     let mut drained = 0usize;
     while drained < max_results {
         match results_rx.try_recv() {
             Ok(result) => {
-                record_result_to_writer_queue(
-                    result,
-                    writer_tx,
-                    writer_failure,
-                    pending_results,
-                    completed_bytes,
-                    first_error,
-                    raw_passthrough_blocks,
-                    writer_queue_peak,
-                    writer_enqueue_blocked,
-                    retired_count,
-                );
-                *received_count += 1;
+                record_result_to_writer_queue(result, state);
+                *state.received_count += 1;
                 drained += 1;
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
@@ -822,32 +810,12 @@ fn drain_worker_results(
 
 fn recv_worker_result(
     result: std::result::Result<Result<CompressedBlock>, crossbeam_channel::RecvError>,
-    writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
-    writer_failure: &Arc<Mutex<Option<String>>>,
-    pending_results: &mut ReorderBuffer<CompressedBlock>,
-    completed_bytes: &mut u64,
-    first_error: &mut Option<crate::OxideError>,
-    raw_passthrough_blocks: &mut u64,
-    writer_queue_peak: &mut usize,
-    writer_enqueue_blocked: &mut Duration,
-    retired_count: &mut usize,
-    received_count: &mut usize,
+    state: &mut DirectoryWriterState<'_>,
 ) -> Result<()> {
     match result {
         Ok(result) => {
-            record_result_to_writer_queue(
-                result,
-                writer_tx,
-                writer_failure,
-                pending_results,
-                completed_bytes,
-                first_error,
-                raw_passthrough_blocks,
-                writer_queue_peak,
-                writer_enqueue_blocked,
-                retired_count,
-            );
-            *received_count += 1;
+            record_result_to_writer_queue(result, state);
+            *state.received_count += 1;
             Ok(())
         }
         Err(_) => Err(crate::OxideError::CompressionError(
@@ -858,43 +826,41 @@ fn recv_worker_result(
 
 pub fn record_result_to_writer_queue(
     result: Result<CompressedBlock>,
-    writer_tx: &crossbeam_channel::Sender<CompressedBlock>,
-    writer_failure: &Arc<Mutex<Option<String>>>,
-    pending_results: &mut ReorderBuffer<CompressedBlock>,
-    completed_bytes: &mut u64,
-    first_error: &mut Option<crate::OxideError>,
-    raw_passthrough_blocks: &mut u64,
-    writer_queue_peak: &mut usize,
-    writer_enqueue_blocked: &mut Duration,
-    retired_count: &mut usize,
+    state: &mut DirectoryWriterState<'_>,
 ) {
     match result {
         Ok(block) => {
-            *completed_bytes = (*completed_bytes).saturating_add(block.original_len);
+            *state.completed_bytes = (*state.completed_bytes).saturating_add(block.original_len);
             if block.raw_passthrough {
-                *raw_passthrough_blocks = raw_passthrough_blocks.saturating_add(1);
+                *state.raw_passthrough_blocks = state.raw_passthrough_blocks.saturating_add(1);
             }
-            if first_error.is_some() {
-                *retired_count += 1;
+            if state.first_error.is_some() {
+                *state.retired_count += 1;
                 return;
             }
 
-            let ready = match pending_results.push(block.id, block) {
+            let ready = match state.pending_results.push(block.id, block) {
                 Ok(ready) => ready,
                 Err(error) => {
-                    fail_directory_queueing(first_error, pending_results, retired_count, error);
-                    *retired_count += 1;
+                    fail_directory_queueing(
+                        state.first_error,
+                        state.pending_results,
+                        state.retired_count,
+                        error,
+                    );
+                    *state.retired_count += 1;
                     return;
                 }
             };
 
             for block in ready {
-                match writer_tx.try_send(block) {
+                match state.writer_tx.try_send(block) {
                     Ok(()) => {}
                     Err(TrySendError::Full(block)) => {
                         let send_started = Instant::now();
-                        if writer_tx.send(block).is_err() {
-                            let writer_error = writer_failure
+                        if state.writer_tx.send(block).is_err() {
+                            let writer_error = state
+                                .writer_failure
                                 .lock()
                                 .ok()
                                 .and_then(|mut failure| failure.take());
@@ -905,18 +871,19 @@ pub fn record_result_to_writer_queue(
                                 ),
                             };
                             fail_directory_queueing(
-                                first_error,
-                                pending_results,
-                                retired_count,
+                                state.first_error,
+                                state.pending_results,
+                                state.retired_count,
                                 error,
                             );
-                            *retired_count += 1;
+                            *state.retired_count += 1;
                             return;
                         }
-                        *writer_enqueue_blocked += send_started.elapsed();
+                        *state.writer_enqueue_blocked += send_started.elapsed();
                     }
                     Err(TrySendError::Disconnected(_)) => {
-                        let writer_error = writer_failure
+                        let writer_error = state
+                            .writer_failure
                             .lock()
                             .ok()
                             .and_then(|mut failure| failure.take());
@@ -926,18 +893,28 @@ pub fn record_result_to_writer_queue(
                                 "directory writer queue closed before completion".to_string(),
                             ),
                         };
-                        fail_directory_queueing(first_error, pending_results, retired_count, error);
-                        *retired_count += 1;
+                        fail_directory_queueing(
+                            state.first_error,
+                            state.pending_results,
+                            state.retired_count,
+                            error,
+                        );
+                        *state.retired_count += 1;
                         return;
                     }
                 }
-                *writer_queue_peak = (*writer_queue_peak).max(writer_tx.len());
-                *retired_count += 1;
+                *state.writer_queue_peak = (*state.writer_queue_peak).max(state.writer_tx.len());
+                *state.retired_count += 1;
             }
         }
         Err(error) => {
-            fail_directory_queueing(first_error, pending_results, retired_count, error);
-            *retired_count += 1;
+            fail_directory_queueing(
+                state.first_error,
+                state.pending_results,
+                state.retired_count,
+                error,
+            );
+            *state.retired_count += 1;
         }
     }
 }

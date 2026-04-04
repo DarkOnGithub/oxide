@@ -53,85 +53,103 @@ pub fn progress_emit_due(last_emit_at: &Instant, emit_every: Duration, force: bo
     force || last_emit_at.elapsed() >= emit_every
 }
 
-pub fn emit_archive_progress_if_due(
-    runtime: PoolRuntimeSnapshot,
-    processing: ProcessingThroughputSnapshot,
-    source_kind: ArchiveSourceKind,
-    started_at: Instant,
-    input_bytes_total: u64,
-    input_bytes_completed: u64,
-    output_bytes_completed: u64,
-    blocks_total: u32,
-    emit_every: Duration,
-    last_emit_at: &mut Instant,
-    force: bool,
-    sink: &mut dyn TelemetrySink,
-) {
-    if progress_emit_due(last_emit_at, emit_every, force) {
-        let elapsed = started_at.elapsed();
+pub struct ArchiveProgressCtx<'a> {
+    pub runtime: PoolRuntimeSnapshot,
+    pub processing: ProcessingThroughputSnapshot,
+    pub source_kind: ArchiveSourceKind,
+    pub started_at: Instant,
+    pub input_bytes_total: u64,
+    pub input_bytes_completed: u64,
+    pub output_bytes_completed: u64,
+    pub blocks_total: u32,
+    pub emit_every: Duration,
+    pub last_emit_at: &'a mut Instant,
+    pub force: bool,
+    pub sink: &'a mut dyn TelemetrySink,
+}
+
+pub fn emit_archive_progress_if_due(ctx: ArchiveProgressCtx<'_>) {
+    if progress_emit_due(ctx.last_emit_at, ctx.emit_every, ctx.force) {
+        let elapsed = ctx.started_at.elapsed();
         let elapsed_secs = elapsed.as_secs_f64().max(1e-6);
-        let input_done = input_bytes_completed.min(input_bytes_total);
+        let input_done = ctx.input_bytes_completed.min(ctx.input_bytes_total);
         let read_avg_bps = input_done as f64 / elapsed_secs;
-        let write_avg_bps = output_bytes_completed as f64 / elapsed_secs;
+        let write_avg_bps = ctx.output_bytes_completed as f64 / elapsed_secs;
         let output_input_ratio = if input_done == 0 {
             0.0
         } else {
-            output_bytes_completed as f64 / input_done as f64
+            ctx.output_bytes_completed as f64 / input_done as f64
         };
-        let compression_ratio = if output_bytes_completed == 0 {
+        let compression_ratio = if ctx.output_bytes_completed == 0 {
             0.0
         } else {
-            input_done as f64 / output_bytes_completed as f64
+            input_done as f64 / ctx.output_bytes_completed as f64
         };
-        sink.on_event(TelemetryEvent::ArchiveProgress(ArchiveProgressEvent {
-            source_kind,
+        ctx.sink.on_event(TelemetryEvent::ArchiveProgress(ArchiveProgressEvent {
+            source_kind: ctx.source_kind,
             elapsed,
-            input_bytes_total,
+            input_bytes_total: ctx.input_bytes_total,
             input_bytes_completed: input_done,
-            output_bytes_completed,
+            output_bytes_completed: ctx.output_bytes_completed,
             read_avg_bps,
             write_avg_bps,
-            compression_avg_bps: processing.compression_avg_bps(),
-            compression_wall_avg_bps: processing.compression_wall_avg_bps(elapsed),
+            compression_avg_bps: ctx.processing.compression_avg_bps(),
+            compression_wall_avg_bps: ctx.processing.compression_wall_avg_bps(elapsed),
             output_input_ratio,
             compression_ratio,
-            blocks_total,
-            blocks_completed: runtime.completed as u32,
-            blocks_pending: runtime.pending as u32,
-            runtime,
+            blocks_total: ctx.blocks_total,
+            blocks_completed: ctx.runtime.completed as u32,
+            blocks_pending: ctx.runtime.pending as u32,
+            runtime: ctx.runtime,
         }));
-        *last_emit_at = Instant::now();
+        *ctx.last_emit_at = Instant::now();
     }
 }
 
-pub fn emit_extract_progress_if_due(
-    source_kind: ArchiveSourceKind,
-    started_at: Instant,
-    archive_bytes_completed: u64,
-    decoded_bytes_completed: u64,
-    blocks_total: u32,
-    blocks_completed: u32,
-    runtime: PoolRuntimeSnapshot,
-    emit_every: Duration,
-    last_emit_at: &mut Instant,
-    force: bool,
-    sink: &mut dyn TelemetrySink,
-) {
-    if progress_emit_due(last_emit_at, emit_every, force) {
+pub struct ExtractProgressIfDueCtx<'a> {
+    pub source_kind: ArchiveSourceKind,
+    pub started_at: Instant,
+    pub archive_bytes_completed: u64,
+    pub decoded_bytes_completed: u64,
+    pub blocks_total: u32,
+    pub blocks_completed: u32,
+    pub runtime: PoolRuntimeSnapshot,
+    pub emit_every: Duration,
+    pub last_emit_at: &'a mut Instant,
+    pub force: bool,
+    pub sink: &'a mut dyn TelemetrySink,
+}
+
+pub fn emit_extract_progress_if_due(ctx: ExtractProgressIfDueCtx<'_>) {
+    if progress_emit_due(ctx.last_emit_at, ctx.emit_every, ctx.force) {
         emit_extract_progress(
-            source_kind,
-            started_at,
-            archive_bytes_completed,
-            decoded_bytes_completed,
-            blocks_total,
-            blocks_completed,
-            runtime,
-            sink,
+            ctx.source_kind,
+            ctx.started_at,
+            ctx.archive_bytes_completed,
+            ctx.decoded_bytes_completed,
+            ctx.blocks_total,
+            ctx.blocks_completed,
+            ctx.runtime,
+            ctx.sink,
         );
-        *last_emit_at = Instant::now();
+        *ctx.last_emit_at = Instant::now();
     }
 }
 
+type TelemetrySinkFn = Box<dyn FnOnce(&mut dyn TelemetrySink)>;
+
+pub struct ExtractProgressCtx {
+    pub source_kind: ArchiveSourceKind,
+    pub started_at: Instant,
+    pub archive_bytes_completed: u64,
+    pub decoded_bytes_completed: u64,
+    pub blocks_total: u32,
+    pub blocks_completed: u32,
+    pub runtime: PoolRuntimeSnapshot,
+    pub sink: TelemetrySinkFn,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn emit_extract_progress(
     source_kind: ArchiveSourceKind,
     started_at: Instant,
@@ -335,6 +353,7 @@ pub fn build_stats_extensions(
     extensions
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_archive_report(
     source_kind: ArchiveSourceKind,
     elapsed: Duration,
@@ -396,6 +415,7 @@ pub fn build_archive_report(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_extract_report(
     source_kind: ArchiveSourceKind,
     elapsed: Duration,
