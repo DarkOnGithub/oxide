@@ -87,7 +87,7 @@ impl TelemetrySink for ArchiveCliSink<'_> {
             .filter(|worker| worker.tasks_completed > 0 || worker.busy > Duration::ZERO)
             .count();
         let panel_width = compact_panel_width();
-        let title = format!("{} {}", "[archive]", format!("{percent:5.1}%"));
+        let title = format!("[archive] {percent:5.1}%");
         let bar = plain_progress_bar(percent, panel_width.saturating_sub(4));
         let lines = progress_panel_lines(
             Tone::Success,
@@ -186,7 +186,7 @@ impl TelemetrySink for ExtractCliSink {
             .filter(|worker| worker.tasks_completed > 0 || worker.busy > Duration::ZERO)
             .count();
         let panel_width = compact_panel_width();
-        let title = format!("{} {}", "[extract]", format!("{percent:5.1}%"));
+        let title = format!("[extract] {percent:5.1}%");
         let bar = plain_progress_bar(percent, panel_width.saturating_sub(4));
         let lines = progress_panel_lines(
             Tone::Info,

@@ -178,14 +178,18 @@ fn is_likely_incompressible_sample(
     Ok(true)
 }
 
+pub struct ProcessBatchConfig<'a> {
+    pub skip_compression: bool,
+    pub raw_fallback_enabled: bool,
+    pub dictionary_bank: &'a ArchiveDictionaryBank,
+    pub processing_totals: &'a ProcessingThroughputTotals,
+}
+
 pub fn process_batch(
     batch: Batch,
     pool: &BufferPool,
     _compression: CompressionAlgo,
-    skip_compression: bool,
-    raw_fallback_enabled: bool,
-    dictionary_bank: &ArchiveDictionaryBank,
-    processing_totals: &ProcessingThroughputTotals,
+    config: &ProcessBatchConfig<'_>,
     scratch: &mut WorkerScratchArena,
 ) -> Result<CompressedBlock> {
     let Batch {
@@ -201,7 +205,7 @@ pub fn process_batch(
     let source = data.as_slice();
 
     if force_raw_storage {
-        processing_totals.record(source_len as u64, std::time::Duration::ZERO);
+        config.processing_totals.record(source_len as u64, std::time::Duration::ZERO);
         return Ok(CompressedBlock::with_chunk_encoding(
             id,
             stream_id,
@@ -212,8 +216,8 @@ pub fn process_batch(
         ));
     }
 
-    if skip_compression {
-        processing_totals.record(source_len as u64, std::time::Duration::ZERO);
+    if config.skip_compression {
+        config.processing_totals.record(source_len as u64, std::time::Duration::ZERO);
         return Ok(CompressedBlock::with_chunk_encoding(
             id,
             stream_id,
@@ -224,11 +228,11 @@ pub fn process_batch(
         ));
     }
 
-    if raw_fallback_enabled
+    if config.raw_fallback_enabled
         && should_skip_full_compression_probe(source_len, plan)
-        && is_likely_incompressible_sample(source, &source_path, plan, dictionary_bank, scratch)?
+        && is_likely_incompressible_sample(source, &source_path, plan, config.dictionary_bank, scratch)?
     {
-        processing_totals.record(source_len as u64, std::time::Duration::ZERO);
+        config.processing_totals.record(source_len as u64, std::time::Duration::ZERO);
         return Ok(CompressedBlock::with_chunk_encoding(
             id,
             stream_id,
@@ -240,7 +244,7 @@ pub fn process_batch(
     }
 
     let selected_dictionary =
-        dictionary_bank.select_for_chunk(plan.algo, source, Some(&source_path));
+        config.dictionary_bank.select_for_chunk(plan.algo, source, Some(&source_path));
     let dictionary_id = selected_dictionary
         .map(|dictionary| dictionary.id)
         .unwrap_or(0);
@@ -263,9 +267,9 @@ pub fn process_batch(
             compressed.as_mut_vec(),
         )?;
         let compression_elapsed = compression_started.elapsed();
-        processing_totals.record(source_len as u64, compression_elapsed);
+        config.processing_totals.record(source_len as u64, compression_elapsed);
 
-        let raw_passthrough = raw_fallback_enabled && compressed.len() >= source_len;
+        let raw_passthrough = config.raw_fallback_enabled && compressed.len() >= source_len;
         let data = if raw_passthrough {
             CompressedPayload::from_batch_data(data)
         } else {
@@ -286,9 +290,9 @@ pub fn process_batch(
     let compression_started = Instant::now();
     let compressed = apply_compression_request_with_scratch(request, scratch.compression())?;
     let compression_elapsed = compression_started.elapsed();
-    processing_totals.record(source_len as u64, compression_elapsed);
+    config.processing_totals.record(source_len as u64, compression_elapsed);
 
-    let raw_passthrough = raw_fallback_enabled && compressed.len() >= source_len;
+    let raw_passthrough = config.raw_fallback_enabled && compressed.len() >= source_len;
     let data = if raw_passthrough {
         CompressedPayload::from_batch_data(data)
     } else {

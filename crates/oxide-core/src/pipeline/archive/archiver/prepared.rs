@@ -12,7 +12,7 @@ use crate::types::{CompressedBlock, Result};
 use super::super::telemetry::*;
 use super::super::types::*;
 use super::super::types::{CompressionTuning, PipelineQueueStats};
-use super::processing::process_batch;
+use super::processing::{process_batch, ProcessBatchConfig};
 use super::utils::*;
 
 pub fn archive_prepared_with_writer<W, AW, F>(
@@ -59,16 +59,13 @@ where
     let worker_processing_totals = Arc::clone(&processing_totals);
     let worker_dictionary_bank = Arc::clone(&dictionary_bank);
     let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
-        process_batch(
-            batch,
-            pool,
-            compression,
+        let config = ProcessBatchConfig {
             skip_compression,
             raw_fallback_enabled,
-            worker_dictionary_bank.as_ref(),
-            worker_processing_totals.as_ref(),
-            scratch,
-        )
+            dictionary_bank: worker_dictionary_bank.as_ref(),
+            processing_totals: worker_processing_totals.as_ref(),
+        };
+        process_batch(batch, pool, compression, &config, scratch)
     });
 
     let mut archive_writer = writer_factory(writer, manifest);
@@ -104,18 +101,21 @@ where
             submitted_count += 1;
         }
 
+        let mut writer_state = PreparedWriterState {
+            archive_writer: &mut archive_writer,
+            pending_write: &mut pending_write,
+            written_count: &mut written_count,
+            output_bytes_written: &mut output_bytes_written,
+            completed_bytes: &mut completed_bytes,
+            first_error: &mut first_error,
+            raw_passthrough_blocks: &mut raw_passthrough_blocks,
+            pending_write_peak: &mut pending_write_peak,
+            writer_time: &mut stage_timings.writer,
+        };
         let drained = drain_results_to_writer(
             &handle,
-            &mut archive_writer,
-            &mut pending_write,
-            &mut written_count,
-            &mut output_bytes_written,
-            &mut completed_bytes,
-            &mut first_error,
-            &mut raw_passthrough_blocks,
+            &mut writer_state,
             &mut received_count,
-            &mut pending_write_peak,
-            &mut stage_timings.writer,
             SUBMISSION_DRAIN_BUDGET,
         );
 
@@ -128,20 +128,20 @@ where
             if options.emit_final_progress {
                 let force = true;
                 if progress_emit_due(&last_emit_at, emit_every, force) {
-                    emit_archive_progress_if_due(
-                        handle.runtime_snapshot(),
-                        processing_totals.snapshot(),
+                    emit_archive_progress_if_due(ArchiveProgressCtx {
+                        runtime: handle.runtime_snapshot(),
+                        processing: processing_totals.snapshot(),
                         source_kind,
                         started_at,
                         input_bytes_total,
-                        completed_bytes,
-                        output_bytes_written,
-                        block_count,
+                        input_bytes_completed: completed_bytes,
+                        output_bytes_completed: output_bytes_written,
+                        blocks_total: block_count,
                         emit_every,
-                        &mut last_emit_at,
+                        last_emit_at: &mut last_emit_at,
                         force,
                         sink,
-                    );
+                    });
                 }
             }
             break;
@@ -150,54 +150,52 @@ where
         if drained == 0 {
             let force = false;
             if progress_emit_due(&last_emit_at, emit_every, force) {
-                emit_archive_progress_if_due(
-                    handle.runtime_snapshot(),
-                    processing_totals.snapshot(),
+                emit_archive_progress_if_due(ArchiveProgressCtx {
+                    runtime: handle.runtime_snapshot(),
+                    processing: processing_totals.snapshot(),
                     source_kind,
                     started_at,
                     input_bytes_total,
-                    completed_bytes,
-                    output_bytes_written,
-                    block_count,
+                    input_bytes_completed: completed_bytes,
+                    output_bytes_completed: output_bytes_written,
+                    blocks_total: block_count,
                     emit_every,
-                    &mut last_emit_at,
+                    last_emit_at: &mut last_emit_at,
                     force,
                     sink,
-                );
+                });
             }
             let wait_started = Instant::now();
-            recv_result_to_writer(
-                &handle,
-                result_wait_timeout,
-                &mut archive_writer,
-                &mut pending_write,
-                &mut written_count,
-                &mut output_bytes_written,
-                &mut completed_bytes,
-                &mut first_error,
-                &mut raw_passthrough_blocks,
-                &mut received_count,
-                &mut pending_write_peak,
-                &mut stage_timings.writer,
-            );
+            let mut writer_state = PreparedWriterState {
+                archive_writer: &mut archive_writer,
+                pending_write: &mut pending_write,
+                written_count: &mut written_count,
+                output_bytes_written: &mut output_bytes_written,
+                completed_bytes: &mut completed_bytes,
+                first_error: &mut first_error,
+                raw_passthrough_blocks: &mut raw_passthrough_blocks,
+                pending_write_peak: &mut pending_write_peak,
+                writer_time: &mut stage_timings.writer,
+            };
+            recv_result_to_writer(&handle, result_wait_timeout, &mut writer_state);
             stage_timings.result_wait += wait_started.elapsed();
         }
         let force = false;
         if progress_emit_due(&last_emit_at, emit_every, force) {
-            emit_archive_progress_if_due(
-                handle.runtime_snapshot(),
-                processing_totals.snapshot(),
+            emit_archive_progress_if_due(ArchiveProgressCtx {
+                runtime: handle.runtime_snapshot(),
+                processing: processing_totals.snapshot(),
                 source_kind,
                 started_at,
                 input_bytes_total,
-                completed_bytes,
-                output_bytes_written,
-                block_count,
+                input_bytes_completed: completed_bytes,
+                output_bytes_completed: output_bytes_written,
+                blocks_total: block_count,
                 emit_every,
-                &mut last_emit_at,
+                last_emit_at: &mut last_emit_at,
                 force,
                 sink,
-            );
+            });
         }
     }
 
@@ -259,35 +257,28 @@ where
     Ok(ArchiveRun { writer, report })
 }
 
+pub struct PreparedWriterState<'a, AW: ArchiveBlockWriter> {
+    pub archive_writer: &'a mut AW,
+    pub pending_write: &'a mut ReorderBuffer<CompressedBlock>,
+    pub written_count: &'a mut usize,
+    pub output_bytes_written: &'a mut u64,
+    pub completed_bytes: &'a mut u64,
+    pub first_error: &'a mut Option<crate::OxideError>,
+    pub raw_passthrough_blocks: &'a mut u64,
+    pub pending_write_peak: &'a mut usize,
+    pub writer_time: &'a mut Duration,
+}
+
 pub fn drain_results_to_writer<AW: ArchiveBlockWriter>(
     handle: &WorkerPoolHandle,
-    archive_writer: &mut AW,
-    pending_write: &mut ReorderBuffer<CompressedBlock>,
-    written_count: &mut usize,
-    output_bytes_written: &mut u64,
-    completed_bytes: &mut u64,
-    first_error: &mut Option<crate::OxideError>,
-    raw_passthrough_blocks: &mut u64,
+    state: &mut PreparedWriterState<'_, AW>,
     received_count: &mut usize,
-    pending_write_peak: &mut usize,
-    writer_time: &mut Duration,
     max_results: usize,
 ) -> usize {
     let mut drained = 0usize;
     while drained < max_results {
         if let Some(result) = handle.recv_timeout(Duration::from_millis(0)) {
-            record_result_to_writer(
-                result,
-                archive_writer,
-                pending_write,
-                written_count,
-                output_bytes_written,
-                completed_bytes,
-                first_error,
-                raw_passthrough_blocks,
-                pending_write_peak,
-                writer_time,
-            );
+            record_result_to_writer(result, state);
             *received_count += 1;
             drained += 1;
         } else {
@@ -300,31 +291,10 @@ pub fn drain_results_to_writer<AW: ArchiveBlockWriter>(
 pub fn recv_result_to_writer<AW: ArchiveBlockWriter>(
     handle: &WorkerPoolHandle,
     timeout: Duration,
-    archive_writer: &mut AW,
-    pending_write: &mut ReorderBuffer<CompressedBlock>,
-    written_count: &mut usize,
-    output_bytes_written: &mut u64,
-    completed_bytes: &mut u64,
-    first_error: &mut Option<crate::OxideError>,
-    raw_passthrough_blocks: &mut u64,
-    received_count: &mut usize,
-    pending_write_peak: &mut usize,
-    writer_time: &mut Duration,
+    state: &mut PreparedWriterState<'_, AW>,
 ) -> bool {
     if let Some(result) = handle.recv_timeout(timeout) {
-        record_result_to_writer(
-            result,
-            archive_writer,
-            pending_write,
-            written_count,
-            output_bytes_written,
-            completed_bytes,
-            first_error,
-            raw_passthrough_blocks,
-            pending_write_peak,
-            writer_time,
-        );
-        *received_count += 1;
+        record_result_to_writer(result, state);
         true
     } else {
         false
@@ -333,50 +303,42 @@ pub fn recv_result_to_writer<AW: ArchiveBlockWriter>(
 
 pub fn record_result_to_writer<AW: ArchiveBlockWriter>(
     result: Result<CompressedBlock>,
-    archive_writer: &mut AW,
-    pending_write: &mut ReorderBuffer<CompressedBlock>,
-    written_count: &mut usize,
-    output_bytes_written: &mut u64,
-    completed_bytes: &mut u64,
-    first_error: &mut Option<crate::OxideError>,
-    raw_passthrough_blocks: &mut u64,
-    pending_write_peak: &mut usize,
-    writer_time: &mut Duration,
+    state: &mut PreparedWriterState<'_, AW>,
 ) {
     match result {
         Ok(block) => {
-            *completed_bytes = (*completed_bytes).saturating_add(block.original_len);
+            *state.completed_bytes = (*state.completed_bytes).saturating_add(block.original_len);
             if block.raw_passthrough {
-                *raw_passthrough_blocks = raw_passthrough_blocks.saturating_add(1);
+                *state.raw_passthrough_blocks = state.raw_passthrough_blocks.saturating_add(1);
             }
-            if first_error.is_some() {
+            if state.first_error.is_some() {
                 return;
             }
 
-            let ready = match pending_write.push(block.id, block) {
+            let ready = match state.pending_write.push(block.id, block) {
                 Ok(ready) => ready,
                 Err(error) => {
-                    first_error.get_or_insert(error);
+                    state.first_error.get_or_insert(error);
                     return;
                 }
             };
-            *pending_write_peak = (*pending_write_peak).max(pending_write.pending_len());
+            *state.pending_write_peak = (*state.pending_write_peak).max(state.pending_write.pending_len());
 
             for ready in ready {
-                *output_bytes_written =
-                    (*output_bytes_written).saturating_add(ready.data.len() as u64);
+                *state.output_bytes_written =
+                    (*state.output_bytes_written).saturating_add(ready.data.len() as u64);
                 let write_started = Instant::now();
-                if let Err(error) = archive_writer.write_owned_block(ready) {
-                    first_error.get_or_insert(error);
-                    *writer_time += write_started.elapsed();
+                if let Err(error) = state.archive_writer.write_owned_block(ready) {
+                    state.first_error.get_or_insert(error);
+                    *state.writer_time += write_started.elapsed();
                     break;
                 }
-                *writer_time += write_started.elapsed();
-                *written_count += 1;
+                *state.writer_time += write_started.elapsed();
+                *state.written_count += 1;
             }
         }
         Err(error) => {
-            first_error.get_or_insert(error);
+            state.first_error.get_or_insert(error);
         }
     }
 }

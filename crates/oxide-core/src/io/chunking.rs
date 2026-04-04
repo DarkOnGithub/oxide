@@ -92,20 +92,20 @@ pub fn find_cdc_boundary(policy: ChunkingPolicy, data: &[u8], start: usize) -> u
     let mut filled = 0usize;
     let mut slot = 0usize;
 
-    for index in start..upper_bound {
-        let byte = data[index];
+    for (i, byte) in data[start..upper_bound].iter().enumerate() {
+        let index = start + i;
         if filled < CDC_WINDOW_SIZE {
-            hash = hash.rotate_left(1) ^ CDC_TABLE[byte as usize];
-            window[filled] = byte;
+            hash = hash.rotate_left(1) ^ CDC_TABLE[*byte as usize];
+            window[filled] = *byte;
             filled += 1;
             if filled == CDC_WINDOW_SIZE {
                 slot = (index + 1) & CDC_WINDOW_MASK;
             }
         } else {
             let outgoing = window[slot];
-            window[slot] = byte;
+            window[slot] = *byte;
             hash =
-                hash.rotate_left(1) ^ CDC_TABLE[byte as usize] ^ CDC_OUT_TABLE[outgoing as usize];
+                hash.rotate_left(1) ^ CDC_TABLE[*byte as usize] ^ CDC_OUT_TABLE[outgoing as usize];
             slot = (slot + 1) & CDC_WINDOW_MASK;
         }
 

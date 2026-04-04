@@ -228,19 +228,21 @@ fn build_archive_pipeline(
     producer_threads: usize,
     buffer_pool: Arc<BufferPool>,
 ) -> AppResult<ArchivePipeline> {
-    let mut performance = PipelinePerformanceOptions::default();
-    performance.compression_level = settings.compression_level;
-    performance.lzma_extreme = settings.compression_extreme;
-    performance.lzma_dictionary_size = settings.lzma_dictionary_size;
-    performance.dictionary_mode = settings.dictionary_mode;
-    performance.max_inflight_bytes = settings.inflight_bytes.max(1);
-    performance.max_inflight_blocks_per_worker = settings.inflight_blocks_per_worker.max(1);
-    performance.directory_stream_read_buffer_size = settings.stream_read_buffer.max(1);
-    performance.producer_threads = producer_threads.max(1);
-    performance.directory_mmap_threshold_bytes = settings.directory_mmap_threshold.max(1);
-    performance.writer_result_queue_blocks = settings.writer_queue_blocks.max(1);
-    performance.result_wait_timeout = Duration::from_millis(settings.result_wait_ms.max(1));
-    performance.block_dedup_window_blocks = settings.block_dedup_window_blocks;
+    let performance = PipelinePerformanceOptions {
+        compression_level: settings.compression_level,
+        lzma_extreme: settings.compression_extreme,
+        lzma_dictionary_size: settings.lzma_dictionary_size,
+        dictionary_mode: settings.dictionary_mode,
+        max_inflight_bytes: settings.inflight_bytes.max(1),
+        max_inflight_blocks_per_worker: settings.inflight_blocks_per_worker.max(1),
+        directory_stream_read_buffer_size: settings.stream_read_buffer.max(1),
+        producer_threads: producer_threads.max(1),
+        directory_mmap_threshold_bytes: settings.directory_mmap_threshold.max(1),
+        writer_result_queue_blocks: settings.writer_queue_blocks.max(1),
+        result_wait_timeout: Duration::from_millis(settings.result_wait_ms.max(1)),
+        block_dedup_window_blocks: settings.block_dedup_window_blocks,
+        ..Default::default()
+    };
 
     let mut config = ArchivePipelineConfig::new(
         settings.block_size.max(1),

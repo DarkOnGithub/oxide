@@ -17,43 +17,23 @@ fn worker_results_are_forwarded_in_order() {
     let mut writer_queue_peak = 0usize;
     let mut writer_enqueue_blocked = Duration::ZERO;
     let mut retired_count = 0usize;
+    let mut received_count = 0usize;
 
-    record_result_to_writer_queue(
-        Ok(block(2)),
-        &writer_tx,
-        &writer_failure,
-        &mut pending_results,
-        &mut completed_bytes,
-        &mut first_error,
-        &mut raw_passthrough_blocks,
-        &mut writer_queue_peak,
-        &mut writer_enqueue_blocked,
-        &mut retired_count,
-    );
-    record_result_to_writer_queue(
-        Ok(block(1)),
-        &writer_tx,
-        &writer_failure,
-        &mut pending_results,
-        &mut completed_bytes,
-        &mut first_error,
-        &mut raw_passthrough_blocks,
-        &mut writer_queue_peak,
-        &mut writer_enqueue_blocked,
-        &mut retired_count,
-    );
-    record_result_to_writer_queue(
-        Ok(block(0)),
-        &writer_tx,
-        &writer_failure,
-        &mut pending_results,
-        &mut completed_bytes,
-        &mut first_error,
-        &mut raw_passthrough_blocks,
-        &mut writer_queue_peak,
-        &mut writer_enqueue_blocked,
-        &mut retired_count,
-    );
+    let mut state = DirectoryWriterState {
+        writer_tx: &writer_tx,
+        writer_failure: &writer_failure,
+        pending_results: &mut pending_results,
+        completed_bytes: &mut completed_bytes,
+        first_error: &mut first_error,
+        raw_passthrough_blocks: &mut raw_passthrough_blocks,
+        writer_queue_peak: &mut writer_queue_peak,
+        writer_enqueue_blocked: &mut writer_enqueue_blocked,
+        retired_count: &mut retired_count,
+        received_count: &mut received_count,
+    };
+    record_result_to_writer_queue(Ok(block(2)), &mut state);
+    record_result_to_writer_queue(Ok(block(1)), &mut state);
+    record_result_to_writer_queue(Ok(block(0)), &mut state);
 
     assert!(first_error.is_none());
     assert_eq!(pending_results.pending_len(), 0);
@@ -75,34 +55,25 @@ fn writer_failure_releases_pending_results_and_surfaces_cause() {
     let mut writer_queue_peak = 0usize;
     let mut writer_enqueue_blocked = Duration::ZERO;
     let mut retired_count = 0usize;
+    let mut received_count = 0usize;
 
-    record_result_to_writer_queue(
-        Ok(block(2)),
-        &writer_tx,
-        &writer_failure,
-        &mut pending_results,
-        &mut completed_bytes,
-        &mut first_error,
-        &mut raw_passthrough_blocks,
-        &mut writer_queue_peak,
-        &mut writer_enqueue_blocked,
-        &mut retired_count,
-    );
+    let mut state = DirectoryWriterState {
+        writer_tx: &writer_tx,
+        writer_failure: &writer_failure,
+        pending_results: &mut pending_results,
+        completed_bytes: &mut completed_bytes,
+        first_error: &mut first_error,
+        raw_passthrough_blocks: &mut raw_passthrough_blocks,
+        writer_queue_peak: &mut writer_queue_peak,
+        writer_enqueue_blocked: &mut writer_enqueue_blocked,
+        retired_count: &mut retired_count,
+        received_count: &mut received_count,
+    };
+    record_result_to_writer_queue(Ok(block(2)), &mut state);
 
     drop(writer_rx);
 
-    record_result_to_writer_queue(
-        Ok(block(0)),
-        &writer_tx,
-        &writer_failure,
-        &mut pending_results,
-        &mut completed_bytes,
-        &mut first_error,
-        &mut raw_passthrough_blocks,
-        &mut writer_queue_peak,
-        &mut writer_enqueue_blocked,
-        &mut retired_count,
-    );
+    record_result_to_writer_queue(Ok(block(0)), &mut state);
 
     assert_eq!(pending_results.pending_len(), 0);
     assert_eq!(retired_count, 2);

@@ -263,7 +263,7 @@ pub fn classify_sample(sample: &[u8]) -> DictionaryClass {
         }
     }
 
-    let len = sample.len().min(DEFAULT_SAMPLE_SIZE).max(1);
+    let len = sample.len().clamp(1, DEFAULT_SAMPLE_SIZE);
     if nul > 0 {
         return DictionaryClass::Binary;
     }
