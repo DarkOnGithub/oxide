@@ -62,21 +62,13 @@ struct CachedZstdDecompressor {
     decompressor: zstd::bulk::Decompressor<'static>,
 }
 
+#[derive(Default)]
 pub(crate) struct ZstdScratch {
     compressors: Vec<CachedZstdCompressor>,
     decompressors: Vec<CachedZstdDecompressor>,
     output: Vec<u8>,
 }
 
-impl Default for ZstdScratch {
-    fn default() -> Self {
-        Self {
-            compressors: Vec::new(),
-            decompressors: Vec::new(),
-            output: Vec::new(),
-        }
-    }
-}
 
 impl fmt::Debug for ZstdScratch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
