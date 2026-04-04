@@ -83,15 +83,14 @@ impl ArchiveDictionaryBank {
             return None;
         }
 
-        if let Some(class) = source_path.and_then(classify_path) {
-            if let Some(dictionary) = self
+        if let Some(class) = source_path.and_then(classify_path)
+            && let Some(dictionary) = self
                 .dictionaries
                 .iter()
                 .find(|dictionary| dictionary.algo == algo && dictionary.class == class)
             {
                 return Some(dictionary);
             }
-        }
 
         let class = classify_sample(source);
         self.dictionaries
@@ -157,11 +156,10 @@ impl DictionaryTrainer {
             let sample_class = classify_sample(window);
             self.observe_class(window, sample_class.clone());
 
-            if let Some(path_class) = path_class.as_ref() {
-                if *path_class != sample_class {
+            if let Some(path_class) = path_class.as_ref()
+                && *path_class != sample_class {
                     self.observe_class(window, path_class.clone());
                 }
-            }
         });
     }
 

@@ -12,7 +12,7 @@ pub(crate) const LZMA_DEFAULT_LEVEL: i32 = 6;
 const LZMA_MIN_LEVEL: i32 = 1;
 const LZMA_MAX_LEVEL: i32 = 9;
 const LZMA_MIN_DICT_SIZE: usize = 4 * 1024;
-const LZMA_LEVEL_1_TO_6_DICT_SIZE: usize = 1 * 1024 * 1024;
+const LZMA_LEVEL_1_TO_6_DICT_SIZE: usize = 1024 * 1024;
 const LZMA_LEVEL_7_TO_8_DICT_SIZE: usize = 2 * 1024 * 1024;
 const LZMA_LEVEL_9_DICT_SIZE: usize = 4 * 1024 * 1024;
 

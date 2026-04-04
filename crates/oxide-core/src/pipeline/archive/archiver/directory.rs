@@ -153,11 +153,10 @@ where
             })
         })();
 
-        if let Err(error) = &outcome {
-            if let Ok(mut failure) = writer_failure_shared.lock() {
+        if let Err(error) = &outcome
+            && let Ok(mut failure) = writer_failure_shared.lock() {
                 *failure = Some(error.to_string());
             }
-        }
 
         outcome
     });
@@ -312,7 +311,7 @@ where
                             &file.full_path,
                             &data,
                             force_raw_storage,
-                            |batch| submit_batch(batch),
+                            &mut submit_batch,
                         )?;
                     }
                     PrefetchPayload::Mapped(mmap) => {
@@ -323,7 +322,7 @@ where
                                 0,
                                 mmap.len(),
                                 force_raw_storage,
-                                |batch| submit_batch(batch),
+                                &mut submit_batch,
                             )?;
                         }
                     }
@@ -338,7 +337,7 @@ where
                         0,
                         mmap.len(),
                         force_raw_storage,
-                        |batch| submit_batch(batch),
+                        &mut submit_batch,
                     )?;
                 }
                 producer_read += read_started.elapsed();
@@ -356,7 +355,7 @@ where
                         &file.full_path,
                         &read_buffer[..read],
                         force_raw_storage,
-                        |batch| submit_batch(batch),
+                        &mut submit_batch,
                     )?;
                 }
             }

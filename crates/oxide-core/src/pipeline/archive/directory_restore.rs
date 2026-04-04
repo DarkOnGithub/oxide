@@ -307,13 +307,12 @@ impl DirectoryRestoreWriter {
 
     pub(crate) fn finish(&mut self) -> Result<DirectoryRestoreStats> {
         self.advance_entries()?;
-        if let Some(pending) = self.pending_file.as_ref() {
-            if pending.remaining > 0 {
+        if let Some(pending) = self.pending_file.as_ref()
+            && pending.remaining > 0 {
                 return Err(crate::OxideError::InvalidFormat(
                     "truncated file payload during directory restore",
                 ));
             }
-        }
         if self.pending_file.is_some() || self.next_entry != self.entry_count_total {
             return Err(crate::OxideError::InvalidFormat(
                 "directory restore ended before all entries completed",
