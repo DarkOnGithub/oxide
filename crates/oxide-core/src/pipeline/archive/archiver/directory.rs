@@ -636,21 +636,33 @@ where
 
     while received_count < submitted_count {
         let wait_started = Instant::now();
-        let result = results_rx.recv();
-        stage_timings.result_wait += wait_started.elapsed();
-        let mut writer_state = DirectoryWriterState {
-            writer_tx: &writer_tx,
-            writer_failure: &writer_failure,
-            pending_results: &mut pending_results,
-            completed_bytes: &mut completed_bytes,
-            first_error: &mut first_error,
-            raw_passthrough_blocks: &mut raw_passthrough_blocks,
-            writer_queue_peak: &mut writer_queue_peak,
-            writer_enqueue_blocked: &mut stage_timings.writer_enqueue_blocked,
-            retired_count: &mut retired_count,
-            received_count: &mut received_count,
-        };
-        recv_worker_result(result, &mut writer_state)?;
+        match results_rx.recv_timeout(wait_timeout) {
+            Ok(result) => {
+                stage_timings.result_wait += wait_started.elapsed();
+                let mut writer_state = DirectoryWriterState {
+                    writer_tx: &writer_tx,
+                    writer_failure: &writer_failure,
+                    pending_results: &mut pending_results,
+                    completed_bytes: &mut completed_bytes,
+                    first_error: &mut first_error,
+                    raw_passthrough_blocks: &mut raw_passthrough_blocks,
+                    writer_queue_peak: &mut writer_queue_peak,
+                    writer_enqueue_blocked: &mut stage_timings.writer_enqueue_blocked,
+                    retired_count: &mut retired_count,
+                    received_count: &mut received_count,
+                };
+                recv_worker_result(Ok(result), &mut writer_state)?;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                stage_timings.result_wait += wait_started.elapsed();
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                stage_timings.result_wait += wait_started.elapsed();
+                return Err(crate::OxideError::CompressionError(
+                    "worker result channel closed before completion".to_string(),
+                ));
+            }
+        }
         output_bytes_written = writer_output_bytes.load(AtomicOrdering::Acquire);
         let force = options.emit_final_progress && received_count == submitted_count;
         if progress_emit_due(&last_emit_at, emit_every, force) {
@@ -992,4 +1004,3 @@ fn effective_directory_dictionary_mode(
 
     ArchiveDictionaryMode::Auto
 }
-

@@ -2,6 +2,8 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crossbeam_channel::RecvTimeoutError;
+
 use crate::core::{WorkerPool, WorkerPoolHandle};
 use crate::format::{ArchiveBlockWriter, ArchiveManifest, ReorderBuffer};
 use crate::pipeline::directory;
@@ -117,7 +119,7 @@ where
             &mut writer_state,
             &mut received_count,
             SUBMISSION_DRAIN_BUDGET,
-        );
+        )?;
 
         if submitted_count == total_blocks && !shutdown_called {
             handle.shutdown();
@@ -177,7 +179,9 @@ where
                 pending_write_peak: &mut pending_write_peak,
                 writer_time: &mut stage_timings.writer,
             };
-            recv_result_to_writer(&handle, result_wait_timeout, &mut writer_state);
+            if recv_result_to_writer(&handle, result_wait_timeout, &mut writer_state)? {
+                received_count += 1;
+            }
             stage_timings.result_wait += wait_started.elapsed();
         }
         let force = false;
@@ -274,30 +278,49 @@ pub fn drain_results_to_writer<AW: ArchiveBlockWriter>(
     state: &mut PreparedWriterState<'_, AW>,
     received_count: &mut usize,
     max_results: usize,
-) -> usize {
+) -> Result<usize> {
     let mut drained = 0usize;
     while drained < max_results {
-        if let Some(result) = handle.recv_timeout(Duration::from_millis(0)) {
-            record_result_to_writer(result, state);
-            *received_count += 1;
-            drained += 1;
-        } else {
-            break;
+        match handle.recv_timeout(Duration::from_millis(0)) {
+            Ok(result) => {
+                record_result_to_writer(result, state);
+                *received_count += 1;
+                drained += 1;
+            }
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => {
+                if handle.completed_count() >= handle.submitted_count() {
+                    break;
+                }
+                return Err(crate::OxideError::CompressionError(
+                    "worker result channel closed before completion".to_string(),
+                ));
+            }
         }
     }
-    drained
+    Ok(drained)
 }
 
 pub fn recv_result_to_writer<AW: ArchiveBlockWriter>(
     handle: &WorkerPoolHandle,
     timeout: Duration,
     state: &mut PreparedWriterState<'_, AW>,
-) -> bool {
-    if let Some(result) = handle.recv_timeout(timeout) {
-        record_result_to_writer(result, state);
-        true
-    } else {
-        false
+) -> Result<bool> {
+    match handle.recv_timeout(timeout) {
+        Ok(result) => {
+            record_result_to_writer(result, state);
+            Ok(true)
+        }
+        Err(RecvTimeoutError::Timeout) => Ok(false),
+        Err(RecvTimeoutError::Disconnected) => {
+            if handle.completed_count() >= handle.submitted_count() {
+                Ok(false)
+            } else {
+                Err(crate::OxideError::CompressionError(
+                    "worker result channel closed before completion".to_string(),
+                ))
+            }
+        }
     }
 }
 
@@ -322,7 +345,8 @@ pub fn record_result_to_writer<AW: ArchiveBlockWriter>(
                     return;
                 }
             };
-            *state.pending_write_peak = (*state.pending_write_peak).max(state.pending_write.pending_len());
+            *state.pending_write_peak =
+                (*state.pending_write_peak).max(state.pending_write.pending_len());
 
             for ready in ready {
                 *state.output_bytes_written =
