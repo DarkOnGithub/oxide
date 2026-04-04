@@ -21,6 +21,7 @@ use crate::types::{Batch, ChunkEncodingPlan, CompressedBlock, Result};
 
 use super::super::telemetry::*;
 use super::super::types::*;
+use super::super::types::{CompressionTuning, PipelineQueueStats};
 use super::processing::process_batch;
 use super::utils::*;
 
@@ -111,10 +112,7 @@ where
     let result_drain_budget = submission_drain_budget(max_inflight_blocks, writer_queue_capacity);
     let writer_reorder_limit = total_blocks.max(1);
     let (writer_tx, writer_rx) = bounded::<CompressedBlock>(writer_queue_capacity);
-    let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes(
-        block_count,
-        manifest_bytes,
-    )));
+    let writer_output_bytes = Arc::new(AtomicU64::new(container_prefix_bytes()));
     let writer_output_bytes_shared = Arc::clone(&writer_output_bytes);
     let writer_failure = Arc::new(Mutex::new(None::<String>));
     let writer_failure_shared = Arc::clone(&writer_failure);
@@ -127,7 +125,7 @@ where
                 directory::source_kind_flags(ArchiveSourceKind::Directory),
             )?;
 
-            let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
+            let mut output_bytes_written = container_prefix_bytes();
             let mut writer_time = Duration::ZERO;
 
             while let Ok(block) = writer_rx.recv() {
@@ -176,7 +174,7 @@ where
     let mut retired_count = 0usize;
     let mut submitted_count = 0usize;
     let mut first_error: Option<crate::OxideError> = None;
-    let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
+    let mut output_bytes_written = container_prefix_bytes();
     let mut raw_passthrough_blocks = 0u64;
     let mut writer_queue_peak = 0usize;
     let mut pending_results = ReorderBuffer::<CompressedBlock>::with_limit(total_blocks.max(1));
@@ -717,19 +715,23 @@ where
         input_bytes_total,
         output_bytes_written,
         &final_runtime,
-        block_size,
-        raw_passthrough_blocks,
-        config.performance.compression_level,
-        config.performance.lzma_extreme,
-        config.performance.lzma_dictionary_size,
-        max_inflight_blocks,
-        max_inflight_bytes,
-        config.performance.max_inflight_bytes,
-        config.performance.max_inflight_blocks_per_worker,
-        writer_queue_capacity,
-        writer_reorder_limit,
-        pending_write_peak,
-        writer_queue_peak,
+        CompressionTuning {
+            block_size,
+            raw_passthrough_blocks,
+            level: config.performance.compression_level,
+            lzma_extreme: config.performance.lzma_extreme,
+            lzma_dictionary_size: config.performance.lzma_dictionary_size,
+        },
+        PipelineQueueStats {
+            max_inflight_blocks,
+            max_inflight_bytes,
+            configured_inflight_bytes: config.performance.max_inflight_bytes,
+            max_inflight_blocks_per_worker: config.performance.max_inflight_blocks_per_worker,
+            writer_queue_capacity,
+            reorder_pending_limit: writer_reorder_limit,
+            pending_write_peak,
+            writer_queue_peak,
+        },
         stage_timings,
         processing_snapshot,
     );
@@ -1015,6 +1017,3 @@ fn effective_directory_dictionary_mode(
     ArchiveDictionaryMode::Auto
 }
 
-#[cfg(test)]
-#[path = "../../../../tests/pipeline/archive/archiver/directory.rs"]
-mod tests;

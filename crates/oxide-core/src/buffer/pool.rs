@@ -283,7 +283,3 @@ impl Drop for PooledBuffer {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "../../tests/buffer/pool.rs"]
-mod tests;

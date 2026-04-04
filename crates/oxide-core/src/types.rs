@@ -289,9 +289,7 @@ impl CompressedPayload {
         Self::Pooled(pooled)
     }
 
-    /// Converts batch input data into a stored payload, reusing mmap regions when possible.
-    pub fn from_batch_data_in_pool(data: BatchData, pool: &BufferPool) -> Self {
-        let _ = pool;
+    pub fn from_batch_data(data: BatchData) -> Self {
         match data {
             BatchData::Owned(data) => Self::Bytes(data),
             BatchData::Mapped { map, start, end } => Self::Mapped { map, start, end },

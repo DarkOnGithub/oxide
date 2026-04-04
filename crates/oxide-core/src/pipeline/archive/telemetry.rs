@@ -169,19 +169,8 @@ pub fn build_stats_extensions(
     input_bytes_total: u64,
     output_bytes_total: u64,
     runtime: &PoolRuntimeSnapshot,
-    block_size: usize,
-    raw_passthrough_blocks: u64,
-    compression_level: Option<i32>,
-    lzma_extreme: bool,
-    lzma_dictionary_size: Option<usize>,
-    max_inflight_blocks: usize,
-    max_inflight_bytes: usize,
-    configured_inflight_bytes: usize,
-    max_inflight_blocks_per_worker: usize,
-    writer_queue_capacity: usize,
-    reorder_pending_limit: usize,
-    pending_write_peak: usize,
-    writer_queue_peak: usize,
+    tuning: CompressionTuning,
+    queue_stats: PipelineQueueStats,
     stage_timings: StageTimings,
     processing_snapshot: ProcessingThroughputSnapshot,
 ) -> BTreeMap<String, StatValue> {
@@ -241,22 +230,22 @@ pub fn build_stats_extensions(
     );
     extensions.insert(
         "tuning.block_size".to_string(),
-        StatValue::U64(block_size as u64),
+        StatValue::U64(tuning.block_size as u64),
     );
     extensions.insert(
         "compression.raw_passthrough_blocks".to_string(),
-        StatValue::U64(raw_passthrough_blocks),
+        StatValue::U64(tuning.raw_passthrough_blocks),
     );
-    if let Some(level) = compression_level {
+    if let Some(level) = tuning.level {
         extensions.insert(
             "compression.level".to_string(),
             StatValue::U64(level as u64),
         );
     }
-    if lzma_extreme {
+    if tuning.lzma_extreme {
         extensions.insert("compression.lzma_extreme".to_string(), StatValue::U64(1));
     }
-    if let Some(dictionary_size) = lzma_dictionary_size {
+    if let Some(dictionary_size) = tuning.lzma_dictionary_size {
         extensions.insert(
             "compression.lzma_dictionary_size".to_string(),
             StatValue::U64(dictionary_size as u64),
@@ -264,35 +253,35 @@ pub fn build_stats_extensions(
     }
     extensions.insert(
         "pipeline.max_inflight_blocks".to_string(),
-        StatValue::U64(max_inflight_blocks as u64),
+        StatValue::U64(queue_stats.max_inflight_blocks as u64),
     );
     extensions.insert(
         "pipeline.max_inflight_blocks_per_worker".to_string(),
-        StatValue::U64(max_inflight_blocks_per_worker as u64),
+        StatValue::U64(queue_stats.max_inflight_blocks_per_worker as u64),
     );
     extensions.insert(
         "pipeline.configured_inflight_bytes".to_string(),
-        StatValue::U64(configured_inflight_bytes as u64),
+        StatValue::U64(queue_stats.configured_inflight_bytes as u64),
     );
     extensions.insert(
         "pipeline.max_inflight_bytes".to_string(),
-        StatValue::U64(max_inflight_bytes as u64),
+        StatValue::U64(queue_stats.max_inflight_bytes as u64),
     );
     extensions.insert(
         "pipeline.writer_queue_capacity".to_string(),
-        StatValue::U64(writer_queue_capacity as u64),
+        StatValue::U64(queue_stats.writer_queue_capacity as u64),
     );
     extensions.insert(
         "pipeline.reorder_pending_limit".to_string(),
-        StatValue::U64(reorder_pending_limit as u64),
+        StatValue::U64(queue_stats.reorder_pending_limit as u64),
     );
     extensions.insert(
         "pipeline.pending_write_peak".to_string(),
-        StatValue::U64(pending_write_peak as u64),
+        StatValue::U64(queue_stats.pending_write_peak as u64),
     );
     extensions.insert(
         "pipeline.writer_queue_peak".to_string(),
-        StatValue::U64(writer_queue_peak as u64),
+        StatValue::U64(queue_stats.writer_queue_peak as u64),
     );
     extensions.insert(
         "stage.discovery_us".to_string(),

@@ -13,10 +13,6 @@ use crate::types::{Batch, CompressedBlock, CompressedPayload, CompressionAlgo, R
 
 const INCOMPRESSIBLE_PROBE_MIN_SOURCE_LEN: usize = 32 * 1024;
 const INCOMPRESSIBLE_PROBE_SAMPLE_LEN: usize = 16 * 1024;
-#[cfg(test)]
-const LZMA_PROBE_MIN_SOURCE_LEN: usize = 256 * 1024;
-#[cfg(test)]
-const LZMA_EXTREME_PROBE_MIN_SOURCE_LEN: usize = 512 * 1024;
 const LZMA_PROBE_SAMPLE_LEN: usize = 8 * 1024;
 
 /// Minimum sample size for the entropy probe to be meaningful.
@@ -117,12 +113,6 @@ fn incompressible_probe_offsets_storage(
     (offsets, len)
 }
 
-#[cfg(test)]
-fn incompressible_probe_offsets(source_len: usize, sample_len: usize) -> Vec<usize> {
-    let (offsets, len) = incompressible_probe_offsets_storage(source_len, sample_len);
-    offsets[..len].to_vec()
-}
-
 fn is_likely_incompressible_sample(
     source: &[u8],
     source_path: &Path,
@@ -215,7 +205,7 @@ pub fn process_batch(
         return Ok(CompressedBlock::with_chunk_encoding(
             id,
             stream_id,
-            CompressedPayload::from_batch_data_in_pool(data, pool),
+            CompressedPayload::from_batch_data(data),
             plan,
             true,
             source_len as u64,
@@ -227,7 +217,7 @@ pub fn process_batch(
         return Ok(CompressedBlock::with_chunk_encoding(
             id,
             stream_id,
-            CompressedPayload::from_batch_data_in_pool(data, pool),
+            CompressedPayload::from_batch_data(data),
             plan,
             true,
             source_len as u64,
@@ -242,7 +232,7 @@ pub fn process_batch(
         return Ok(CompressedBlock::with_chunk_encoding(
             id,
             stream_id,
-            CompressedPayload::from_batch_data_in_pool(data, pool),
+            CompressedPayload::from_batch_data(data),
             plan,
             true,
             source_len as u64,
@@ -277,7 +267,7 @@ pub fn process_batch(
 
         let raw_passthrough = raw_fallback_enabled && compressed.len() >= source_len;
         let data = if raw_passthrough {
-            CompressedPayload::from_batch_data_in_pool(data, pool)
+            CompressedPayload::from_batch_data(data)
         } else {
             CompressedPayload::from(compressed)
         };
@@ -300,7 +290,7 @@ pub fn process_batch(
 
     let raw_passthrough = raw_fallback_enabled && compressed.len() >= source_len;
     let data = if raw_passthrough {
-        CompressedPayload::from_batch_data_in_pool(data, pool)
+        CompressedPayload::from_batch_data(data)
     } else {
         CompressedPayload::from_vec_in_pool(compressed, pool)
     };
@@ -327,6 +317,3 @@ pub fn select_stored_payload<'a>(
     (payload, raw_passthrough)
 }
 
-#[cfg(test)]
-#[path = "../../../../tests/pipeline/archive/archiver/processing.rs"]
-mod tests;

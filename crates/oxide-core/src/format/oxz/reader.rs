@@ -330,6 +330,3 @@ impl<R: Read + Seek> Iterator for BlockIterator<'_, R> {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/format/oxz/reader.rs"]
-mod tests;

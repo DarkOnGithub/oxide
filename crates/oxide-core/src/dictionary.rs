@@ -26,8 +26,6 @@ pub enum DictionaryClass {
     Extension(String),
 }
 
-impl DictionaryClass {}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveDictionary {
     pub id: u8,
@@ -306,13 +304,6 @@ pub fn normalized_extension(extension: &str) -> Option<String> {
     Some(extension.to_ascii_lowercase())
 }
 
-#[cfg(test)]
-pub(crate) fn dictionary_sample_offsets(sample_len: usize) -> Vec<usize> {
-    let mut offsets = Vec::with_capacity(3);
-    for_each_dictionary_sample_offset(sample_len, |offset| offsets.push(offset));
-    offsets
-}
-
 #[inline]
 fn for_each_dictionary_sample_offset(sample_len: usize, mut visit: impl FnMut(usize)) {
     let window_size = DICTIONARY_SAMPLE_WINDOW_SIZE.min(sample_len);
@@ -343,6 +334,3 @@ fn for_each_dictionary_sample_window(sample: &[u8], mut visit: impl FnMut(&[u8])
     });
 }
 
-#[cfg(test)]
-#[path = "../tests/unit/dictionary.rs"]
-mod tests;

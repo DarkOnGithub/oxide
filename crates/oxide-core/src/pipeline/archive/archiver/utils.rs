@@ -14,8 +14,7 @@ pub const MIN_INFLIGHT_BLOCKS: usize = 64;
 pub const MAX_INFLIGHT_BLOCKS: usize = 4096;
 
 #[inline]
-pub fn container_prefix_bytes(block_count: u32, manifest_bytes: usize) -> u64 {
-    let _ = (block_count, manifest_bytes);
+pub fn container_prefix_bytes() -> u64 {
     GLOBAL_HEADER_SIZE as u64
 }
 

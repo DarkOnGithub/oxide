@@ -134,6 +134,29 @@ pub struct PrefetchResult {
     pub read_elapsed: Duration,
 }
 
+/// Compression-related knobs passed to stats/report builders.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompressionTuning {
+    pub block_size: usize,
+    pub raw_passthrough_blocks: u64,
+    pub level: Option<i32>,
+    pub lzma_extreme: bool,
+    pub lzma_dictionary_size: Option<usize>,
+}
+
+/// Queue sizing and peak usage metrics for the archive pipeline.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PipelineQueueStats {
+    pub max_inflight_blocks: usize,
+    pub max_inflight_bytes: usize,
+    pub configured_inflight_bytes: usize,
+    pub max_inflight_blocks_per_worker: usize,
+    pub writer_queue_capacity: usize,
+    pub reorder_pending_limit: usize,
+    pub pending_write_peak: usize,
+    pub writer_queue_peak: usize,
+}
+
 #[derive(Debug)]
 pub struct DecodedArchivePayload {
     pub flags: u32,

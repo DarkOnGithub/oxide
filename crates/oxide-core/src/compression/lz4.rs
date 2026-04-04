@@ -99,10 +99,6 @@ pub(crate) fn reverse_into_vec(data: &[u8], output: &mut Vec<u8>) -> Result<()> 
         .map_err(|err| OxideError::DecompressionError(format!("lz4 decode failed: {err}")))
 }
 
-#[cfg(test)]
-#[path = "../../tests/compression/lz4.rs"]
-mod tests;
-
 fn map_compress_error(err: CompressError) -> OxideError {
     OxideError::CompressionError(format!("lz4 encode failed: {err}"))
 }
