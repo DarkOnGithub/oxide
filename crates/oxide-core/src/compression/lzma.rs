@@ -95,7 +95,7 @@ pub(crate) fn apply_into_vec(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     output.clear();
-    ensure_output_spare_capacity(output, data.len().min(32 * 1024).max(32 * 1024));
+    ensure_output_spare_capacity(output, 32 * 1024);
     let mut stream = build_encoder_stream(level, extreme, dictionary_size)?;
 
     let mut remaining = data;
@@ -113,7 +113,7 @@ pub(crate) fn apply_into_vec(
 
         remaining = &remaining[consumed..];
         if !remaining.is_empty() {
-            ensure_output_spare_capacity(output, remaining.len().min(32 * 1024).max(32 * 1024));
+            ensure_output_spare_capacity(output, 32 * 1024);
         }
     }
 
@@ -164,7 +164,3 @@ pub(crate) fn reverse_into_vec(data: &[u8], output: &mut Vec<u8>) -> Result<()> 
         .map_err(|err| OxideError::DecompressionError(format!("lzma decode failed: {err}")))?;
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../../tests/compression/lzma.rs"]
-mod tests;

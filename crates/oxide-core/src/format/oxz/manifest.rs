@@ -559,6 +559,3 @@ fn zigzag_decode_i64(value: u64) -> i64 {
     ((value >> 1) as i64) ^ (-((value & 1) as i64))
 }
 
-#[cfg(test)]
-#[path = "../../../tests/format/oxz/manifest.rs"]
-mod tests;

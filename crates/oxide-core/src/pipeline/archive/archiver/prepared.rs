@@ -11,6 +11,7 @@ use crate::types::{CompressedBlock, Result};
 
 use super::super::telemetry::*;
 use super::super::types::*;
+use super::super::types::{CompressionTuning, PipelineQueueStats};
 use super::processing::process_batch;
 use super::utils::*;
 
@@ -73,7 +74,7 @@ where
     let mut archive_writer = writer_factory(writer, manifest);
     archive_writer
         .write_global_header_with_flags(block_count, directory::source_kind_flags(source_kind))?;
-    let mut output_bytes_written = container_prefix_bytes(block_count, manifest_bytes);
+    let mut output_bytes_written = container_prefix_bytes();
     let reorder_limit = total_blocks.max(1);
     let mut pending_write = ReorderBuffer::<CompressedBlock>::with_limit(reorder_limit);
     let mut written_count = 0usize;
@@ -221,19 +222,23 @@ where
         input_bytes_total,
         output_bytes_written,
         &final_runtime,
-        block_size,
-        raw_passthrough_blocks,
-        config.performance.compression_level,
-        config.performance.lzma_extreme,
-        config.performance.lzma_dictionary_size,
-        max_inflight_blocks,
-        max_inflight_bytes,
-        config.performance.max_inflight_bytes,
-        config.performance.max_inflight_blocks_per_worker,
-        max_inflight_blocks,
-        reorder_limit,
-        pending_write_peak,
-        0,
+        CompressionTuning {
+            block_size,
+            raw_passthrough_blocks,
+            level: config.performance.compression_level,
+            lzma_extreme: config.performance.lzma_extreme,
+            lzma_dictionary_size: config.performance.lzma_dictionary_size,
+        },
+        PipelineQueueStats {
+            max_inflight_blocks,
+            max_inflight_bytes,
+            configured_inflight_bytes: config.performance.max_inflight_bytes,
+            max_inflight_blocks_per_worker: config.performance.max_inflight_blocks_per_worker,
+            writer_queue_capacity: max_inflight_blocks,
+            reorder_pending_limit: reorder_limit,
+            pending_write_peak,
+            writer_queue_peak: 0,
+        },
         stage_timings,
         processing_snapshot,
     );

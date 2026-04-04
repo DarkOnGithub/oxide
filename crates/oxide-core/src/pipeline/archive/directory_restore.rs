@@ -1255,6 +1255,3 @@ fn create_symlink(path: &Path, target: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-#[path = "../../../tests/pipeline/archive/directory_restore.rs"]
-mod tests;

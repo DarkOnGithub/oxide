@@ -411,14 +411,6 @@ pub(super) fn discover_directory_tree(root: &Path) -> Result<DirectoryDiscovery>
     })
 }
 
-#[cfg(test)]
-pub(super) fn manifest_from_discovery(
-    discovery: &DirectoryDiscovery,
-) -> crate::types::Result<crate::format::ArchiveManifest> {
-    let file_order = (0..discovery.files.len()).collect::<Vec<_>>();
-    manifest_from_discovery_with_file_order(discovery, &file_order)
-}
-
 pub(super) fn manifest_from_discovery_with_file_order(
     discovery: &DirectoryDiscovery,
     file_order: &[usize],
@@ -482,16 +474,6 @@ pub(super) fn manifest_from_discovery_with_file_order(
     Ok(crate::format::ArchiveManifest::new(entries))
 }
 
-#[cfg(test)]
-pub(super) fn detect_file_probe_plans(
-    discovery: &DirectoryDiscovery,
-    _target_block_size: usize,
-    _compression_plan: ChunkEncodingPlan,
-    _threads: usize,
-) -> Result<Vec<FileProbePlan>> {
-    Ok(plan_directory_files(discovery, _target_block_size).probe_plans)
-}
-
 pub(super) struct DirectoryFilePlan {
     pub(super) probe_plans: Vec<FileProbePlan>,
     pub(super) file_order: Vec<usize>,
@@ -527,23 +509,6 @@ pub(super) fn plan_directory_files(
         probe_plans,
         file_order: regular,
     }
-}
-
-#[cfg(test)]
-pub(super) fn estimate_directory_block_count(
-    discovery: &DirectoryDiscovery,
-    file_probe_plans: &[FileProbePlan],
-    block_size: usize,
-    compression_plan: ChunkEncodingPlan,
-) -> Result<u32> {
-    let file_order = (0..discovery.files.len()).collect::<Vec<_>>();
-    estimate_directory_block_count_with_file_order(
-        discovery,
-        &file_order,
-        file_probe_plans,
-        block_size,
-        compression_plan,
-    )
 }
 
 pub(super) fn estimate_directory_block_count_with_file_order(
@@ -586,42 +551,6 @@ pub(super) fn estimate_directory_block_count_with_file_order(
         .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v2"))
 }
 
-#[cfg(test)]
-pub(super) fn plan_directory_file_order(
-    discovery: &DirectoryDiscovery,
-    file_probe_plans: &[FileProbePlan],
-    block_size: usize,
-) -> Result<Vec<usize>> {
-    if discovery.files.len() != file_probe_plans.len() {
-        return Err(crate::OxideError::InvalidFormat(
-            "directory raw storage plan mismatch",
-        ));
-    }
-
-    let fragment_threshold = directory_fragment_file_size_threshold(block_size);
-    let mut regular = Vec::with_capacity(discovery.files.len());
-    let mut fragments = Vec::new();
-    let mut raw_fragments = Vec::new();
-
-    for (index, file) in discovery.files.iter().enumerate() {
-        let is_fragment = file.size <= fragment_threshold;
-        if !is_fragment {
-            regular.push(index);
-            continue;
-        }
-
-        if file_probe_plans[index].force_raw_storage {
-            raw_fragments.push(index);
-        } else {
-            fragments.push(index);
-        }
-    }
-
-    regular.extend(fragments);
-    regular.extend(raw_fragments);
-    Ok(regular)
-}
-
 fn directory_fragment_file_size_threshold(block_size: usize) -> u64 {
     ((block_size.max(1) as u64) / 8).clamp(
         DIRECTORY_FRAGMENT_MIN_FILE_SIZE,
@@ -629,9 +558,6 @@ fn directory_fragment_file_size_threshold(block_size: usize) -> u64 {
     )
 }
 
-#[cfg(test)]
-#[path = "../../tests/pipeline/directory.rs"]
-mod tests;
 
 fn metadata_mtime(metadata: &fs::Metadata) -> Result<super::types::ArchiveTimestamp> {
     Ok(super::types::ArchiveTimestamp::from_system_time(

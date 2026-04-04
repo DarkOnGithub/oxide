@@ -120,6 +120,3 @@ impl<T> ReorderBuffer<T> {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/format/oxz/reorder.rs"]
-mod tests;

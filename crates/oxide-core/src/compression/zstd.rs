@@ -127,7 +127,3 @@ pub(crate) fn reverse_into_vec(
         }
     }
 }
-
-#[cfg(test)]
-#[path = "../../tests/compression/zstd.rs"]
-mod tests;

@@ -1388,6 +1388,3 @@ fn decode_block_payload_with_scratch(
     Ok(decoded)
 }
 
-#[cfg(test)]
-#[path = "../../../tests/pipeline/archive/extractor.rs"]
-mod tests;

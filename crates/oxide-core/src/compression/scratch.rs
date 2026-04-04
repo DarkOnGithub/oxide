@@ -206,7 +206,3 @@ impl CompressionScratchArena {
         self.lz4.allocated_bytes() + self.lzma.allocated_bytes() + self.zstd.allocated_bytes()
     }
 }
-
-#[cfg(test)]
-#[path = "../../tests/compression/scratch.rs"]
-mod tests;

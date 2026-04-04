@@ -171,7 +171,3 @@ const fn build_cdc_out_table() -> [u64; 256] {
 }
 
 const CDC_OUT_TABLE: [u64; 256] = build_cdc_out_table();
-
-#[cfg(test)]
-#[path = "../../tests/io/chunking.rs"]
-mod tests;

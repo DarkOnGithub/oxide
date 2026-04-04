@@ -119,19 +119,10 @@ pub struct ArchiveWriter<W: Write> {
     block_deduper: BlockDeduper,
 }
 
+/// Seekable variant of [`ArchiveWriter`] that validates the writer position
+/// is at byte 0 before writing the global header.
 #[derive(Debug)]
-pub struct SeekableArchiveWriter<W: Write + Seek> {
-    writer: W,
-    manifest: ArchiveManifest,
-    entry_table_bytes: Vec<u8>,
-    source_kind: Option<ArchiveSourceKind>,
-    expected_block_count: Option<u32>,
-    blocks_written: u32,
-    reorder: ReorderBuffer<CompressedBlock>,
-    next_payload_offset: u64,
-    pending_descriptors: Vec<ChunkDescriptor>,
-    block_deduper: BlockDeduper,
-}
+pub struct SeekableArchiveWriter<W: Write + Seek>(ArchiveWriter<W>);
 
 impl<W: Write> ArchiveWriter<W> {
     pub fn new(writer: W) -> Self {
@@ -280,7 +271,6 @@ impl<W: Write> ArchiveWriter<W> {
 
         let finalize_started = Instant::now();
         let footer = build_footer(
-            self.source_kind.unwrap_or(ArchiveSourceKind::File),
             self.expected_block_count.unwrap_or(0),
             &self.entry_table_bytes,
             &self.pending_descriptors,
@@ -325,30 +315,6 @@ impl<W: Write> ArchiveWriter<W> {
 
         record_stage_telemetry(start.elapsed());
         Ok(())
-    }
-}
-
-impl<W: Write> ArchiveBlockWriter for ArchiveWriter<W> {
-    type InnerWriter = W;
-
-    fn write_global_header_with_flags(&mut self, block_count: u32, flags: u32) -> Result<()> {
-        Self::write_global_header_with_flags(self, block_count, flags)
-    }
-
-    fn write_owned_block(&mut self, block: CompressedBlock) -> Result<()> {
-        Self::write_owned_block(self, block)
-    }
-
-    fn push_block(&mut self, block: CompressedBlock) -> Result<usize> {
-        Self::push_block(self, block)
-    }
-
-    fn pending_blocks(&self) -> usize {
-        Self::pending_blocks(self)
-    }
-
-    fn write_footer(self) -> Result<Self::InnerWriter> {
-        Self::write_footer(self)
     }
 }
 
@@ -380,18 +346,12 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
         dedupe_window_blocks: usize,
         manifest: Option<ArchiveManifest>,
     ) -> Self {
-        Self {
+        Self(ArchiveWriter::with_limits_and_manifest(
             writer,
-            manifest: manifest.unwrap_or_default(),
-            entry_table_bytes: Vec::new(),
-            source_kind: None,
-            expected_block_count: None,
-            blocks_written: 0,
-            reorder: ReorderBuffer::with_limit(max_pending),
-            next_payload_offset: GLOBAL_HEADER_SIZE as u64,
-            pending_descriptors: Vec::new(),
-            block_deduper: BlockDeduper::new(dedupe_window_blocks),
-        }
+            max_pending,
+            dedupe_window_blocks,
+            manifest,
+        ))
     }
 
     pub fn with_reorder_limit(writer: W, max_pending: usize) -> Self {
@@ -403,153 +363,64 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
     }
 
     pub fn write_global_header_with_flags(&mut self, block_count: u32, flags: u32) -> Result<()> {
-        if self.expected_block_count.is_some() {
-            return Err(OxideError::InvalidFormat("global header already written"));
-        }
-
-        if self.writer.stream_position()? != 0 {
+        if self.0.writer.stream_position()? != 0 {
             return Err(OxideError::InvalidFormat(
                 "seekable archive writer requires an empty destination positioned at start",
             ));
         }
-
-        let source_kind = archive_source_kind_from_flags(flags)?;
-        self.entry_table_bytes = self.manifest.encode()?;
-        self.source_kind = Some(source_kind);
-        self.expected_block_count = Some(block_count);
-        self.pending_descriptors.reserve(block_count as usize);
-        self.next_payload_offset = GLOBAL_HEADER_SIZE as u64;
-
-        let header = GlobalHeader::new(source_kind, block_count, 0, 0, 0, 0, 0);
-        let started = Instant::now();
-        header.write(&mut self.writer)?;
-        profile::event(
-            tags::PROFILE_OXZ,
-            &[tags::TAG_OXZ],
-            "write_header",
-            "ok",
-            duration_to_us(started.elapsed()),
-            "oxz header written successfully",
-        );
-        Ok(())
+        self.0.write_global_header_with_flags(block_count, flags)
     }
 
     pub fn write_block(&mut self, block: &CompressedBlock) -> Result<()> {
-        self.ensure_header_written()?;
-
-        let expected = usize::try_from(self.blocks_written)
-            .map_err(|_| OxideError::InvalidFormat("block index exceeds usize range"))?;
-        if block.id != expected {
-            return Err(OxideError::InvalidBlockId {
-                expected: expected as u64,
-                actual: block.id as u64,
-            });
-        }
-
-        let owned = CompressedBlock {
-            id: block.id,
-            stream_id: block.stream_id,
-            data: block.data.clone(),
-            compression: block.compression,
-            raw_passthrough: block.raw_passthrough,
-            dictionary_id: block.dictionary_id,
-            original_len: block.original_len,
-            crc32: block.crc32,
-            reference_target: block.reference_target,
-        };
-        self.stage_owned_block(owned)
+        self.0.write_block(block)
     }
 
     pub fn write_owned_block(&mut self, block: CompressedBlock) -> Result<()> {
-        self.ensure_header_written()?;
-
-        let expected = usize::try_from(self.blocks_written)
-            .map_err(|_| OxideError::InvalidFormat("block index exceeds usize range"))?;
-        if block.id != expected {
-            return Err(OxideError::InvalidBlockId {
-                expected: expected as u64,
-                actual: block.id as u64,
-            });
-        }
-
-        self.stage_owned_block(block)
+        self.0.write_owned_block(block)
     }
 
     pub fn push_block(&mut self, block: CompressedBlock) -> Result<usize> {
-        self.ensure_header_written()?;
-
-        let ready = self.reorder.push(block.id, block)?;
-        let mut accepted = 0usize;
-        for block in ready {
-            self.stage_owned_block(block)?;
-            accepted += 1;
-        }
-        Ok(accepted)
+        self.0.push_block(block)
     }
 
     pub fn blocks_written(&self) -> u32 {
-        self.blocks_written
+        self.0.blocks_written()
     }
 
     pub fn pending_blocks(&self) -> usize {
-        self.reorder.pending_len()
+        self.0.pending_blocks()
     }
 
-    pub fn write_footer(mut self) -> Result<W> {
-        self.ensure_header_written()?;
-        validate_completion(
-            self.expected_block_count,
-            self.blocks_written,
-            self.pending_blocks(),
-        )?;
-
-        let finalize_started = Instant::now();
-        let footer = build_footer(
-            self.source_kind.unwrap_or(ArchiveSourceKind::File),
-            self.expected_block_count.unwrap_or(0),
-            &self.entry_table_bytes,
-            &self.pending_descriptors,
-        )?;
-
-        let chunk_table_started = Instant::now();
-        self.writer.write_all(&self.entry_table_bytes)?;
-        let chunk_table_bytes = encode_chunk_table(&self.pending_descriptors)?;
-        self.writer.write_all(&chunk_table_bytes)?;
-        footer.write(&mut self.writer)?;
-
-        record_finalize_telemetry(chunk_table_started.elapsed(), finalize_started.elapsed());
-        Ok(self.writer)
+    pub fn write_footer(self) -> Result<W> {
+        self.0.write_footer()
     }
 
     pub fn into_inner(self) -> W {
-        self.writer
+        self.0.into_inner()
+    }
+}
+
+impl<W: Write> ArchiveBlockWriter for ArchiveWriter<W> {
+    type InnerWriter = W;
+
+    fn write_global_header_with_flags(&mut self, block_count: u32, flags: u32) -> Result<()> {
+        Self::write_global_header_with_flags(self, block_count, flags)
     }
 
-    fn ensure_header_written(&self) -> Result<()> {
-        if self.expected_block_count.is_none() {
-            return Err(OxideError::InvalidFormat(
-                "global header must be written first",
-            ));
-        }
-        Ok(())
+    fn write_owned_block(&mut self, block: CompressedBlock) -> Result<()> {
+        Self::write_owned_block(self, block)
     }
 
-    fn stage_owned_block(&mut self, block: CompressedBlock) -> Result<()> {
-        let start = Instant::now();
-        let expected = self.expected_block_count.unwrap_or(0);
-        if self.blocks_written >= expected {
-            return Err(OxideError::InvalidFormat("archive block count exceeded"));
-        }
+    fn push_block(&mut self, block: CompressedBlock) -> Result<usize> {
+        Self::push_block(self, block)
+    }
 
-        let block = self.block_deduper.rewrite(block)?;
-        let descriptor = ChunkDescriptor::from_block(&block, self.next_payload_offset)?;
-        self.next_payload_offset = descriptor.payload_end()?;
-        self.writer.write_all(block.data.as_slice())?;
-        self.pending_descriptors.push(descriptor);
-        self.blocks_written += 1;
+    fn pending_blocks(&self) -> usize {
+        Self::pending_blocks(self)
+    }
 
-        record_stage_telemetry(start.elapsed());
-        Ok(())
+    fn write_footer(self) -> Result<Self::InnerWriter> {
+        Self::write_footer(self)
     }
 }
 
@@ -599,7 +470,6 @@ fn validate_completion(
 }
 
 fn build_footer(
-    source_kind: ArchiveSourceKind,
     block_count: u32,
     entry_table_bytes: &[u8],
     descriptors: &[ChunkDescriptor],
@@ -628,19 +498,9 @@ fn build_footer(
             .ok_or(OxideError::InvalidFormat("chunk table length overflow"))?,
     )
     .map_err(|_| OxideError::InvalidFormat("chunk table length exceeds u32 range"))?;
-    let footer_offset = chunk_table_offset
+    let _footer_offset = chunk_table_offset
         .checked_add(chunk_table_len as u64)
         .ok_or(OxideError::InvalidFormat("footer offset overflow"))?;
-
-    let _header = GlobalHeader::new(
-        source_kind,
-        block_count,
-        entry_table_offset,
-        entry_table_len,
-        chunk_table_offset,
-        chunk_table_len,
-        footer_offset,
-    );
 
     Ok(Footer::new(
         block_count,

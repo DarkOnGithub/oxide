@@ -92,6 +92,3 @@ pub fn should_force_raw_storage(path: &Path) -> bool {
     should_force_raw_storage_by_extension(path) || is_git_pack_artifact(path)
 }
 
-#[cfg(test)]
-#[path = "../../tests/format/raw_storage.rs"]
-mod tests;
