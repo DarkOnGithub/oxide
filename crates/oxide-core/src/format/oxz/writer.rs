@@ -5,10 +5,12 @@ use std::time::Instant;
 use blake3::Hash as Blake3Hash;
 
 use crate::checksum::compute_checksum;
+use crate::compression::apply_compression;
 use crate::telemetry::{profile, tags};
 use crate::types::duration_to_us;
-use crate::{ArchiveSourceKind, CompressedBlock, OxideError, Result};
+use crate::{ArchiveSourceKind, CompressedBlock, CompressionAlgo, OxideError, Result};
 
+use super::headers::{FOOTER_FLAG_COMPRESSED_CHUNK_TABLE, FOOTER_FLAG_COMPRESSED_MANIFEST};
 use super::{
     ArchiveManifest, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT, Footer, GLOBAL_HEADER_SIZE,
     GlobalHeader, ReorderBuffer, encode_chunk_table,
@@ -270,16 +272,21 @@ impl<W: Write> ArchiveWriter<W> {
         )?;
 
         let finalize_started = Instant::now();
+        let chunk_table_raw_bytes = encode_chunk_table(&self.pending_descriptors)?;
+        let metadata = encode_metadata_sections(&self.entry_table_bytes, &chunk_table_raw_bytes)?;
         let footer = build_footer(
             self.expected_block_count.unwrap_or(0),
-            &self.entry_table_bytes,
+            metadata.entry_table_bytes.as_slice(),
+            metadata.chunk_table_bytes.as_slice(),
+            metadata.footer_flags,
             &self.pending_descriptors,
         )?;
 
         let chunk_table_started = Instant::now();
-        self.writer.write_all(&self.entry_table_bytes)?;
-        let chunk_table_bytes = encode_chunk_table(&self.pending_descriptors)?;
-        self.writer.write_all(&chunk_table_bytes)?;
+        self.writer
+            .write_all(metadata.entry_table_bytes.as_slice())?;
+        self.writer
+            .write_all(metadata.chunk_table_bytes.as_slice())?;
         footer.write(&mut self.writer)?;
 
         record_finalize_telemetry(chunk_table_started.elapsed(), finalize_started.elapsed());
@@ -472,6 +479,8 @@ fn validate_completion(
 fn build_footer(
     block_count: u32,
     entry_table_bytes: &[u8],
+    chunk_table_bytes: &[u8],
+    footer_flags: u16,
     descriptors: &[ChunkDescriptor],
 ) -> Result<Footer> {
     if descriptors.len() != block_count as usize {
@@ -491,13 +500,8 @@ fn build_footer(
     let chunk_table_offset = entry_table_offset
         .checked_add(entry_table_len as u64)
         .ok_or(OxideError::InvalidFormat("manifest offset overflow"))?;
-    let chunk_table_len = u32::try_from(
-        descriptors
-            .len()
-            .checked_mul(super::CHUNK_DESCRIPTOR_SIZE)
-            .ok_or(OxideError::InvalidFormat("chunk table length overflow"))?,
-    )
-    .map_err(|_| OxideError::InvalidFormat("chunk table length exceeds u32 range"))?;
+    let chunk_table_len = u32::try_from(chunk_table_bytes.len())
+        .map_err(|_| OxideError::InvalidFormat("chunk table length exceeds u32 range"))?;
     let _footer_offset = chunk_table_offset
         .checked_add(chunk_table_len as u64)
         .ok_or(OxideError::InvalidFormat("footer offset overflow"))?;
@@ -508,8 +512,50 @@ fn build_footer(
         entry_table_len,
         chunk_table_offset,
         chunk_table_len,
+        footer_flags,
         compute_checksum(&[]),
     ))
+}
+
+struct EncodedMetadataSections {
+    entry_table_bytes: Vec<u8>,
+    chunk_table_bytes: Vec<u8>,
+    footer_flags: u16,
+}
+
+fn encode_metadata_sections(
+    entry_table_bytes: &[u8],
+    chunk_table_bytes: &[u8],
+) -> Result<EncodedMetadataSections> {
+    let (entry_table_bytes, manifest_compressed) = maybe_compress_metadata(entry_table_bytes)?;
+    let (chunk_table_bytes, chunk_table_compressed) = maybe_compress_metadata(chunk_table_bytes)?;
+
+    let mut footer_flags = 0u16;
+    if manifest_compressed {
+        footer_flags |= FOOTER_FLAG_COMPRESSED_MANIFEST;
+    }
+    if chunk_table_compressed {
+        footer_flags |= FOOTER_FLAG_COMPRESSED_CHUNK_TABLE;
+    }
+
+    Ok(EncodedMetadataSections {
+        entry_table_bytes,
+        chunk_table_bytes,
+        footer_flags,
+    })
+}
+
+fn maybe_compress_metadata(bytes: &[u8]) -> Result<(Vec<u8>, bool)> {
+    if bytes.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+
+    let compressed = apply_compression(bytes, CompressionAlgo::Zstd)?;
+    if compressed.len() < bytes.len() {
+        Ok((compressed, true))
+    } else {
+        Ok((bytes.to_vec(), false))
+    }
 }
 
 fn archive_source_kind_from_flags(flags: u32) -> Result<ArchiveSourceKind> {

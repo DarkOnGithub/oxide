@@ -5,7 +5,7 @@ use std::time::Duration;
 use oxide_core::{
     ArchiveDictionaryMode, ArchiveEntryKind, ArchivePipeline, ArchivePipelineConfig,
     ArchiveProgressEvent, ArchiveReader, BufferPool, CHUNK_TABLE_HEADER_SIZE, ChunkingPolicy,
-    CompressionAlgo, DictionaryClass, ExtractProgressEvent, FOOTER_SIZE, ReportValue,
+    CompressionAlgo, DictionaryClass, ExtractProgressEvent, FOOTER_SIZE, Footer, ReportValue,
     RunTelemetryOptions, TelemetryEvent, TelemetrySink,
 };
 use tempfile::{NamedTempFile, TempDir};
@@ -661,6 +661,43 @@ fn directory_archive_roundtrip_restores_tree() -> Result<(), Box<dyn std::error:
     );
     assert!(out.path().join("empty/leaf").is_dir());
 
+    Ok(())
+}
+
+#[test]
+fn directory_dictionary_training_samples_beyond_file_heads()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    let random_head = build_incompressible_fixture(16 * 1024);
+    for index in 0..8 {
+        let mut data = random_head.clone();
+        let structured_tail = format!(
+            "{{\"file\":{index},\"kind\":\"config\",\"items\":[\"alpha\",\"beta\",\"gamma\"],\"enabled\":true}}\n"
+        )
+        .repeat(768)
+        .into_bytes();
+        data.extend_from_slice(&structured_tail);
+        write_directory_file(&source, &format!("configs/{index}.json"), &data)?;
+    }
+
+    let buffer_pool = Arc::new(BufferPool::new(32 * 1024, 128));
+    let pipeline = build_dictionary_pipeline(16 * 1024, 4, buffer_pool);
+    let archive = pipeline
+        .archive_directory(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let reader = ArchiveReader::new(Cursor::new(archive))?;
+    let dictionaries = reader.manifest().dictionary_bank().dictionaries();
+
+    assert!(!dictionaries.is_empty());
+    assert!(dictionaries.iter().any(|dictionary| {
+        dictionary.class == DictionaryClass::StructuredText && dictionary.sample_count > 0
+    }));
     Ok(())
 }
 
@@ -1417,8 +1454,16 @@ fn archive_writer_deduplicates_duplicate_blocks() -> Result<(), Box<dyn std::err
     let header = reader.global_header();
     let chunk_table = &archive[header.chunk_table_offset as usize
         ..(header.chunk_table_offset + u64::from(header.chunk_table_len)) as usize];
+    let chunk_table = if reader.footer().chunk_table_compressed() {
+        oxide_core::compression::zstd::reverse(
+            chunk_table,
+            Some(header.block_count as usize * oxide_core::CHUNK_DESCRIPTOR_SIZE),
+        )?
+    } else {
+        chunk_table.to_vec()
+    };
     let descriptors = oxide_core::format::oxz::decode_chunk_table(
-        chunk_table,
+        &chunk_table,
         header.payload_offset,
         header.block_count,
     )?;
@@ -1457,8 +1502,16 @@ fn precompression_raw_dedupe_emits_reference_blocks_without_writer_dedupe()
     let header = reader.global_header();
     let chunk_table = &archive[header.chunk_table_offset as usize
         ..(header.chunk_table_offset + u64::from(header.chunk_table_len)) as usize];
+    let chunk_table = if reader.footer().chunk_table_compressed() {
+        oxide_core::compression::zstd::reverse(
+            chunk_table,
+            Some(header.block_count as usize * oxide_core::CHUNK_DESCRIPTOR_SIZE),
+        )?
+    } else {
+        chunk_table.to_vec()
+    };
     let descriptors = oxide_core::format::oxz::decode_chunk_table(
-        chunk_table,
+        &chunk_table,
         header.payload_offset,
         header.block_count,
     )?;
@@ -1661,7 +1714,7 @@ fn extract_archive_ignores_footer_crc_mismatch() -> Result<(), Box<dyn std::erro
     let file = write_fixture(&data)?;
 
     let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
-    let pipeline = build_pipeline(8 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
+    let pipeline = build_pipeline(256 * 1024, 2, buffer_pool, CompressionAlgo::Lz4);
 
     let mut archive = pipeline
         .archive_path(
@@ -1698,9 +1751,38 @@ fn extract_archive_ignores_payload_checksum_mismatch() -> Result<(), Box<dyn std
         )?
         .writer;
     let reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
-    let payload_checksum_offset =
-        reader.global_header().chunk_table_offset as usize + CHUNK_TABLE_HEADER_SIZE + 8;
-    archive[payload_checksum_offset] ^= 0xA5;
+    let header = reader.global_header();
+    let footer = reader.footer();
+    let chunk_table_start = header.chunk_table_offset as usize;
+    let chunk_table_end = chunk_table_start + header.chunk_table_len as usize;
+
+    if footer.chunk_table_compressed() {
+        let mut raw_chunk_table = oxide_core::compression::zstd::reverse(
+            &archive[chunk_table_start..chunk_table_end],
+            Some(header.block_count as usize * oxide_core::CHUNK_DESCRIPTOR_SIZE),
+        )?;
+        raw_chunk_table[8] ^= 0xA5;
+        let encoded_chunk_table = oxide_core::compression::zstd::apply(&raw_chunk_table, None)?;
+
+        let mut rebuilt = Vec::with_capacity(archive.len() + encoded_chunk_table.len());
+        rebuilt.extend_from_slice(&archive[..chunk_table_start]);
+        rebuilt.extend_from_slice(&encoded_chunk_table);
+        Footer::new(
+            footer.block_count,
+            footer.entry_table_offset,
+            footer.entry_table_len,
+            footer.chunk_table_offset,
+            encoded_chunk_table.len() as u32,
+            footer.flags,
+            footer.global_crc32,
+        )
+        .write(&mut rebuilt)?;
+        archive = rebuilt;
+    } else {
+        let payload_checksum_offset =
+            header.chunk_table_offset as usize + CHUNK_TABLE_HEADER_SIZE + 8;
+        archive[payload_checksum_offset] ^= 0xA5;
+    }
 
     let (restored, _report) =
         pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
