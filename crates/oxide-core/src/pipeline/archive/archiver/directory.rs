@@ -1,4 +1,4 @@
-use crossbeam_channel::{bounded, select, Receiver, RecvTimeoutError, TryRecvError, TrySendError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, TrySendError, bounded, select};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -22,7 +22,7 @@ use crate::types::{Batch, ChunkEncodingPlan, CompressedBlock, Result};
 use super::super::telemetry::*;
 use super::super::types::*;
 use super::super::types::{CompressionTuning, PipelineQueueStats};
-use super::processing::{process_batch, ProcessBatchConfig};
+use super::processing::{ProcessBatchConfig, process_batch};
 use super::utils::*;
 
 const AUTO_DICTIONARY_MIN_DIRECTORY_FILES: usize = 8;
@@ -49,6 +49,8 @@ where
     let discovery = directory::discover_directory_tree(root)?;
     stage_timings.discovery += discovery_started.elapsed();
     let block_size = config.target_block_size;
+    let chunking_policy = config.chunking_policy;
+    let inflight_block_size = chunking_policy.max_size.max(block_size);
     let producer_compression_plan = ChunkEncodingPlan::new(config.compression_algo)
         .with_level(config.performance.compression_level)
         .with_lzma_extreme(config.performance.lzma_extreme)
@@ -62,7 +64,7 @@ where
         &discovery,
         &file_order,
         &file_probe_plans,
-        block_size,
+        chunking_policy,
         producer_compression_plan,
     )?;
     let dictionary_bank = train_directory_dictionary_bank(config, &discovery)?;
@@ -75,10 +77,10 @@ where
     let max_inflight_blocks = max_inflight_blocks(
         total_blocks,
         config.workers,
-        block_size,
+        inflight_block_size,
         &config.performance,
     );
-    let max_inflight_bytes = max_inflight_blocks.saturating_mul(block_size);
+    let max_inflight_bytes = max_inflight_blocks.saturating_mul(inflight_block_size);
 
     let worker_pool = WorkerPool::new(
         config.workers,
@@ -151,9 +153,10 @@ where
         })();
 
         if let Err(error) = &outcome
-            && let Ok(mut failure) = writer_failure_shared.lock() {
-                *failure = Some(error.to_string());
-            }
+            && let Ok(mut failure) = writer_failure_shared.lock()
+        {
+            *failure = Some(error.to_string());
+        }
 
         outcome
     });
@@ -184,15 +187,15 @@ where
         .iter()
         .map(|&index| file_probe_plans[index])
         .collect::<Vec<_>>();
-    let producer_block_size = block_size;
+    let producer_chunking_policy = chunking_policy;
     let stream_read_buffer_size = config.performance.directory_stream_read_buffer_size.max(1);
     let producer_threads = config.performance.producer_threads.max(1);
     let mmap_threshold = config.performance.directory_mmap_threshold_bytes.max(1);
 
     let producer_handle = thread::spawn(move || -> Result<DirectoryProducerOutcome> {
-        let mut submitter = DirectoryBatchSubmitter::new_with_plan(
+        let mut submitter = DirectoryBatchSubmitter::new_with_policy_and_plan(
             producer_root,
-            producer_block_size,
+            producer_chunking_policy,
             producer_compression_plan,
         );
         let mut producer_read = Duration::ZERO;

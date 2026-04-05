@@ -85,23 +85,24 @@ pub fn emit_archive_progress_if_due(ctx: ArchiveProgressCtx<'_>) {
         } else {
             input_done as f64 / ctx.output_bytes_completed as f64
         };
-        ctx.sink.on_event(TelemetryEvent::ArchiveProgress(ArchiveProgressEvent {
-            source_kind: ctx.source_kind,
-            elapsed,
-            input_bytes_total: ctx.input_bytes_total,
-            input_bytes_completed: input_done,
-            output_bytes_completed: ctx.output_bytes_completed,
-            read_avg_bps,
-            write_avg_bps,
-            compression_avg_bps: ctx.processing.compression_avg_bps(),
-            compression_wall_avg_bps: ctx.processing.compression_wall_avg_bps(elapsed),
-            output_input_ratio,
-            compression_ratio,
-            blocks_total: ctx.blocks_total,
-            blocks_completed: ctx.runtime.completed as u32,
-            blocks_pending: ctx.runtime.pending as u32,
-            runtime: ctx.runtime,
-        }));
+        ctx.sink
+            .on_event(TelemetryEvent::ArchiveProgress(ArchiveProgressEvent {
+                source_kind: ctx.source_kind,
+                elapsed,
+                input_bytes_total: ctx.input_bytes_total,
+                input_bytes_completed: input_done,
+                output_bytes_completed: ctx.output_bytes_completed,
+                read_avg_bps,
+                write_avg_bps,
+                compression_avg_bps: ctx.processing.compression_avg_bps(),
+                compression_wall_avg_bps: ctx.processing.compression_wall_avg_bps(elapsed),
+                output_input_ratio,
+                compression_ratio,
+                blocks_total: ctx.blocks_total,
+                blocks_completed: ctx.runtime.completed as u32,
+                blocks_pending: ctx.runtime.pending as u32,
+                runtime: ctx.runtime,
+            }));
         *ctx.last_emit_at = Instant::now();
     }
 }

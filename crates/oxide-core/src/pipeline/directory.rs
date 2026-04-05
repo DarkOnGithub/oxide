@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use memmap2::Mmap;
 
 use crate::dictionary::normalized_extension_from_path;
 use crate::format::should_force_raw_storage;
+use crate::io::{ChunkStreamState, ChunkingMode, ChunkingPolicy, MmapInput};
 use crate::types::{Batch, BatchData, ChunkEncodingPlan, CompressionAlgo, Result};
 
 use super::types::{ArchiveListingEntry, ArchiveSourceKind};
@@ -60,8 +62,9 @@ const DIRECTORY_FRAGMENT_MAX_FILE_SIZE: u64 = 256 * 1024;
 #[derive(Debug, Clone)]
 pub struct DirectoryBatchSubmitter {
     source_path: PathBuf,
-    block_size: usize,
+    chunking_policy: ChunkingPolicy,
     compression_plan: ChunkEncodingPlan,
+    chunker: ChunkStreamState,
     next_block_id: usize,
     pending: Vec<u8>,
     pending_force_raw_storage: Option<bool>,
@@ -79,12 +82,35 @@ impl DirectoryBatchSubmitter {
         block_size: usize,
         compression_plan: ChunkEncodingPlan,
     ) -> Self {
+        Self::new_with_policy_and_plan(
+            source_path,
+            ChunkingPolicy::fixed(block_size),
+            compression_plan,
+        )
+    }
+
+    pub fn new_with_policy(source_path: PathBuf, chunking_policy: ChunkingPolicy) -> Self {
+        Self::new_with_policy_and_plan(source_path, chunking_policy, ChunkEncodingPlan::default())
+    }
+
+    pub fn new_with_policy_and_plan(
+        source_path: PathBuf,
+        chunking_policy: ChunkingPolicy,
+        compression_plan: ChunkEncodingPlan,
+    ) -> Self {
+        let pending_capacity = match chunking_policy.mode {
+            ChunkingMode::Fixed => chunking_policy.target_size,
+            ChunkingMode::Cdc => chunking_policy.max_size,
+        }
+        .max(1);
+
         Self {
             source_path,
-            block_size: block_size.max(1),
+            chunking_policy,
             compression_plan,
+            chunker: ChunkStreamState::new(chunking_policy),
             next_block_id: 0,
-            pending: Vec::with_capacity(block_size.max(1)),
+            pending: Vec::with_capacity(pending_capacity),
             pending_force_raw_storage: None,
             pending_source_path: None,
             pending_extension: None,
@@ -102,6 +128,10 @@ impl DirectoryBatchSubmitter {
         P: AsRef<Path>,
         F: FnMut(Batch) -> Result<()>,
     {
+        if matches!(self.chunking_policy.mode, ChunkingMode::Cdc) {
+            return self.push_bytes_cdc(source_path, bytes, force_raw_storage, submit);
+        }
+
         let source_path = source_path.as_ref();
         let source_extension = if self.compression_plan.algo == CompressionAlgo::Zstd {
             normalized_extension_from_path(source_path)
@@ -117,12 +147,16 @@ impl DirectoryBatchSubmitter {
                 &mut submit,
             )?;
 
-            let room = self.block_size.saturating_sub(self.pending.len()).max(1);
+            let room = self
+                .chunking_policy
+                .target_size
+                .saturating_sub(self.pending.len())
+                .max(1);
             let take = room.min(bytes.len());
             self.pending.extend_from_slice(&bytes[..take]);
             bytes = &bytes[take..];
 
-            if self.pending.len() == self.block_size {
+            if self.pending.len() == self.chunking_policy.target_size {
                 self.flush_pending(&mut submit)?;
             }
         }
@@ -143,6 +177,15 @@ impl DirectoryBatchSubmitter {
         P: AsRef<Path>,
         F: FnMut(Batch) -> Result<()>,
     {
+        if matches!(self.chunking_policy.mode, ChunkingMode::Cdc) {
+            if end < start || end > map.len() {
+                return Err(crate::OxideError::InvalidFormat(
+                    "invalid mapped batch range",
+                ));
+            }
+            return self.push_bytes_cdc(source_path, &map[start..end], force_raw_storage, submit);
+        }
+
         let source_path = source_path.as_ref();
         let source_extension = if self.compression_plan.algo == CompressionAlgo::Zstd {
             normalized_extension_from_path(source_path)
@@ -165,20 +208,24 @@ impl DirectoryBatchSubmitter {
             )?;
 
             if !self.pending.is_empty() {
-                let room = self.block_size.saturating_sub(self.pending.len()).max(1);
+                let room = self
+                    .chunking_policy
+                    .target_size
+                    .saturating_sub(self.pending.len())
+                    .max(1);
                 let take = room.min(end - offset);
                 self.pending.extend_from_slice(&map[offset..offset + take]);
                 offset += take;
 
-                if self.pending.len() == self.block_size {
+                if self.pending.len() == self.chunking_policy.target_size {
                     self.flush_pending(&mut submit)?;
                 }
                 continue;
             }
 
             let remaining = end - offset;
-            if remaining >= self.block_size {
-                let batch_end = offset + self.block_size;
+            if remaining >= self.chunking_policy.target_size {
+                let batch_end = offset + self.chunking_policy.target_size;
                 self.submit_batch(
                     source_path.to_path_buf(),
                     BatchData::Mapped {
@@ -208,6 +255,48 @@ impl DirectoryBatchSubmitter {
         if !self.pending.is_empty() {
             self.flush_pending(&mut submit)?;
         }
+        Ok(())
+    }
+
+    fn push_bytes_cdc<P, F>(
+        &mut self,
+        source_path: P,
+        mut bytes: &[u8],
+        force_raw_storage: bool,
+        mut submit: F,
+    ) -> Result<()>
+    where
+        P: AsRef<Path>,
+        F: FnMut(Batch) -> Result<()>,
+    {
+        let source_path = source_path.as_ref();
+        let source_extension = if self.compression_plan.algo == CompressionAlgo::Zstd {
+            normalized_extension_from_path(source_path)
+        } else {
+            None
+        };
+
+        while !bytes.is_empty() {
+            self.prepare_pending_state(
+                source_path,
+                source_extension.as_deref(),
+                force_raw_storage,
+                &mut submit,
+            )?;
+
+            let take = self
+                .chunker
+                .consume_until_boundary(bytes)
+                .unwrap_or(bytes.len());
+            self.pending.extend_from_slice(&bytes[..take]);
+            let hit_boundary = self.chunker.current_chunk_len() == 0;
+            bytes = &bytes[take..];
+
+            if hit_boundary {
+                self.flush_pending(&mut submit)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -245,7 +334,7 @@ impl DirectoryBatchSubmitter {
     where
         F: FnMut(Batch) -> Result<()>,
     {
-        let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(self.block_size));
+        let chunk = std::mem::take(&mut self.pending);
         let source_path = self
             .pending_source_path
             .take()
@@ -256,9 +345,22 @@ impl DirectoryBatchSubmitter {
             self.pending_force_raw_storage.unwrap_or(false),
             submit,
         )?;
+        self.pending =
+            Vec::with_capacity(self.pending.capacity().max(self.pending_chunk_capacity()));
+        if self.chunker.current_chunk_len() > 0 {
+            self.chunker.force_boundary();
+        }
         self.pending_force_raw_storage = None;
         self.pending_extension = None;
         Ok(())
+    }
+
+    fn pending_chunk_capacity(&self) -> usize {
+        match self.chunking_policy.mode {
+            ChunkingMode::Fixed => self.chunking_policy.target_size,
+            ChunkingMode::Cdc => self.chunking_policy.max_size,
+        }
+        .max(1)
     }
 
     fn set_pending_source_path(&mut self, source_path: &Path, source_extension: Option<&str>) {
@@ -515,7 +617,7 @@ pub(super) fn estimate_directory_block_count_with_file_order(
     discovery: &DirectoryDiscovery,
     file_order: &[usize],
     file_probe_plans: &[FileProbePlan],
-    block_size: usize,
+    chunking_policy: ChunkingPolicy,
     compression_plan: ChunkEncodingPlan,
 ) -> Result<u32> {
     if discovery.files.len() != file_probe_plans.len() {
@@ -530,7 +632,32 @@ pub(super) fn estimate_directory_block_count_with_file_order(
         ));
     }
 
-    let mut planner = BlockCountPlanner::new_with_plan(block_size, compression_plan);
+    let mut planner =
+        BlockCountPlanner::new_with_policy_and_plan(chunking_policy, compression_plan);
+
+    if matches!(chunking_policy.mode, ChunkingMode::Fixed) {
+        for &file_index in file_order {
+            let file = discovery
+                .files
+                .get(file_index)
+                .ok_or(crate::OxideError::InvalidFormat(
+                    "directory file order index out of range",
+                ))?;
+            let file_size = usize::try_from(file.size)
+                .map_err(|_| crate::OxideError::InvalidFormat("file size exceeds usize range"))?;
+            planner.push_len(
+                &file.full_path,
+                file_size,
+                file_probe_plans[file_index].force_raw_storage,
+            );
+        }
+
+        return u32::try_from(planner.finish())
+            .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v2"));
+    }
+
+    let mut read_buffer = vec![0u8; chunking_policy.target_size.max(64 * 1024)];
+    let mmap_threshold = chunking_policy.target_size.max(1024 * 1024);
     for &file_index in file_order {
         let file = discovery
             .files
@@ -538,13 +665,30 @@ pub(super) fn estimate_directory_block_count_with_file_order(
             .ok_or(crate::OxideError::InvalidFormat(
                 "directory file order index out of range",
             ))?;
+        let force_raw_storage = file_probe_plans[file_index].force_raw_storage;
+
         let file_size = usize::try_from(file.size)
             .map_err(|_| crate::OxideError::InvalidFormat("file size exceeds usize range"))?;
-        planner.push_len(
-            &file.full_path,
-            file_size,
-            file_probe_plans[file_index].force_raw_storage,
-        );
+        if file_size == 0 {
+            continue;
+        }
+
+        if file_size >= mmap_threshold {
+            let mmap = MmapInput::open(&file.full_path)?;
+            if let Some(map) = mmap.mapping() {
+                planner.push_bytes(&file.full_path, &map[..], force_raw_storage);
+            }
+            continue;
+        }
+
+        let mut file_reader = fs::File::open(&file.full_path)?;
+        loop {
+            let read = file_reader.read(&mut read_buffer)?;
+            if read == 0 {
+                break;
+            }
+            planner.push_bytes(&file.full_path, &read_buffer[..read], force_raw_storage);
+        }
     }
 
     u32::try_from(planner.finish())
@@ -557,7 +701,6 @@ fn directory_fragment_file_size_threshold(block_size: usize) -> u64 {
         DIRECTORY_FRAGMENT_MAX_FILE_SIZE,
     )
 }
-
 
 fn metadata_mtime(metadata: &fs::Metadata) -> Result<super::types::ArchiveTimestamp> {
     Ok(super::types::ArchiveTimestamp::from_system_time(
@@ -607,7 +750,8 @@ fn metadata_gid(_: &fs::Metadata) -> u32 {
 
 #[derive(Debug, Clone)]
 pub struct BlockCountPlanner {
-    block_size: usize,
+    chunking_policy: ChunkingPolicy,
+    chunker: ChunkStreamState,
     blocks: usize,
     pending_len: usize,
     pending_force_raw_storage: Option<bool>,
@@ -618,9 +762,21 @@ impl BlockCountPlanner {
         Self::new_with_plan(block_size, ChunkEncodingPlan::default())
     }
 
-    pub fn new_with_plan(block_size: usize, _compression_plan: ChunkEncodingPlan) -> Self {
+    pub fn new_with_plan(block_size: usize, compression_plan: ChunkEncodingPlan) -> Self {
+        Self::new_with_policy_and_plan(ChunkingPolicy::fixed(block_size), compression_plan)
+    }
+
+    pub fn new_with_policy(chunking_policy: ChunkingPolicy) -> Self {
+        Self::new_with_policy_and_plan(chunking_policy, ChunkEncodingPlan::default())
+    }
+
+    pub fn new_with_policy_and_plan(
+        chunking_policy: ChunkingPolicy,
+        _compression_plan: ChunkEncodingPlan,
+    ) -> Self {
         Self {
-            block_size: block_size.max(1),
+            chunking_policy,
+            chunker: ChunkStreamState::new(chunking_policy),
             blocks: 0,
             pending_len: 0,
             pending_force_raw_storage: None,
@@ -631,24 +787,42 @@ impl BlockCountPlanner {
     where
         P: AsRef<Path>,
     {
+        if matches!(self.chunking_policy.mode, ChunkingMode::Cdc) {
+            self.push_repeated_byte_len(0, len, force_raw_storage);
+            return;
+        }
+
         while len > 0 {
-            match self.pending_force_raw_storage {
-                Some(current) if current != force_raw_storage => {
-                    self.flush_pending();
-                    self.pending_force_raw_storage = Some(force_raw_storage);
-                }
-                Some(_) => {}
-                None => {
-                    self.pending_force_raw_storage = Some(force_raw_storage);
-                }
-            }
-
-            let room = self.block_size.saturating_sub(self.pending_len).max(1);
+            self.prepare_pending_state(force_raw_storage);
+            let room = self
+                .chunking_policy
+                .target_size
+                .saturating_sub(self.pending_len)
+                .max(1);
             let take = room.min(len);
-            self.pending_len += take;
             len -= take;
+            self.pending_len += take;
 
-            if self.pending_len == self.block_size {
+            if self.pending_len == self.chunking_policy.target_size {
+                self.flush_pending();
+            }
+        }
+    }
+
+    pub fn push_bytes<P>(&mut self, _source_path: P, mut bytes: &[u8], force_raw_storage: bool)
+    where
+        P: AsRef<Path>,
+    {
+        while !bytes.is_empty() {
+            self.prepare_pending_state(force_raw_storage);
+            let take = self
+                .chunker
+                .consume_until_boundary(bytes)
+                .unwrap_or(bytes.len());
+            self.pending_len += take;
+            let hit_boundary = self.chunker.current_chunk_len() == 0;
+            bytes = &bytes[take..];
+            if hit_boundary {
                 self.flush_pending();
             }
         }
@@ -659,10 +833,42 @@ impl BlockCountPlanner {
         self.blocks
     }
 
+    fn prepare_pending_state(&mut self, force_raw_storage: bool) {
+        match self.pending_force_raw_storage {
+            Some(current) if current != force_raw_storage => {
+                self.flush_pending();
+                self.pending_force_raw_storage = Some(force_raw_storage);
+            }
+            Some(_) => {}
+            None => {
+                self.pending_force_raw_storage = Some(force_raw_storage);
+            }
+        }
+    }
+
+    fn push_repeated_byte_len(&mut self, byte: u8, mut len: usize, force_raw_storage: bool) {
+        const SCRATCH_LEN: usize = 4096;
+        let scratch = [byte; SCRATCH_LEN];
+
+        while len > 0 {
+            let take = len.min(SCRATCH_LEN);
+            self.push_bytes("", &scratch[..take], force_raw_storage);
+            len -= take;
+        }
+    }
+
     fn flush_pending(&mut self) {
         if self.pending_len > 0 {
             self.blocks += 1;
             self.pending_len = 0;
+            if self.chunker.current_chunk_len() > 0 {
+                self.chunker.force_boundary();
+            }
+            self.pending_force_raw_storage = None;
+        } else if self.chunker.current_chunk_len() > 0 {
+            self.chunker.force_boundary();
+            self.pending_force_raw_storage = None;
+        } else if self.pending_force_raw_storage.is_some() {
             self.pending_force_raw_storage = None;
         }
     }

@@ -14,7 +14,7 @@ use crate::types::{CompressedBlock, Result};
 use super::super::telemetry::*;
 use super::super::types::*;
 use super::super::types::{CompressionTuning, PipelineQueueStats};
-use super::processing::{process_batch, ProcessBatchConfig};
+use super::processing::{ProcessBatchConfig, process_batch};
 use super::utils::*;
 
 pub fn archive_prepared_with_writer<W, AW, F>(

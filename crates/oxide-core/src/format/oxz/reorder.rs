@@ -119,4 +119,3 @@ impl<T> ReorderBuffer<T> {
         self.pending_len
     }
 }
-

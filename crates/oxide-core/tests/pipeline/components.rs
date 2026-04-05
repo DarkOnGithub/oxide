@@ -1,10 +1,11 @@
+use oxide_core::ChunkingPolicy;
+use oxide_core::MmapInput;
 use oxide_core::pipeline::{
+    PipelinePerformanceOptions,
     archive::ArchivePipeline,
     directory::{BlockCountPlanner, DirectoryBatchSubmitter},
-    PipelinePerformanceOptions,
 };
 use oxide_core::types::{BatchData, ChunkEncodingPlan, CompressionAlgo};
-use oxide_core::MmapInput;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -269,5 +270,66 @@ mod directory_tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].source_path, PathBuf::from("root"));
         assert_eq!(batches[0].data.as_slice(), b"aaaabbbb");
+    }
+
+    #[test]
+    fn submitter_applies_cdc_across_file_boundaries() {
+        let policy = ChunkingPolicy::cdc(16, 8, 32);
+        let mut submitter = DirectoryBatchSubmitter::new_with_policy(PathBuf::from("root"), policy);
+        let mut batches = Vec::new();
+
+        submitter
+            .push_bytes("root/a.bin", b"abcdefgh", false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("first push should succeed");
+        submitter
+            .push_bytes("root/b.bin", b"ijklmnopqrstuvwx", false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("second push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert!(batches.len() >= 1);
+        assert_eq!(batches.iter().map(|batch| batch.len()).sum::<usize>(), 24);
+        assert_eq!(batches[0].data.as_slice()[..8], *b"abcdefgh");
+    }
+
+    #[test]
+    fn block_count_planner_matches_cdc_submitter_boundaries() {
+        let policy = ChunkingPolicy::cdc(16, 8, 32);
+        let mut planner = BlockCountPlanner::new_with_policy(policy);
+        planner.push_bytes("root/a.bin", b"abcdefgh", false);
+        planner.push_bytes("root/b.bin", b"ijklmnopqrstuvwx", false);
+
+        let mut submitter = DirectoryBatchSubmitter::new_with_policy(PathBuf::from("root"), policy);
+        let mut batches = Vec::new();
+        submitter
+            .push_bytes("root/a.bin", b"abcdefgh", false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("first push should succeed");
+        submitter
+            .push_bytes("root/b.bin", b"ijklmnopqrstuvwx", false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("second push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert_eq!(planner.finish(), batches.len());
     }
 }

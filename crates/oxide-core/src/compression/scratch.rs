@@ -69,7 +69,6 @@ pub(crate) struct ZstdScratch {
     output: Vec<u8>,
 }
 
-
 impl fmt::Debug for ZstdScratch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ZstdScratch")

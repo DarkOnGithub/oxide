@@ -558,4 +558,3 @@ fn zigzag_encode_i64(value: i64) -> u64 {
 fn zigzag_decode_i64(value: u64) -> i64 {
     ((value >> 1) as i64) ^ (-((value & 1) as i64))
 }
-
