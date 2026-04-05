@@ -1437,6 +1437,46 @@ fn archive_writer_deduplicates_duplicate_blocks() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+fn precompression_raw_dedupe_emits_reference_blocks_without_writer_dedupe()
+-> Result<(), Box<dyn std::error::Error>> {
+    let file = write_fixture(b"abcdabcd")?;
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let mut config = ArchivePipelineConfig::new(4, 2, buffer_pool, CompressionAlgo::Lz4);
+    config.performance.block_dedup_window_blocks = 0;
+    let pipeline = ArchivePipeline::new(config);
+
+    let archive = pipeline
+        .archive_path(
+            file.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let reader = ArchiveReader::new(Cursor::new(archive.clone()))?;
+    let header = reader.global_header();
+    let chunk_table = &archive[header.chunk_table_offset as usize
+        ..(header.chunk_table_offset + u64::from(header.chunk_table_len)) as usize];
+    let descriptors = oxide_core::format::oxz::decode_chunk_table(
+        chunk_table,
+        header.payload_offset,
+        header.block_count,
+    )?;
+
+    assert_eq!(descriptors.len(), 2);
+    assert_eq!(descriptors[0].reference_target, None);
+    assert_eq!(descriptors[1].reference_target, Some(0));
+    assert!(descriptors[0].encoded_len > 0);
+    assert_eq!(descriptors[1].encoded_len, 0);
+
+    let (restored, _report) =
+        pipeline.extract_archive(Cursor::new(archive), RunTelemetryOptions::default(), None)?;
+    assert_eq!(restored, b"abcdabcd");
+
+    Ok(())
+}
+
+#[test]
 fn imported_dictionary_bank_is_reused_without_training() -> Result<(), Box<dyn std::error::Error>> {
     let source = tempfile::tempdir()?;
     let base_root = source.path().join("seed");

@@ -14,7 +14,7 @@ use crate::types::{CompressedBlock, Result};
 use super::super::telemetry::*;
 use super::super::types::*;
 use super::super::types::{CompressionTuning, PipelineQueueStats};
-use super::processing::{ProcessBatchConfig, process_batch};
+use super::processing::{ProcessBatchConfig, process_batch, shared_raw_chunk_deduper};
 use super::utils::*;
 
 pub fn archive_prepared_with_writer<W, AW, F>(
@@ -58,14 +58,18 @@ where
     let processing_totals = Arc::new(ProcessingThroughputTotals::default());
     let raw_fallback_enabled = config.performance.raw_fallback_enabled;
     let skip_compression = config.skip_compression;
+    let raw_chunk_deduper =
+        shared_raw_chunk_deduper(config.performance.raw_chunk_dedup_window_blocks);
     let worker_processing_totals = Arc::clone(&processing_totals);
     let worker_dictionary_bank = Arc::clone(&dictionary_bank);
+    let worker_raw_chunk_deduper = Arc::clone(&raw_chunk_deduper);
     let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
         let config = ProcessBatchConfig {
             skip_compression,
             raw_fallback_enabled,
             dictionary_bank: worker_dictionary_bank.as_ref(),
             processing_totals: worker_processing_totals.as_ref(),
+            raw_chunk_deduper: Some(&worker_raw_chunk_deduper),
         };
         process_batch(batch, pool, compression, &config, scratch)
     });

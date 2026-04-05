@@ -1,5 +1,9 @@
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use blake3::Hash as Blake3Hash;
 
 use crate::buffer::BufferPool;
 use crate::compression::{
@@ -22,6 +26,75 @@ const ENTROPY_PROBE_MIN_SAMPLE_LEN: usize = 512;
 /// 8.0 = perfectly random; 7.5 is conservative enough to avoid false positives
 /// on highly compressible data while catching compressed/encrypted content.
 const ENTROPY_INCOMPRESSIBLE_THRESHOLD: f64 = 7.5;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RawChunkDedupeKey {
+    original_len: u64,
+    payload_hash: Blake3Hash,
+}
+
+impl RawChunkDedupeKey {
+    fn from_source(source: &[u8]) -> Self {
+        Self {
+            original_len: source.len() as u64,
+            payload_hash: blake3::hash(source),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RawChunkDeduper {
+    max_entries: usize,
+    entries: HashMap<RawChunkDedupeKey, usize>,
+    insertion_order: VecDeque<(RawChunkDedupeKey, usize)>,
+}
+
+impl RawChunkDeduper {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            max_entries,
+            entries: HashMap::new(),
+            insertion_order: VecDeque::new(),
+        }
+    }
+
+    fn find_reference(&mut self, block_id: usize, key: RawChunkDedupeKey) -> Result<Option<u32>> {
+        if self.max_entries == 0 {
+            return Ok(None);
+        }
+
+        if let Some(&canonical_block_id) = self.entries.get(&key) {
+            if canonical_block_id < block_id {
+                return u32::try_from(canonical_block_id)
+                    .map(Some)
+                    .map_err(|_| crate::OxideError::InvalidFormat("block id exceeds u32 range"));
+            }
+
+            if canonical_block_id == block_id {
+                return Ok(None);
+            }
+        }
+
+        self.entries.insert(key.clone(), block_id);
+        self.insertion_order.push_back((key, block_id));
+
+        while self.insertion_order.len() > self.max_entries {
+            if let Some((evicted_key, evicted_block_id)) = self.insertion_order.pop_front()
+                && self.entries.get(&evicted_key) == Some(&evicted_block_id)
+            {
+                self.entries.remove(&evicted_key);
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+pub(crate) type SharedRawChunkDeduper = Arc<Mutex<RawChunkDeduper>>;
+
+pub(crate) fn shared_raw_chunk_deduper(max_entries: usize) -> SharedRawChunkDeduper {
+    Arc::new(Mutex::new(RawChunkDeduper::new(max_entries)))
+}
 
 #[derive(Debug, Clone, Copy)]
 struct CompressionProbeConfig {
@@ -179,14 +252,15 @@ fn is_likely_incompressible_sample(
     Ok(true)
 }
 
-pub struct ProcessBatchConfig<'a> {
+pub(crate) struct ProcessBatchConfig<'a> {
     pub skip_compression: bool,
     pub raw_fallback_enabled: bool,
     pub dictionary_bank: &'a ArchiveDictionaryBank,
     pub processing_totals: &'a ProcessingThroughputTotals,
+    pub raw_chunk_deduper: Option<&'a SharedRawChunkDeduper>,
 }
 
-pub fn process_batch(
+pub(crate) fn process_batch(
     batch: Batch,
     pool: &BufferPool,
     _compression: CompressionAlgo,
@@ -204,6 +278,27 @@ pub fn process_batch(
     } = batch;
     let source_len = data.len();
     let source = data.as_slice();
+
+    if let Some(raw_chunk_deduper) = config.raw_chunk_deduper {
+        let raw_chunk_key = RawChunkDedupeKey::from_source(source);
+        let reference_target = raw_chunk_deduper
+            .lock()
+            .map_err(|_| {
+                crate::OxideError::CompressionError("raw chunk dedupe state poisoned".to_string())
+            })?
+            .find_reference(id, raw_chunk_key)?;
+        if let Some(reference_target) = reference_target {
+            config
+                .processing_totals
+                .record(source_len as u64, std::time::Duration::ZERO);
+            return Ok(CompressedBlock::reference(
+                id,
+                stream_id,
+                reference_target,
+                source_len as u64,
+            ));
+        }
+    }
 
     if force_raw_storage {
         config
@@ -338,4 +433,51 @@ pub fn select_stored_payload<'a>(
     let raw_passthrough = raw_fallback_enabled && compressed.len() >= source.len();
     let payload = if raw_passthrough { source } else { compressed };
     (payload, raw_passthrough)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_chunk_deduper_references_earlier_duplicate_blocks() {
+        let mut deduper = RawChunkDeduper::new(8);
+
+        assert_eq!(
+            deduper
+                .find_reference(0, RawChunkDedupeKey::from_source(b"abcd"))
+                .expect("first block"),
+            None
+        );
+        assert_eq!(
+            deduper
+                .find_reference(1, RawChunkDedupeKey::from_source(b"abcd"))
+                .expect("duplicate block"),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn raw_chunk_deduper_replaces_later_canonical_ids_with_earlier_ones() {
+        let mut deduper = RawChunkDeduper::new(8);
+
+        assert_eq!(
+            deduper
+                .find_reference(5, RawChunkDedupeKey::from_source(b"abcd"))
+                .expect("late block"),
+            None
+        );
+        assert_eq!(
+            deduper
+                .find_reference(2, RawChunkDedupeKey::from_source(b"abcd"))
+                .expect("earlier block"),
+            None
+        );
+        assert_eq!(
+            deduper
+                .find_reference(7, RawChunkDedupeKey::from_source(b"abcd"))
+                .expect("later duplicate"),
+            Some(2)
+        );
+    }
 }
