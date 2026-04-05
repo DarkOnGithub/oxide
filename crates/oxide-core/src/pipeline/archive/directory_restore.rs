@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
-use crossbeam_channel::{Receiver, Sender, bounded, never, unbounded};
+use crossbeam_channel::{Receiver, bounded, never, unbounded};
 use regex::RegexSet;
 
 use crate::OxideError;
@@ -29,9 +29,7 @@ const SMALL_OUTPUT_BUFFER_CAPACITY: usize = 64 * 1024;
 const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
 const MAX_METADATA_WORKERS: usize = 8;
 const MAX_PREPARED_ENTRY_WORKERS: usize = 8;
-const MAX_FILE_IO_WORKERS: usize = 8;
 const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 256;
-const FILE_IO_QUEUE_CAPACITY: usize = 64;
 const DIRECT_FILE_WRITE_MAX_BYTES: u64 = 32 * 1024;
 const SMALL_FILE_BUFFER_MAX_BYTES: u64 = 256 * 1024;
 const MEDIUM_FILE_BUFFER_MAX_BYTES: u64 = 1024 * 1024;
@@ -69,6 +67,16 @@ impl DirectoryRestoreStats {
         self.output_write += elapsed;
         self.output_create += elapsed;
         self.output_create_files += elapsed;
+    }
+
+    fn record_output_data(&mut self, elapsed: Duration) {
+        self.output_write += elapsed;
+        self.output_data += elapsed;
+    }
+
+    fn record_output_flush(&mut self, elapsed: Duration) {
+        self.output_write += elapsed;
+        self.output_flush += elapsed;
     }
 
     fn record_output_metadata_file(&mut self, elapsed: Duration) {
@@ -164,55 +172,10 @@ impl DirectoryExtractSelection {
 
 #[derive(Debug)]
 struct PendingFile {
-    file_id: usize,
-    worker_id: usize,
     remaining: u64,
     path: PathBuf,
     entry: crate::ArchiveListingEntry,
-}
-
-#[derive(Debug)]
-enum FileIoTask {
-    Open {
-        file_id: usize,
-        path: PathBuf,
-        entry_size: u64,
-    },
-    Data {
-        file_id: usize,
-        bytes: Vec<u8>,
-    },
-    Close {
-        file_id: usize,
-    },
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct FileIoStats {
-    output_create: Duration,
-    output_create_files: Duration,
-    output_data: Duration,
-    output_flush: Duration,
-}
-
-impl FileIoStats {
-    fn record_output_create_file(&mut self, elapsed: Duration) {
-        self.output_create += elapsed;
-        self.output_create_files += elapsed;
-    }
-
-    fn record_output_data(&mut self, elapsed: Duration) {
-        self.output_data += elapsed;
-    }
-
-    fn record_output_flush(&mut self, elapsed: Duration) {
-        self.output_flush += elapsed;
-    }
-}
-
-#[derive(Debug)]
-struct FileIoWorkerOutcome {
-    stats: FileIoStats,
+    writer: PendingFileWriter,
 }
 
 #[derive(Debug)]
@@ -256,16 +219,12 @@ pub(crate) struct DirectoryRestoreWriter {
     root: PathBuf,
     entry_count_total: usize,
     next_entry: usize,
-    next_file_id: usize,
-    next_file_io_worker: usize,
     pending_file: Option<PendingFile>,
     created_directories: HashSet<PathBuf>,
     pending_file_metadata: Vec<PendingMetadata>,
     pending_directory_metadata: Vec<PendingMetadata>,
     prepared_entry_rx: Receiver<Result<PreparedRestoreEntry>>,
     prepared_entry_handle: Option<thread::JoinHandle<Result<()>>>,
-    file_io_txs: Vec<Sender<FileIoTask>>,
-    file_io_handles: Vec<thread::JoinHandle<Result<FileIoWorkerOutcome>>>,
     stats: DirectoryRestoreStats,
 }
 
@@ -280,21 +239,16 @@ pub(crate) struct FilteredDirectoryRestoreWriter {
 impl DirectoryRestoreWriter {
     pub(crate) fn create(root: &Path, manifest: ArchiveManifest) -> Result<Self> {
         let entries = build_restore_entries(root, manifest)?;
-        let (file_io_txs, file_io_handles) = spawn_file_io_workers(entries.len());
         let mut writer = Self {
             root: root.to_path_buf(),
             entry_count_total: entries.len(),
             next_entry: 0,
-            next_file_id: 0,
-            next_file_io_worker: 0,
             pending_file: None,
             created_directories: HashSet::new(),
             pending_file_metadata: Vec::new(),
             pending_directory_metadata: Vec::new(),
             prepared_entry_rx: never(),
             prepared_entry_handle: None,
-            file_io_txs,
-            file_io_handles,
             stats: DirectoryRestoreStats::default(),
         };
         writer.ensure_directory_exists(root)?;
@@ -319,7 +273,6 @@ impl DirectoryRestoreWriter {
                 "directory restore ended before all entries completed",
             ));
         }
-        self.join_file_io_workers()?;
         self.finalize_file_metadata()?;
         self.finalize_directories()?;
         self.join_prepared_entries()?;
@@ -399,35 +352,24 @@ impl DirectoryRestoreWriter {
                     self.defer_directory_metadata(path, entry);
                 }
                 PreparedRestoreEntry::File { path, entry } => {
-                    let file_id = self.next_file_id;
-                    self.next_file_id = self.next_file_id.saturating_add(1);
-                    let worker_id = self.next_file_io_worker;
-                    self.next_file_io_worker = if self.file_io_txs.is_empty() {
-                        0
-                    } else {
-                        (self.next_file_io_worker + 1) % self.file_io_txs.len()
-                    };
-                    self.send_file_io_task(
-                        worker_id,
-                        FileIoTask::Open {
-                            file_id,
-                            path: path.clone(),
-                            entry_size: entry.size,
-                        },
-                    )?;
+                    let started = Instant::now();
+                    let file = fs::File::create(&path)?;
+                    self.stats.record_output_create_file(started.elapsed());
+                    let writer = PendingFileWriter::new(file, entry.size);
 
                     if entry.size == 0 {
-                        self.send_file_io_task(worker_id, FileIoTask::Close { file_id })?;
+                        let started = Instant::now();
+                        let _file = writer.into_inner()?;
+                        self.stats.record_output_flush(started.elapsed());
                         self.defer_file_metadata(path, entry);
                         continue;
                     }
 
                     self.pending_file = Some(PendingFile {
-                        file_id,
-                        worker_id,
                         remaining: entry.size,
                         path,
                         entry,
+                        writer,
                     });
                 }
                 PreparedRestoreEntry::Symlink {
@@ -471,61 +413,19 @@ impl DirectoryRestoreWriter {
         })?
     }
 
-    fn send_file_io_task(&self, worker_id: usize, task: FileIoTask) -> Result<()> {
-        let tx = self
-            .file_io_txs
-            .get(worker_id)
-            .ok_or(OxideError::InvalidFormat(
-                "directory restore file I/O worker index out of range",
-            ))?;
-        tx.send(task).map_err(|_| {
-            crate::OxideError::CompressionError(
-                "directory restore file I/O queue closed before completion".to_string(),
-            )
-        })
-    }
-
-    fn join_file_io_workers(&mut self) -> Result<()> {
-        self.file_io_txs.clear();
-
-        for handle in self.file_io_handles.drain(..) {
-            let outcome = handle.join().map_err(|payload| {
-                let details = if let Some(message) = payload.downcast_ref::<&str>() {
-                    (*message).to_string()
-                } else if let Some(message) = payload.downcast_ref::<String>() {
-                    message.clone()
-                } else {
-                    "unknown panic payload".to_string()
-                };
-                crate::OxideError::CompressionError(format!(
-                    "directory file I/O worker thread panicked: {details}"
-                ))
-            })??;
-
-            self.stats.output_write += outcome.stats.output_create;
-            self.stats.output_write += outcome.stats.output_data;
-            self.stats.output_write += outcome.stats.output_flush;
-            self.stats.output_create += outcome.stats.output_create;
-            self.stats.output_create_files += outcome.stats.output_create_files;
-            self.stats.output_data += outcome.stats.output_data;
-            self.stats.output_flush += outcome.stats.output_flush;
-        }
-
-        Ok(())
-    }
-
     fn finalize_pending_file(&mut self) -> Result<()> {
         let pending = self.pending_file.take().ok_or(OxideError::InvalidFormat(
             "directory restore missing pending file after write completion",
         ))?;
         let PendingFile {
-            file_id,
-            worker_id,
             path,
             entry,
+            writer,
             ..
         } = pending;
-        self.send_file_io_task(worker_id, FileIoTask::Close { file_id })?;
+        let started = Instant::now();
+        let _file = writer.into_inner()?;
+        self.stats.record_output_flush(started.elapsed());
         self.defer_file_metadata(path, entry);
         Ok(())
     }
@@ -616,76 +516,6 @@ fn available_prepared_entry_workers(item_count: usize) -> usize {
         .min(MAX_PREPARED_ENTRY_WORKERS)
         .min(item_count)
         .max(1)
-}
-
-fn available_file_io_workers(item_count: usize) -> usize {
-    thread::available_parallelism()
-        .unwrap_or(NonZeroUsize::MIN)
-        .get()
-        .min(MAX_FILE_IO_WORKERS)
-        .min(item_count.max(1))
-        .max(1)
-}
-
-fn spawn_file_io_workers(
-    item_count: usize,
-) -> (
-    Vec<Sender<FileIoTask>>,
-    Vec<thread::JoinHandle<Result<FileIoWorkerOutcome>>>,
-) {
-    let worker_count = available_file_io_workers(item_count);
-    let mut txs = Vec::with_capacity(worker_count);
-    let mut handles = Vec::with_capacity(worker_count);
-
-    for _ in 0..worker_count {
-        let (tx, rx) = bounded::<FileIoTask>(FILE_IO_QUEUE_CAPACITY);
-        txs.push(tx);
-        handles.push(thread::spawn(move || -> Result<FileIoWorkerOutcome> {
-            let mut files = BTreeMap::<usize, PendingFileWriter>::new();
-            let mut stats = FileIoStats::default();
-
-            while let Ok(task) = rx.recv() {
-                match task {
-                    FileIoTask::Open {
-                        file_id,
-                        path,
-                        entry_size,
-                    } => {
-                        let started = Instant::now();
-                        let file = fs::File::create(path)?;
-                        stats.record_output_create_file(started.elapsed());
-                        files.insert(file_id, PendingFileWriter::new(file, entry_size));
-                    }
-                    FileIoTask::Data { file_id, bytes } => {
-                        let writer = files.get_mut(&file_id).ok_or(OxideError::InvalidFormat(
-                            "directory restore file write received before open",
-                        ))?;
-                        let started = Instant::now();
-                        writer.write_all(&bytes)?;
-                        stats.record_output_data(started.elapsed());
-                    }
-                    FileIoTask::Close { file_id } => {
-                        let writer = files.remove(&file_id).ok_or(OxideError::InvalidFormat(
-                            "directory restore file close received before open",
-                        ))?;
-                        let started = Instant::now();
-                        let _file = writer.into_inner()?;
-                        stats.record_output_flush(started.elapsed());
-                    }
-                }
-            }
-
-            if !files.is_empty() {
-                return Err(OxideError::InvalidFormat(
-                    "directory restore file I/O workers closed with pending files",
-                ));
-            }
-
-            Ok(FileIoWorkerOutcome { stats })
-        }));
-    }
-
-    (txs, handles)
 }
 
 fn spawn_prepared_restore_entries(
@@ -915,25 +745,19 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
         self.stats.directory_decode += decode_started.elapsed();
 
         while !bytes.is_empty() {
-            let (worker_id, file_id, take, finished_file) = {
+            let (take, finished_file) = {
                 let pending = self.pending_file.as_mut().ok_or(OxideError::InvalidFormat(
                     "directory archive contains file data beyond manifest entries",
                 ))?;
 
                 let take = bytes.len().min(pending.remaining as usize);
-                let worker_id = pending.worker_id;
-                let file_id = pending.file_id;
                 pending.remaining -= take as u64;
-                (worker_id, file_id, take, pending.remaining == 0)
+                let started = Instant::now();
+                pending.writer.write_all(&bytes[..take])?;
+                self.stats.record_output_data(started.elapsed());
+                (take, pending.remaining == 0)
             };
 
-            self.send_file_io_task(
-                worker_id,
-                FileIoTask::Data {
-                    file_id,
-                    bytes: bytes[..take].to_vec(),
-                },
-            )?;
             self.stats.output_bytes_total =
                 self.stats.output_bytes_total.saturating_add(take as u64);
             bytes = &bytes[take..];
