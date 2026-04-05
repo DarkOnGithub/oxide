@@ -1,10 +1,13 @@
 use crate::{
     ArchiveDictionary, ArchiveDictionaryBank, ArchiveEntryKind, ArchiveListingEntry,
     ArchiveTimestamp, CompressionAlgo, DictionaryClass, OxideError, Result,
+    dictionary::DICTIONARY_SIGNATURE_LEN,
 };
 
-const MANIFEST_MAGIC: [u8; 4] = *b"OXM2";
+const MANIFEST_MAGIC_V2: [u8; 4] = *b"OXM2";
+const MANIFEST_MAGIC_V3: [u8; 4] = *b"OXM3";
 const MANIFEST_VERSION_V2: u8 = 2;
+const MANIFEST_VERSION_V3: u8 = 3;
 const DICTIONARY_CLASS_EXTENSION: u8 = 4;
 
 const ENTRY_FLAG_DIRECTORY: u8 = 1 << 0;
@@ -48,8 +51,8 @@ impl ArchiveManifest {
         self.dictionary_bank.validate()?;
 
         let mut out = Vec::new();
-        out.extend_from_slice(&MANIFEST_MAGIC);
-        out.push(MANIFEST_VERSION_V2);
+        out.extend_from_slice(&MANIFEST_MAGIC_V3);
+        out.push(MANIFEST_VERSION_V3);
         encode_varint(
             &mut out,
             u64::try_from(self.dictionary_bank.dictionaries().len())
@@ -60,6 +63,9 @@ impl ArchiveManifest {
             out.push(dictionary.id);
             out.push(dictionary.algo.to_flags());
             encode_dictionary_class(&mut out, &dictionary.class)?;
+            encode_varint(&mut out, dictionary.sample_count as u64);
+            encode_varint(&mut out, dictionary.sample_bytes as u64);
+            out.extend_from_slice(&dictionary.signature);
             encode_varint(
                 &mut out,
                 u64::try_from(dictionary.bytes.len()).map_err(|_| {
@@ -168,19 +174,25 @@ impl ArchiveManifest {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut cursor = 0usize;
-        if bytes.len() < MANIFEST_MAGIC.len() + 1 {
+        if bytes.len() < MANIFEST_MAGIC_V2.len() + 1 {
             return Err(OxideError::InvalidFormat("archive manifest is truncated"));
         }
-        if bytes[..MANIFEST_MAGIC.len()] != MANIFEST_MAGIC {
+        let mut magic = [0u8; 4];
+        magic.copy_from_slice(&bytes[..4]);
+        if magic != MANIFEST_MAGIC_V2 && magic != MANIFEST_MAGIC_V3 {
             return Err(OxideError::InvalidFormat("invalid archive manifest magic"));
         }
-        cursor += MANIFEST_MAGIC.len();
+        cursor += 4;
         let version = bytes[cursor];
         cursor += 1;
-        if version != MANIFEST_VERSION_V2 {
-            return Err(OxideError::InvalidFormat(
-                "unsupported archive manifest version",
-            ));
+        match (magic, version) {
+            (MANIFEST_MAGIC_V2, MANIFEST_VERSION_V2) | (MANIFEST_MAGIC_V3, MANIFEST_VERSION_V3) => {
+            }
+            _ => {
+                return Err(OxideError::InvalidFormat(
+                    "unsupported archive manifest version",
+                ));
+            }
         }
 
         let dictionary_count = decode_varint(bytes, &mut cursor)?;
@@ -199,6 +211,39 @@ impl ArchiveManifest {
             let algo = CompressionAlgo::from_flags(bytes[cursor + 1])?;
             cursor += 2;
             let class = decode_dictionary_class(bytes, &mut cursor)?;
+            let sample_count = if version >= MANIFEST_VERSION_V3 {
+                let value = decode_varint(bytes, &mut cursor)?;
+                u16::try_from(value).map_err(|_| {
+                    OxideError::InvalidFormat("manifest dictionary sample count exceeds u16 range")
+                })?
+            } else {
+                0
+            };
+            let sample_bytes = if version >= MANIFEST_VERSION_V3 {
+                let value = decode_varint(bytes, &mut cursor)?;
+                u32::try_from(value).map_err(|_| {
+                    OxideError::InvalidFormat("manifest dictionary sample bytes exceeds u32 range")
+                })?
+            } else {
+                0
+            };
+            let signature = if version >= MANIFEST_VERSION_V3 {
+                let signature_end = cursor.checked_add(DICTIONARY_SIGNATURE_LEN).ok_or(
+                    OxideError::InvalidFormat("manifest dictionary signature range overflow"),
+                )?;
+                if signature_end > bytes.len() {
+                    return Err(OxideError::InvalidFormat(
+                        "truncated archive dictionary signature",
+                    ));
+                }
+
+                let mut signature = [0u8; DICTIONARY_SIGNATURE_LEN];
+                signature.copy_from_slice(&bytes[cursor..signature_end]);
+                cursor = signature_end;
+                signature
+            } else {
+                [0u8; DICTIONARY_SIGNATURE_LEN]
+            };
 
             let dictionary_len = decode_varint(bytes, &mut cursor)?;
             let dictionary_len = usize::try_from(dictionary_len).map_err(|_| {
@@ -220,6 +265,9 @@ impl ArchiveManifest {
                 id,
                 algo,
                 class,
+                sample_count,
+                sample_bytes,
+                signature,
                 bytes: bytes[cursor..dictionary_end].to_vec(),
             });
             cursor = dictionary_end;
@@ -557,4 +605,62 @@ fn zigzag_encode_i64(value: i64) -> u64 {
 
 fn zigzag_decode_i64(value: u64) -> i64 {
     ((value >> 1) as i64) ^ (-((value & 1) as i64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_round_trips_dictionary_v3_metadata() {
+        let manifest = ArchiveManifest::new(vec![ArchiveListingEntry::file(
+            "nested/data.json".to_string(),
+            7,
+            0o640,
+            ArchiveTimestamp::default(),
+            1000,
+            100,
+            0,
+        )])
+        .with_dictionary_bank(
+            ArchiveDictionaryBank::new(vec![ArchiveDictionary {
+                id: 7,
+                algo: CompressionAlgo::Zstd,
+                class: DictionaryClass::Extension("json".to_string()),
+                sample_count: 23,
+                sample_bytes: 98_765,
+                signature: [7u8; DICTIONARY_SIGNATURE_LEN],
+                bytes: vec![1, 2, 3, 4],
+            }])
+            .expect("dictionary bank"),
+        );
+
+        let bytes = manifest.encode().expect("encode manifest");
+        let decoded = ArchiveManifest::decode(&bytes).expect("decode manifest");
+
+        assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn manifest_decodes_v2_dictionary_entries_without_v3_metadata() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MANIFEST_MAGIC_V2);
+        bytes.push(MANIFEST_VERSION_V2);
+        encode_varint(&mut bytes, 1);
+        bytes.push(5);
+        bytes.push(CompressionAlgo::Zstd.to_flags());
+        encode_dictionary_class(&mut bytes, &DictionaryClass::Extension("json".to_string()))
+            .expect("encode class");
+        encode_varint(&mut bytes, 3);
+        bytes.extend_from_slice(&[9, 8, 7]);
+        encode_varint(&mut bytes, 0);
+
+        let decoded = ArchiveManifest::decode(&bytes).expect("decode v2 manifest");
+        let dictionary = &decoded.dictionary_bank().dictionaries()[0];
+
+        assert_eq!(dictionary.id, 5);
+        assert_eq!(dictionary.sample_count, 0);
+        assert_eq!(dictionary.sample_bytes, 0);
+        assert_eq!(dictionary.signature, [0u8; DICTIONARY_SIGNATURE_LEN]);
+    }
 }

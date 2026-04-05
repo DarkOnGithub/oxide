@@ -2,9 +2,10 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 
+use crate::compression::{DecompressionRequest, reverse_compression_request};
 use crate::telemetry::{profile, tags};
 use crate::types::duration_to_us;
-use crate::{ArchiveSourceKind, OxideError, Result};
+use crate::{ArchiveSourceKind, CompressionAlgo, OxideError, Result};
 
 use super::{
     ArchiveManifest, ArchiveMetadata, ChunkDescriptor, Footer, GlobalHeader, decode_chunk_table,
@@ -12,6 +13,7 @@ use super::{
 
 const MAX_REFERENCE_TARGET_CACHE_ENTRIES: usize = 128;
 const MAX_REFERENCE_TARGET_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DECOMPRESSED_MANIFEST_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct ArchiveReader<R: Read + Seek> {
@@ -160,10 +162,13 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let metadata = ArchiveMetadata::from_header(global_header);
         let metadata_elapsed_us = duration_to_us(metadata_started.elapsed());
 
-        let manifest = Self::read_manifest(&mut reader, global_header)?;
+        reader.seek(SeekFrom::Start(global_header.footer_offset))?;
+        let footer = Footer::read(&mut reader)?;
+
+        let manifest = Self::read_manifest(&mut reader, global_header, footer)?;
 
         let chunk_table_started = Instant::now();
-        let chunk_descriptors = Self::read_chunk_table(&mut reader, global_header)?;
+        let chunk_descriptors = Self::read_chunk_table(&mut reader, global_header, footer)?;
         let chunk_table_elapsed_us = duration_to_us(chunk_table_started.elapsed());
 
         Self::validate_chunk_layout(
@@ -171,9 +176,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
             global_header,
             manifest.dictionary_bank(),
         )?;
-
-        reader.seek(SeekFrom::Start(global_header.footer_offset))?;
-        let footer = Footer::read(&mut reader)?;
 
         profile::event(
             tags::PROFILE_OXZ,
@@ -347,21 +349,57 @@ impl<R: Read + Seek> ArchiveReader<R> {
         Ok(())
     }
 
-    fn read_manifest(reader: &mut R, header: GlobalHeader) -> Result<ArchiveManifest> {
+    fn read_manifest(
+        reader: &mut R,
+        header: GlobalHeader,
+        footer: Footer,
+    ) -> Result<ArchiveManifest> {
         let len = usize::try_from(header.entry_table_len)
             .map_err(|_| OxideError::InvalidFormat("entry table length exceeds usize range"))?;
         let mut bytes = vec![0u8; len];
         reader.seek(SeekFrom::Start(header.entry_table_offset))?;
         reader.read_exact(&mut bytes)?;
+        if footer.manifest_compressed() {
+            if let Ok(Some(content_size)) = zstd::zstd_safe::get_frame_content_size(&bytes)
+                && content_size > MAX_DECOMPRESSED_MANIFEST_BYTES as u64
+            {
+                return Err(OxideError::InvalidFormat(
+                    "archive manifest decompressed size exceeds safety limit",
+                ));
+            }
+            bytes = reverse_compression_request(DecompressionRequest::new(
+                bytes.as_slice(),
+                CompressionAlgo::Zstd,
+            ))?;
+            if bytes.len() > MAX_DECOMPRESSED_MANIFEST_BYTES {
+                return Err(OxideError::InvalidFormat(
+                    "archive manifest decompressed size exceeds safety limit",
+                ));
+            }
+        }
         ArchiveManifest::decode(&bytes)
     }
 
-    fn read_chunk_table(reader: &mut R, header: GlobalHeader) -> Result<Vec<ChunkDescriptor>> {
+    fn read_chunk_table(
+        reader: &mut R,
+        header: GlobalHeader,
+        footer: Footer,
+    ) -> Result<Vec<ChunkDescriptor>> {
         let len = usize::try_from(header.chunk_table_len)
             .map_err(|_| OxideError::InvalidFormat("chunk table length exceeds usize range"))?;
         let mut bytes = vec![0u8; len];
         reader.seek(SeekFrom::Start(header.chunk_table_offset))?;
         reader.read_exact(&mut bytes)?;
+        if footer.chunk_table_compressed() {
+            let expected_len = usize::try_from(header.block_count)
+                .map_err(|_| OxideError::InvalidFormat("chunk count exceeds usize range"))?
+                .checked_mul(super::CHUNK_DESCRIPTOR_SIZE)
+                .ok_or(OxideError::InvalidFormat("chunk table length overflow"))?;
+            bytes = reverse_compression_request(
+                DecompressionRequest::new(bytes.as_slice(), CompressionAlgo::Zstd)
+                    .with_raw_len(expected_len),
+            )?;
+        }
         decode_chunk_table(&bytes, header.payload_offset, header.block_count)
     }
 

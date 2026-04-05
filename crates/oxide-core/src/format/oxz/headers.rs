@@ -10,6 +10,10 @@ use super::{
 
 const FOOTER_VERSION: u16 = 2;
 const COMPRESSION_FLAG_REFERENCE: u8 = 1 << 4;
+pub(crate) const FOOTER_FLAG_COMPRESSED_MANIFEST: u16 = 1 << 0;
+pub(crate) const FOOTER_FLAG_COMPRESSED_CHUNK_TABLE: u16 = 1 << 1;
+const SUPPORTED_FOOTER_FLAGS: u16 =
+    FOOTER_FLAG_COMPRESSED_MANIFEST | FOOTER_FLAG_COMPRESSED_CHUNK_TABLE;
 
 const HEADER_FLAG_DIRECTORY: u16 = 1 << 0;
 const HEADER_FLAG_PATH_PREFIX: u16 = 1 << 1;
@@ -435,12 +439,13 @@ impl Footer {
         entry_table_len: u32,
         chunk_table_offset: u64,
         chunk_table_len: u32,
+        flags: u16,
         global_crc32: u32,
     ) -> Self {
         Self {
             end_magic: OXZ_END_MAGIC,
             version: FOOTER_VERSION,
-            flags: 0,
+            flags,
             block_count,
             entry_table_offset,
             entry_table_len,
@@ -448,6 +453,14 @@ impl Footer {
             chunk_table_len,
             global_crc32,
         }
+    }
+
+    pub fn manifest_compressed(&self) -> bool {
+        self.flags & FOOTER_FLAG_COMPRESSED_MANIFEST != 0
+    }
+
+    pub fn chunk_table_compressed(&self) -> bool {
+        self.flags & FOOTER_FLAG_COMPRESSED_CHUNK_TABLE != 0
     }
 
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
@@ -488,7 +501,7 @@ impl Footer {
         }
 
         let flags = u16::from_le_bytes([bytes[6], bytes[7]]);
-        if flags != 0 {
+        if flags & !SUPPORTED_FOOTER_FLAGS != 0 {
             return Err(OxideError::InvalidFormat("invalid OXZ footer flags"));
         }
 

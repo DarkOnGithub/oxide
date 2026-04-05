@@ -116,7 +116,7 @@ fn compression_meta_flags_round_trip() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn footer_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let footer = Footer::new(3, 100, 20, 120, 42, 0xDEAD_BEEF);
+    let footer = Footer::new(3, 100, 20, 120, 42, 0, 0xDEAD_BEEF);
     let mut encoded = Vec::new();
     footer.write(&mut encoded)?;
     let decoded = Footer::read(&mut Cursor::new(encoded))?;
@@ -197,8 +197,16 @@ fn archive_writer_deduplicates_duplicate_blocks() -> Result<(), Box<dyn std::err
     let header = reader.global_header();
     let chunk_table = &archive[header.chunk_table_offset as usize
         ..(header.chunk_table_offset + u64::from(header.chunk_table_len)) as usize];
+    let chunk_table = if reader.footer().chunk_table_compressed() {
+        oxide_core::compression::zstd::reverse(
+            chunk_table,
+            Some(header.block_count as usize * CHUNK_DESCRIPTOR_SIZE),
+        )?
+    } else {
+        chunk_table.to_vec()
+    };
     let descriptors = oxide_core::format::oxz::decode_chunk_table(
-        chunk_table,
+        &chunk_table,
         header.payload_offset,
         header.block_count,
     )?;
@@ -246,8 +254,16 @@ fn seekable_archive_writer_deduplicates_duplicate_blocks() -> Result<(), Box<dyn
     let header = reader.global_header();
     let chunk_table = &archive[header.chunk_table_offset as usize
         ..(header.chunk_table_offset + u64::from(header.chunk_table_len)) as usize];
+    let chunk_table = if reader.footer().chunk_table_compressed() {
+        oxide_core::compression::zstd::reverse(
+            chunk_table,
+            Some(header.block_count as usize * CHUNK_DESCRIPTOR_SIZE),
+        )?
+    } else {
+        chunk_table.to_vec()
+    };
     let descriptors = oxide_core::format::oxz::decode_chunk_table(
-        chunk_table,
+        &chunk_table,
         header.payload_offset,
         header.block_count,
     )?;
@@ -279,8 +295,16 @@ fn archive_writer_can_disable_block_deduplication() -> Result<(), Box<dyn std::e
     let header = reader.global_header();
     let chunk_table = &archive[header.chunk_table_offset as usize
         ..(header.chunk_table_offset + u64::from(header.chunk_table_len)) as usize];
+    let chunk_table = if reader.footer().chunk_table_compressed() {
+        oxide_core::compression::zstd::reverse(
+            chunk_table,
+            Some(header.block_count as usize * CHUNK_DESCRIPTOR_SIZE),
+        )?
+    } else {
+        chunk_table.to_vec()
+    };
     let descriptors = oxide_core::format::oxz::decode_chunk_table(
-        chunk_table,
+        &chunk_table,
         header.payload_offset,
         header.block_count,
     )?;
@@ -359,4 +383,35 @@ fn reorder_buffer_enforces_capacity_and_duplicates() {
         err,
         OxideError::InvalidFormat("duplicate block id in reorder buffer")
     ));
+}
+
+#[test]
+fn archive_writer_compresses_manifest_and_chunk_table_metadata()
+-> Result<(), Box<dyn std::error::Error>> {
+    let entries = (0..256)
+        .map(|index| {
+            oxide_core::ArchiveListingEntry::file(
+                format!("nested/path/file-{index:04}.txt"),
+                6,
+                0o644,
+                oxide_core::ArchiveTimestamp::default(),
+                0,
+                0,
+                index as u64 * 6,
+            )
+        })
+        .collect::<Vec<_>>();
+    let manifest = oxide_core::ArchiveManifest::new(entries);
+    let mut writer = ArchiveWriter::with_manifest(Vec::new(), Some(manifest));
+    writer.write_global_header(256)?;
+    for index in 0..256 {
+        writer.write_block(&block(index, b"repeat", CompressionAlgo::Lz4))?;
+    }
+
+    let archive = writer.write_footer()?;
+    let reader = ArchiveReader::new(Cursor::new(archive))?;
+
+    assert!(reader.footer().manifest_compressed());
+    assert!(reader.footer().chunk_table_compressed());
+    Ok(())
 }
