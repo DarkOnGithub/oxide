@@ -31,6 +31,14 @@ use crate::telemetry::{ArchivePlanningCompleteEvent, TelemetryEvent};
 const AUTO_DICTIONARY_MIN_BATCHES: usize = 8;
 const AUTO_DICTIONARY_MAX_AVG_BATCH_BYTES: usize = 128 * 1024;
 
+fn writer_dedupe_window_blocks(config: &ArchivePipelineConfig) -> usize {
+    if config.performance.raw_chunk_dedup_window_blocks > 0 {
+        0
+    } else {
+        config.performance.block_dedup_window_blocks
+    }
+}
+
 pub struct Archiver<'a> {
     pub config: &'a ArchivePipelineConfig,
 }
@@ -66,7 +74,7 @@ impl<'a> Archiver<'a> {
                 blocks_total,
             },
         ));
-        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
+        let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
         self.archive_prepared_with_writer(
             prepared,
             writer,
@@ -110,7 +118,7 @@ impl<'a> Archiver<'a> {
                 blocks_total,
             },
         ));
-        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
+        let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
         self.archive_prepared_with_writer(
             prepared,
             writer,
@@ -136,7 +144,7 @@ impl<'a> Archiver<'a> {
         sink: &mut dyn TelemetrySink,
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
-        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
+        let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
         archive_directory_streaming_with_writer(
             self.config,
             root,
@@ -162,7 +170,7 @@ impl<'a> Archiver<'a> {
         sink: &mut dyn TelemetrySink,
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
-        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
+        let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
         archive_directory_streaming_with_writer(
             self.config,
             root,
@@ -189,7 +197,7 @@ impl<'a> Archiver<'a> {
         block_size: usize,
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
-        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
+        let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
         self.archive_prepared_with_writer(
             prepared,
             writer,
@@ -216,7 +224,7 @@ impl<'a> Archiver<'a> {
         block_size: usize,
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
-        let dedupe_window_blocks = self.config.performance.block_dedup_window_blocks;
+        let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
         self.archive_prepared_with_writer(
             prepared,
             writer,
