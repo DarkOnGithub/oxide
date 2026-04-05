@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 
@@ -9,6 +10,9 @@ use super::{
     ArchiveManifest, ArchiveMetadata, ChunkDescriptor, Footer, GlobalHeader, decode_chunk_table,
 };
 
+const MAX_REFERENCE_TARGET_CACHE_ENTRIES: usize = 128;
+const MAX_REFERENCE_TARGET_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug)]
 pub struct ArchiveReader<R: Read + Seek> {
     reader: R,
@@ -18,12 +22,132 @@ pub struct ArchiveReader<R: Read + Seek> {
     chunk_descriptors: Vec<ChunkDescriptor>,
     footer: Footer,
     sequential_extract_state: Option<SequentialExtractState>,
+    reference_target_cache: Option<ReferenceTargetCache>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct SequentialExtractState {
     next_block_index: u32,
     next_payload_offset: u64,
+}
+
+#[derive(Debug)]
+struct ReferenceTargetCache {
+    remaining_reference_counts: Vec<u32>,
+    entries: HashMap<u32, Vec<u8>>,
+    insertion_order: VecDeque<u32>,
+    cached_bytes_total: usize,
+}
+
+impl ReferenceTargetCache {
+    fn new(descriptors: &[ChunkDescriptor]) -> Option<Self> {
+        let mut remaining_reference_counts = vec![0u32; descriptors.len()];
+        for descriptor in descriptors {
+            let Some(reference_target) = descriptor.reference_target else {
+                continue;
+            };
+            let Ok(reference_target) = usize::try_from(reference_target) else {
+                return None;
+            };
+            let Some(count) = remaining_reference_counts.get_mut(reference_target) else {
+                return None;
+            };
+            *count = count.saturating_add(1);
+        }
+
+        if remaining_reference_counts.iter().all(|count| *count == 0) {
+            return None;
+        }
+
+        Some(Self {
+            remaining_reference_counts,
+            entries: HashMap::new(),
+            insertion_order: VecDeque::new(),
+            cached_bytes_total: 0,
+        })
+    }
+
+    fn has_pending_references(&self, index: u32) -> bool {
+        let Ok(index) = usize::try_from(index) else {
+            return false;
+        };
+
+        self.remaining_reference_counts
+            .get(index)
+            .copied()
+            .unwrap_or_default()
+            > 0
+    }
+
+    fn cached(&self, index: u32) -> Option<&[u8]> {
+        self.entries.get(&index).map(Vec::as_slice)
+    }
+
+    fn store(&mut self, index: u32, bytes: &[u8]) {
+        if !self.has_pending_references(index)
+            || self.entries.contains_key(&index)
+            || bytes.is_empty()
+            || bytes.len() > MAX_REFERENCE_TARGET_CACHE_BYTES
+        {
+            return;
+        }
+
+        while (!self.entries.is_empty())
+            && (self.entries.len() >= MAX_REFERENCE_TARGET_CACHE_ENTRIES
+                || self.cached_bytes_total.saturating_add(bytes.len())
+                    > MAX_REFERENCE_TARGET_CACHE_BYTES)
+        {
+            self.evict_oldest();
+        }
+
+        if self.entries.len() >= MAX_REFERENCE_TARGET_CACHE_ENTRIES
+            || self.cached_bytes_total.saturating_add(bytes.len())
+                > MAX_REFERENCE_TARGET_CACHE_BYTES
+        {
+            return;
+        }
+
+        self.cached_bytes_total = self.cached_bytes_total.saturating_add(bytes.len());
+        self.entries.insert(index, bytes.to_vec());
+        self.insertion_order.push_back(index);
+    }
+
+    fn consume_reference(&mut self, index: u32) {
+        let Ok(index_usize) = usize::try_from(index) else {
+            self.remove(index);
+            return;
+        };
+
+        let remaining = self
+            .remaining_reference_counts
+            .get_mut(index_usize)
+            .map(|count| {
+                *count = count.saturating_sub(1);
+                *count
+            })
+            .unwrap_or_default();
+
+        if remaining == 0 {
+            self.remove(index);
+        }
+    }
+
+    fn remove(&mut self, index: u32) {
+        if let Some(bytes) = self.entries.remove(&index) {
+            self.cached_bytes_total = self.cached_bytes_total.saturating_sub(bytes.len());
+        }
+        self.insertion_order
+            .retain(|cached_index| *cached_index != index);
+    }
+
+    fn evict_oldest(&mut self) {
+        while let Some(index) = self.insertion_order.pop_front() {
+            if let Some(bytes) = self.entries.remove(&index) {
+                self.cached_bytes_total = self.cached_bytes_total.saturating_sub(bytes.len());
+                break;
+            }
+        }
+    }
 }
 
 impl<R: Read + Seek> ArchiveReader<R> {
@@ -84,6 +208,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             chunk_descriptors,
             footer,
             sequential_extract_state: None,
+            reference_target_cache: None,
         })
     }
 
@@ -96,6 +221,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             next_block_index: 0,
             next_payload_offset: archive.global_header.payload_offset,
         });
+        archive.reference_target_cache = ReferenceTargetCache::new(&archive.chunk_descriptors);
         Ok(archive)
     }
 
@@ -147,25 +273,49 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let start = Instant::now();
         let descriptor = self.block_descriptor(index)?;
         let resolved = self.resolve_data_descriptor(index, descriptor)?;
-        let is_reference = descriptor.is_reference();
+        let sequentially_aligned = self.sequential_extract_state.map(|state| {
+            state.next_block_index == index
+                && state.next_payload_offset == descriptor.payload_offset
+        }) == Some(true);
+        let mut performed_io = true;
 
-        if self.sequential_extract_state.map(|state| {
-            state.next_block_index == index && state.next_payload_offset == resolved.payload_offset
-        }) != Some(true)
+        if let Some(reference_target) = descriptor.reference_target
+            && sequentially_aligned
+            && let Some(cached) = self
+                .reference_target_cache
+                .as_ref()
+                .and_then(|cache| cache.cached(reference_target))
         {
-            self.reader.seek(SeekFrom::Start(resolved.payload_offset))?;
+            buffer.clear();
+            buffer.extend_from_slice(cached);
+            performed_io = false;
         }
 
-        buffer.clear();
-        buffer.resize(resolved.encoded_len as usize, 0);
-        self.reader.read_exact(buffer.as_mut_slice())?;
+        if performed_io {
+            if descriptor.is_reference() || !sequentially_aligned {
+                self.reader.seek(SeekFrom::Start(resolved.payload_offset))?;
+            }
+
+            buffer.clear();
+            buffer.resize(resolved.encoded_len as usize, 0);
+            self.reader.read_exact(buffer.as_mut_slice())?;
+        }
+
+        if let Some(reference_target) = descriptor.reference_target {
+            if let Some(cache) = self.reference_target_cache.as_mut() {
+                cache.store(reference_target, buffer.as_slice());
+                cache.consume_reference(reference_target);
+            }
+        } else if let Some(cache) = self.reference_target_cache.as_mut() {
+            cache.store(index, buffer.as_slice());
+        }
 
         if let Some(state) = self.sequential_extract_state.as_mut() {
             state.next_block_index = index.saturating_add(1);
             state.next_payload_offset = descriptor.payload_end()?;
         }
 
-        if is_reference && self.sequential_extract_state.is_some() {
+        if descriptor.is_reference() && self.sequential_extract_state.is_some() && performed_io {
             self.reader
                 .seek(SeekFrom::Start(descriptor.payload_end()?))?;
         }
@@ -327,5 +477,300 @@ impl<R: Read + Seek> Iterator for BlockIterator<'_, R> {
         let current = self.next_index;
         self.next_index += 1;
         Some(self.reader.read_block(current))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::io::Cursor;
+    use std::rc::Rc;
+
+    use crate::{ArchiveWriter, CompressedBlock, CompressionAlgo, CompressionMeta};
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct SeekCountingCursor {
+        inner: Cursor<Vec<u8>>,
+        seek_count: Rc<Cell<usize>>,
+    }
+
+    impl SeekCountingCursor {
+        fn new(bytes: Vec<u8>) -> (Self, Rc<Cell<usize>>) {
+            let seek_count = Rc::new(Cell::new(0));
+            (
+                Self {
+                    inner: Cursor::new(bytes),
+                    seek_count: Rc::clone(&seek_count),
+                },
+                seek_count,
+            )
+        }
+    }
+
+    impl Read for SeekCountingCursor {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for SeekCountingCursor {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.seek_count.set(self.seek_count.get().saturating_add(1));
+            self.inner.seek(pos)
+        }
+    }
+
+    fn build_test_archive() -> Vec<u8> {
+        let mut writer = ArchiveWriter::with_manifest(Vec::new(), Some(ArchiveManifest::default()));
+        writer
+            .write_global_header_with_flags(2, 0)
+            .expect("test archive header should write");
+
+        let meta = CompressionMeta::new(CompressionAlgo::Lz4, true);
+        writer
+            .write_owned_block(CompressedBlock::with_compression_meta(
+                0,
+                b"alpha".to_vec(),
+                meta,
+                5,
+            ))
+            .expect("first test block should write");
+        writer
+            .write_owned_block(CompressedBlock::with_compression_meta(
+                1,
+                b"beta".to_vec(),
+                meta,
+                4,
+            ))
+            .expect("second test block should write");
+
+        writer
+            .write_footer()
+            .expect("test archive footer should write")
+    }
+
+    fn build_reference_test_archive() -> Vec<u8> {
+        let mut writer = ArchiveWriter::with_manifest(Vec::new(), Some(ArchiveManifest::default()));
+        writer
+            .write_global_header_with_flags(4, 0)
+            .expect("test archive header should write");
+
+        let meta = CompressionMeta::new(CompressionAlgo::Lz4, true);
+        writer
+            .write_owned_block(CompressedBlock::with_compression_meta(
+                0,
+                b"alpha".to_vec(),
+                meta,
+                5,
+            ))
+            .expect("first test block should write");
+        writer
+            .write_owned_block(CompressedBlock::with_compression_meta(
+                1,
+                b"beta".to_vec(),
+                meta,
+                4,
+            ))
+            .expect("second test block should write");
+        writer
+            .write_owned_block(CompressedBlock::reference(2, 0, 0, 5))
+            .expect("reference test block should write");
+        writer
+            .write_owned_block(CompressedBlock::with_compression_meta(
+                3,
+                b"gamma".to_vec(),
+                meta,
+                5,
+            ))
+            .expect("fourth test block should write");
+
+        writer
+            .write_footer()
+            .expect("test archive footer should write")
+    }
+
+    fn build_multi_reference_test_archive() -> Vec<u8> {
+        let mut writer = ArchiveWriter::with_manifest(Vec::new(), Some(ArchiveManifest::default()));
+        writer
+            .write_global_header_with_flags(5, 0)
+            .expect("test archive header should write");
+
+        let meta = CompressionMeta::new(CompressionAlgo::Lz4, true);
+        writer
+            .write_owned_block(CompressedBlock::with_compression_meta(
+                0,
+                b"alpha".to_vec(),
+                meta,
+                5,
+            ))
+            .expect("first test block should write");
+        writer
+            .write_owned_block(CompressedBlock::with_compression_meta(
+                1,
+                b"beta".to_vec(),
+                meta,
+                4,
+            ))
+            .expect("second test block should write");
+        writer
+            .write_owned_block(CompressedBlock::reference(2, 0, 0, 5))
+            .expect("first reference test block should write");
+        writer
+            .write_owned_block(CompressedBlock::reference(3, 0, 0, 5))
+            .expect("second reference test block should write");
+        writer
+            .write_owned_block(CompressedBlock::with_compression_meta(
+                4,
+                b"gamma".to_vec(),
+                meta,
+                5,
+            ))
+            .expect("fifth test block should write");
+
+        writer
+            .write_footer()
+            .expect("test archive footer should write")
+    }
+
+    #[test]
+    fn sequential_block_reads_reuse_buffer_without_extra_seeks() {
+        let archive_bytes = build_test_archive();
+
+        let (reader, seek_count) = SeekCountingCursor::new(archive_bytes);
+        let mut archive =
+            ArchiveReader::new_for_sequential_extract(reader).expect("archive should open");
+        let seek_count_after_open = seek_count.get();
+
+        let mut first_buffer = Vec::new();
+        let first: ChunkDescriptor = archive
+            .read_block_into(0, &mut first_buffer)
+            .expect("first block should read");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+        assert_eq!(first.encoded_len, 5);
+        assert_eq!(&first_buffer, b"alpha");
+
+        let mut buffer = Vec::with_capacity(16);
+        let second = archive
+            .read_block_into(1, &mut buffer)
+            .expect("second block should read");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+        assert_eq!(&buffer, b"beta");
+        assert_eq!(second.encoded_len, 4);
+        assert!(buffer.capacity() >= 16);
+    }
+
+    #[test]
+    fn sequential_reader_seeks_when_blocks_are_requested_out_of_order() {
+        let archive_bytes = build_test_archive();
+
+        let (reader, seek_count) = SeekCountingCursor::new(archive_bytes);
+        let mut archive =
+            ArchiveReader::new_for_sequential_extract(reader).expect("archive should open");
+        let seek_count_after_open = seek_count.get();
+
+        let mut buffer = Vec::new();
+        archive
+            .read_block_into(1, &mut buffer)
+            .expect("out-of-order block should read");
+
+        assert!(seek_count.get() > seek_count_after_open);
+        assert_eq!(&buffer, b"beta");
+    }
+
+    #[test]
+    fn sequential_reference_blocks_keep_cursor_aligned() {
+        let archive_bytes = build_reference_test_archive();
+
+        let (reader, seek_count) = SeekCountingCursor::new(archive_bytes);
+        let mut archive =
+            ArchiveReader::new_for_sequential_extract(reader).expect("archive should open");
+        let seek_count_after_open = seek_count.get();
+
+        let mut buffer = Vec::new();
+        archive
+            .read_block_into(0, &mut buffer)
+            .expect("first block should read");
+        assert_eq!(&buffer, b"alpha");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+
+        archive
+            .read_block_into(1, &mut buffer)
+            .expect("second block should read");
+        assert_eq!(&buffer, b"beta");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+
+        archive
+            .read_block_into(2, &mut buffer)
+            .expect("reference block should read");
+        assert_eq!(&buffer, b"alpha");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+
+        archive
+            .read_block_into(3, &mut buffer)
+            .expect("block after reference should read");
+        assert_eq!(&buffer, b"gamma");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+    }
+
+    #[test]
+    fn sequential_reference_cache_reuses_canonical_blocks_for_repeated_targets() {
+        let archive_bytes = build_multi_reference_test_archive();
+
+        let (reader, seek_count) = SeekCountingCursor::new(archive_bytes);
+        let mut archive =
+            ArchiveReader::new_for_sequential_extract(reader).expect("archive should open");
+        let seek_count_after_open = seek_count.get();
+
+        let mut buffer = Vec::new();
+
+        archive
+            .read_block_into(0, &mut buffer)
+            .expect("first block should read");
+        archive
+            .read_block_into(1, &mut buffer)
+            .expect("second block should read");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+
+        archive
+            .read_block_into(2, &mut buffer)
+            .expect("first reference block should read");
+        assert_eq!(&buffer, b"alpha");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+
+        archive
+            .read_block_into(3, &mut buffer)
+            .expect("second reference block should read");
+        assert_eq!(&buffer, b"alpha");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+
+        archive
+            .read_block_into(4, &mut buffer)
+            .expect("fifth block should read");
+        assert_eq!(&buffer, b"gamma");
+        assert_eq!(seek_count.get(), seek_count_after_open);
+    }
+
+    #[test]
+    fn reference_reads_cache_targets_even_when_canonical_block_is_skipped() {
+        let archive_bytes = build_multi_reference_test_archive();
+
+        let (reader, seek_count) = SeekCountingCursor::new(archive_bytes);
+        let mut archive =
+            ArchiveReader::new_for_sequential_extract(reader).expect("archive should open");
+
+        let mut buffer = Vec::new();
+        archive
+            .read_block_into(2, &mut buffer)
+            .expect("first reference block should read");
+        assert_eq!(&buffer, b"alpha");
+        let seek_count_after_first_reference = seek_count.get();
+
+        archive
+            .read_block_into(3, &mut buffer)
+            .expect("second reference block should read");
+        assert_eq!(&buffer, b"alpha");
+        assert_eq!(seek_count.get(), seek_count_after_first_reference);
     }
 }
