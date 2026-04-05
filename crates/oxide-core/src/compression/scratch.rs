@@ -6,6 +6,7 @@ use crate::{OxideError, Result};
 const MIN_RETAINED_OUTPUT_CAPACITY: usize = 256 * 1024;
 const LZMA_MAX_RETAINED_OUTPUT_CAPACITY: usize = 8 * 1024 * 1024;
 const ZSTD_MAX_RETAINED_OUTPUT_CAPACITY: usize = 8 * 1024 * 1024;
+const MAX_ZSTD_COMPRESSOR_CACHE_ENTRIES: usize = 256;
 
 #[inline]
 fn capped_retained_capacity(capacity: usize, max_retained: usize) -> usize {
@@ -52,6 +53,7 @@ impl LzmaScratch {
 }
 
 struct CachedZstdCompressor {
+    stream_id: u32,
     level: i32,
     dictionary_id: u8,
     compressor: zstd::bulk::Compressor<'static>,
@@ -83,14 +85,15 @@ impl ZstdScratch {
     pub(crate) fn compressor(
         &mut self,
         level: i32,
+        stream_id: u32,
         dictionary_id: u8,
         dictionary: Option<&[u8]>,
     ) -> Result<&mut zstd::bulk::Compressor<'static>> {
-        if let Some(index) = self
-            .compressors
-            .iter()
-            .position(|cached| cached.level == level && cached.dictionary_id == dictionary_id)
-        {
+        if let Some(index) = self.compressors.iter().position(|cached| {
+            cached.level == level
+                && cached.stream_id == stream_id
+                && cached.dictionary_id == dictionary_id
+        }) {
             return Ok(&mut self.compressors[index].compressor);
         }
 
@@ -101,7 +104,11 @@ impl ZstdScratch {
                         OxideError::CompressionError(format!("zstd compressor init failed: {err}"))
                     },
                 )?;
+            if self.compressors.len() >= MAX_ZSTD_COMPRESSOR_CACHE_ENTRIES {
+                self.compressors.remove(0);
+            }
             self.compressors.push(CachedZstdCompressor {
+                stream_id,
                 level,
                 dictionary_id,
                 compressor,

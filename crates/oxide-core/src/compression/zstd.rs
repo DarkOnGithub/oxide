@@ -19,24 +19,34 @@ fn resolve_level(level: Option<i32>) -> Result<i32> {
 
 pub fn apply(data: &[u8], level: Option<i32>) -> Result<Vec<u8>> {
     let mut scratch = ZstdScratch::default();
-    apply_with_scratch(data, level, 0, None, &mut scratch)
+    apply_with_scratch(data, level, 0, 0, None, &mut scratch)
 }
 
 pub(crate) fn apply_with_scratch(
     data: &[u8],
     level: Option<i32>,
+    stream_id: u32,
     dictionary_id: u8,
     dictionary: Option<&[u8]>,
     scratch: &mut ZstdScratch,
 ) -> Result<Vec<u8>> {
     let mut output = scratch.take_output();
-    apply_into_vec(data, level, dictionary_id, dictionary, scratch, &mut output)?;
+    apply_into_vec(
+        data,
+        level,
+        stream_id,
+        dictionary_id,
+        dictionary,
+        scratch,
+        &mut output,
+    )?;
     Ok(output)
 }
 
 pub(crate) fn apply_into_vec(
     data: &[u8],
     level: Option<i32>,
+    stream_id: u32,
     dictionary_id: u8,
     dictionary: Option<&[u8]>,
     scratch: &mut ZstdScratch,
@@ -49,7 +59,7 @@ pub(crate) fn apply_into_vec(
     }
 
     scratch
-        .compressor(resolve_level(level)?, dictionary_id, dictionary)?
+        .compressor(resolve_level(level)?, stream_id, dictionary_id, dictionary)?
         .compress_to_buffer(data, output)
         .map_err(|err| OxideError::CompressionError(format!("zstd encode failed: {err}")))?;
 

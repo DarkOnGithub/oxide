@@ -51,3 +51,16 @@ fn worker_slot_is_single_consumer() {
     assert!(first.is_some());
     assert!(second.is_none());
 }
+
+#[test]
+fn affine_submission_prefers_target_worker() {
+    let queue = Arc::new(WorkStealingQueue::new(2));
+    let worker0 = queue.worker(0).expect("worker 0 should exist");
+    let worker1 = queue.worker(1).expect("worker 1 should exist");
+
+    queue.submit_affine(1, 42usize);
+
+    assert_eq!(worker1.steal(), Some(42));
+    assert_eq!(worker0.steal(), None);
+    assert!(queue.is_empty());
+}

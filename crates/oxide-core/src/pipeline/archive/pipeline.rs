@@ -268,6 +268,48 @@ impl ArchivePipeline {
         Ok((payload, report))
     }
 
+    /// Extracts all block payload bytes from a file-backed OXZ archive using
+    /// parallel offset-based readers and returns a detailed report.
+    pub fn extract_archive_file(
+        &self,
+        file: std::fs::File,
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<(Vec<u8>, ExtractReport)> {
+        if !cfg!(any(unix, windows)) {
+            return self.extract_archive(file, options, sink);
+        }
+
+        tracing::info!("starting archive extraction");
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
+        begin_extract_run_telemetry();
+        let started_at = Instant::now();
+        let extractor = Extractor::new(self.num_workers, Arc::clone(&self.buffer_pool));
+        let mut decoded = extractor
+            .read_archive_payload_from_file_with_metrics(file, started_at, &options, sink)?;
+        let source_kind = directory::source_kind_from_flags(decoded.flags);
+        let extensions = extract_extensions_from_flags(decoded.flags);
+        let decoded_bytes_total = decoded.decoded_bytes_total;
+        let stage_timings = decoded.stage_timings;
+        let payload = std::mem::take(&mut decoded.payload);
+        let elapsed = started_at.elapsed();
+        record_extract_run_telemetry(elapsed, stage_timings);
+        let report = build_extract_report_helper(
+            elapsed,
+            decoded,
+            source_kind,
+            decoded_bytes_total,
+            decoded_bytes_total,
+            extensions,
+            options,
+        );
+
+        sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
+
+        Ok((payload, report))
+    }
+
     /// Extracts a directory tree archive produced by [`archive_directory`].
     pub fn extract_directory_archive<R, P>(
         &self,
@@ -288,6 +330,57 @@ impl ArchivePipeline {
         let extractor = Extractor::new(self.num_workers, Arc::clone(&self.buffer_pool));
         let restored = extractor.extract_directory_to_path_with_metrics(
             reader,
+            output_dir.as_ref(),
+            started_at,
+            &options,
+            sink,
+        )?;
+        let decoded = restored.decoded;
+        let mut extensions = extract_extensions_from_flags(decoded.flags);
+        extensions.insert(
+            "extract.directory_entries".to_string(),
+            crate::telemetry::ReportValue::U64(restored.entry_count),
+        );
+        let decoded_bytes_total = decoded.decoded_bytes_total;
+        let output_bytes_total = restored.output_bytes_total;
+        let stage_timings = decoded.stage_timings;
+
+        let elapsed = started_at.elapsed();
+        record_extract_run_telemetry(elapsed, stage_timings);
+        let report = build_extract_report_helper(
+            elapsed,
+            decoded,
+            ArchiveSourceKind::Directory,
+            decoded_bytes_total,
+            output_bytes_total,
+            extensions,
+            options,
+        );
+        sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
+        Ok(report)
+    }
+
+    /// Extracts a directory tree archive from a file-backed OXZ archive using
+    /// parallel offset-based readers.
+    pub fn extract_directory_archive_file<P: AsRef<Path>>(
+        &self,
+        file: std::fs::File,
+        output_dir: P,
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ExtractReport> {
+        if !cfg!(any(unix, windows)) {
+            return self.extract_directory_archive(file, output_dir, options, sink);
+        }
+
+        tracing::info!(output_dir = %output_dir.as_ref().display(), "starting directory archive extraction");
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
+        begin_extract_run_telemetry();
+        let started_at = Instant::now();
+        let extractor = Extractor::new(self.num_workers, Arc::clone(&self.buffer_pool));
+        let restored = extractor.extract_directory_to_path_from_file_with_metrics(
+            file,
             output_dir.as_ref(),
             started_at,
             &options,
@@ -393,6 +486,78 @@ impl ArchivePipeline {
         Ok(report)
     }
 
+    /// Extracts an archive from a file-backed OXZ source using parallel
+    /// offset-based readers.
+    pub fn extract_path_file<P: AsRef<Path>>(
+        &self,
+        mut file: std::fs::File,
+        output_path: P,
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ExtractReport> {
+        if !cfg!(any(unix, windows)) {
+            return self.extract_path(file, output_path, options, sink);
+        }
+
+        tracing::info!(output_path = %output_path.as_ref().display(), "starting path extraction");
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
+        begin_extract_run_telemetry();
+        let started_at = Instant::now();
+        let extractor = Extractor::new(self.num_workers, Arc::clone(&self.buffer_pool));
+        let source_kind = Extractor::probe_archive_source_kind(&mut file)?;
+        file.seek(SeekFrom::Start(0))?;
+
+        let decoded;
+        let mut extensions;
+        let output_bytes_total;
+        match source_kind {
+            ArchiveSourceKind::File => {
+                decoded = extractor.extract_file_to_path_from_file_with_metrics(
+                    file,
+                    output_path.as_ref(),
+                    started_at,
+                    &options,
+                    sink,
+                )?;
+                extensions = extract_extensions_from_flags(decoded.flags);
+                output_bytes_total = decoded.decoded_bytes_total;
+            }
+            ArchiveSourceKind::Directory => {
+                let restored = extractor.extract_directory_to_path_from_file_with_metrics(
+                    file,
+                    output_path.as_ref(),
+                    started_at,
+                    &options,
+                    sink,
+                )?;
+                decoded = restored.decoded;
+                extensions = extract_extensions_from_flags(decoded.flags);
+                extensions.insert(
+                    "extract.directory_entries".to_string(),
+                    crate::telemetry::ReportValue::U64(restored.entry_count),
+                );
+                output_bytes_total = restored.output_bytes_total;
+            }
+        }
+
+        let decoded_bytes_total = decoded.decoded_bytes_total;
+        let stage_timings = decoded.stage_timings;
+        let elapsed = started_at.elapsed();
+        record_extract_run_telemetry(elapsed, stage_timings);
+        let report = build_extract_report_helper(
+            elapsed,
+            decoded,
+            source_kind,
+            decoded_bytes_total,
+            output_bytes_total,
+            extensions,
+            options,
+        );
+        sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
+        Ok(report)
+    }
+
     /// Extracts only selected paths from a directory archive.
     ///
     /// Filters match archive-relative paths. Matching a directory path restores that
@@ -459,6 +624,93 @@ impl ArchivePipeline {
 
         let restored = extractor.extract_directory_to_path_filtered_with_metrics(
             reader,
+            output_path.as_ref(),
+            filters,
+            regex_filters,
+            started_at,
+            &options,
+            sink,
+        )?;
+        let decoded = restored.decoded;
+        let mut extensions = extract_extensions_from_flags(decoded.flags);
+        extensions.insert(
+            "extract.directory_entries".to_string(),
+            crate::telemetry::ReportValue::U64(restored.entry_count),
+        );
+        extensions.insert(
+            "extract.path_filters".to_string(),
+            crate::telemetry::ReportValue::U64(filters.len() as u64),
+        );
+        extensions.insert(
+            "extract.regex_filters".to_string(),
+            crate::telemetry::ReportValue::U64(regex_filters.len() as u64),
+        );
+        let decoded_bytes_total = decoded.decoded_bytes_total;
+        let output_bytes_total = restored.output_bytes_total;
+        let stage_timings = decoded.stage_timings;
+        let elapsed = started_at.elapsed();
+        record_extract_run_telemetry(elapsed, stage_timings);
+        let report = build_extract_report_helper(
+            elapsed,
+            decoded,
+            ArchiveSourceKind::Directory,
+            decoded_bytes_total,
+            output_bytes_total,
+            extensions,
+            options,
+        );
+        sink.on_event(TelemetryEvent::ExtractCompleted(report.clone()));
+        Ok(report)
+    }
+
+    /// Extracts only selected paths or regex-matching paths from a file-backed directory archive
+    /// using parallel offset-based readers.
+    pub fn extract_path_filtered_with_regex_file<P, S, T>(
+        &self,
+        mut file: std::fs::File,
+        output_path: P,
+        filters: &[S],
+        regex_filters: &[T],
+        options: RunTelemetryOptions,
+        sink: Option<&mut dyn TelemetrySink>,
+    ) -> Result<ExtractReport>
+    where
+        P: AsRef<Path>,
+        S: AsRef<str>,
+        T: AsRef<str>,
+    {
+        if !cfg!(any(unix, windows)) {
+            return self.extract_path_filtered_with_regex(
+                file,
+                output_path,
+                filters,
+                regex_filters,
+                options,
+                sink,
+            );
+        }
+
+        if filters.is_empty() && regex_filters.is_empty() {
+            return self.extract_path_file(file, output_path, options, sink);
+        }
+
+        tracing::info!(output_path = %output_path.as_ref().display(), filter_count = filters.len(), regex_filter_count = regex_filters.len(), "starting filtered path extraction");
+        let mut noop = NoopTelemetrySink;
+        let sink = sink.unwrap_or(&mut noop);
+        begin_extract_run_telemetry();
+        let started_at = Instant::now();
+        let extractor = Extractor::new(self.num_workers, Arc::clone(&self.buffer_pool));
+        let source_kind = Extractor::probe_archive_source_kind(&mut file)?;
+        file.seek(SeekFrom::Start(0))?;
+
+        if source_kind != ArchiveSourceKind::Directory {
+            return Err(crate::OxideError::InvalidFormat(
+                "path or regex filters require a directory archive",
+            ));
+        }
+
+        let restored = extractor.extract_directory_to_path_filtered_from_file_with_metrics(
+            file,
             output_path.as_ref(),
             filters,
             regex_filters,

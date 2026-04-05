@@ -129,6 +129,7 @@ struct WorkerPoolState {
     buffer_pool: Arc<BufferPool>,
     compression_algo: CompressionAlgo,
     telemetry: Arc<dyn WorkerTelemetry>,
+    num_workers: usize,
     started_at: Instant,
     accepting: AtomicBool,
     shutdown_requested: AtomicBool,
@@ -163,6 +164,7 @@ impl WorkerPoolState {
             buffer_pool,
             compression_algo,
             telemetry,
+            num_workers,
             started_at: Instant::now(),
             accepting: AtomicBool::new(true),
             shutdown_requested: AtomicBool::new(false),
@@ -245,7 +247,14 @@ impl WorkerPoolHandle {
         }
 
         self.state.submitted.fetch_add(1, Ordering::AcqRel);
-        self.state.queue.submit(batch);
+        if batch.stream_id != 0 {
+            self.state.queue.submit_affine(
+                batch.stream_id as usize % self.state.num_workers.max(1),
+                batch,
+            );
+        } else {
+            self.state.queue.submit(batch);
+        }
         Ok(())
     }
 

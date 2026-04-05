@@ -360,8 +360,51 @@ impl Extractor {
         let archive = ArchiveReader::new_for_sequential_extract(reader)?;
         let archive_read_elapsed = archive_started.elapsed();
         let writer = VecChunkWriter::default();
-        let (decoded, writer) = self.decode_archive_to_writer(
-            archive,
+        let (decoded, writer) = self.decode_archive_to_writer_with_backend(
+            SequentialDecodeReadBackend::new(archive),
+            archive_read_elapsed,
+            ExtractContext {
+                started_at,
+                options,
+                sink,
+            },
+            None,
+            writer,
+        )?;
+        let payload = writer.into_inner();
+        let payload_len = payload.len() as u64;
+        if payload_len != decoded.decoded_bytes_total {
+            return Err(crate::OxideError::InvalidFormat(
+                "decoded bytes mismatch after ordered write",
+            ));
+        }
+
+        Ok(DecodedArchivePayload {
+            flags: decoded.flags,
+            payload,
+            decoded_bytes_total: decoded.decoded_bytes_total,
+            archive_bytes_total: decoded.archive_bytes_total,
+            blocks_total: decoded.blocks_total,
+            workers: decoded.workers,
+            stage_timings: decoded.stage_timings,
+            pipeline_stats: decoded.pipeline_stats,
+        })
+    }
+
+    pub fn read_archive_payload_from_file_with_metrics(
+        &self,
+        file: fs::File,
+        started_at: Instant,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<DecodedArchivePayload> {
+        let archive_started = Instant::now();
+        let archive = ArchiveReader::new(file.try_clone()?)?;
+        let archive_read_elapsed = archive_started.elapsed();
+        let writer = VecChunkWriter::default();
+        let backend = ParallelFileDecodeReadBackend::new(archive, file)?;
+        let (decoded, writer) = self.decode_archive_to_writer_with_backend(
+            backend,
             archive_read_elapsed,
             ExtractContext {
                 started_at,
@@ -418,8 +461,71 @@ impl Extractor {
         }
 
         let writer = FileChunkWriter::create(output_path, entry)?;
-        let (mut decoded, mut writer) = self.decode_archive_to_writer(
-            archive,
+        let (mut decoded, mut writer) = self.decode_archive_to_writer_with_backend(
+            SequentialDecodeReadBackend::new(archive),
+            archive_read_elapsed,
+            ExtractContext {
+                started_at,
+                options,
+                sink,
+            },
+            None,
+            writer,
+        )?;
+        writer.flush_and_apply_metadata()?;
+        apply_file_restore_stats(&mut decoded.stage_timings, writer.stats());
+
+        if !matches!(
+            directory::source_kind_from_flags(decoded.flags),
+            ArchiveSourceKind::File
+        ) {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive is not a file payload",
+            ));
+        }
+
+        Ok(DecodedArchivePayload {
+            flags: decoded.flags,
+            payload: Vec::new(),
+            decoded_bytes_total: decoded.decoded_bytes_total,
+            archive_bytes_total: decoded.archive_bytes_total,
+            blocks_total: decoded.blocks_total,
+            workers: decoded.workers,
+            stage_timings: decoded.stage_timings,
+            pipeline_stats: decoded.pipeline_stats,
+        })
+    }
+
+    pub fn extract_file_to_path_from_file_with_metrics(
+        &self,
+        file: fs::File,
+        output_path: &Path,
+        started_at: Instant,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<DecodedArchivePayload> {
+        let archive_started = Instant::now();
+        let archive = ArchiveReader::new(file.try_clone()?)?;
+        let archive_read_elapsed = archive_started.elapsed();
+        if archive.source_kind() != ArchiveSourceKind::File {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive is not a file payload",
+            ));
+        }
+
+        let entry = archive.manifest().entries().first().cloned().ok_or(
+            crate::OxideError::InvalidFormat("file archive manifest is empty"),
+        )?;
+        if !matches!(entry.kind, crate::ArchiveEntryKind::File) {
+            return Err(crate::OxideError::InvalidFormat(
+                "file archive manifest does not describe a file entry",
+            ));
+        }
+
+        let writer = FileChunkWriter::create(output_path, entry)?;
+        let backend = ParallelFileDecodeReadBackend::new(archive, file)?;
+        let (mut decoded, mut writer) = self.decode_archive_to_writer_with_backend(
+            backend,
             archive_read_elapsed,
             ExtractContext {
                 started_at,
@@ -472,8 +578,60 @@ impl Extractor {
 
         let manifest = archive.manifest().clone();
         let writer = DirectoryRestoreWriter::create(output_path, manifest)?;
-        let (decoded, mut writer) = self.decode_archive_to_writer(
-            archive,
+        let (decoded, mut writer) = self.decode_archive_to_writer_with_backend(
+            SequentialDecodeReadBackend::new(archive),
+            archive_read_elapsed,
+            ExtractContext {
+                started_at,
+                options,
+                sink,
+            },
+            None,
+            writer,
+        )?;
+
+        let restore_stats = writer.finish()?;
+        let mut stage_timings = decoded.stage_timings;
+        apply_directory_restore_stats(&mut stage_timings, restore_stats);
+
+        Ok(DirectoryRestoreOutcome {
+            decoded: DecodedArchivePayload {
+                flags: decoded.flags,
+                payload: Vec::new(),
+                decoded_bytes_total: decoded.decoded_bytes_total,
+                archive_bytes_total: decoded.archive_bytes_total,
+                blocks_total: decoded.blocks_total,
+                workers: decoded.workers,
+                stage_timings,
+                pipeline_stats: decoded.pipeline_stats,
+            },
+            output_bytes_total: restore_stats.output_bytes_total,
+            entry_count: restore_stats.entry_count,
+        })
+    }
+
+    pub(crate) fn extract_directory_to_path_from_file_with_metrics(
+        &self,
+        file: fs::File,
+        output_path: &Path,
+        started_at: Instant,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<DirectoryRestoreOutcome> {
+        let archive_started = Instant::now();
+        let archive = ArchiveReader::new(file.try_clone()?)?;
+        let archive_read_elapsed = archive_started.elapsed();
+        if archive.source_kind() != ArchiveSourceKind::Directory {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive is not a directory payload",
+            ));
+        }
+
+        let manifest = archive.manifest().clone();
+        let writer = DirectoryRestoreWriter::create(output_path, manifest)?;
+        let backend = ParallelFileDecodeReadBackend::new(archive, file)?;
+        let (decoded, mut writer) = self.decode_archive_to_writer_with_backend(
+            backend,
             archive_read_elapsed,
             ExtractContext {
                 started_at,
@@ -521,6 +679,145 @@ struct DecodeResultContext<'a> {
     first_error: &'a mut Option<crate::OxideError>,
 }
 
+trait DecodeReadBackend: Send + 'static {
+    fn source_kind(&self) -> ArchiveSourceKind;
+
+    fn block_descriptors(&self) -> &[ChunkDescriptor];
+
+    fn global_header(&self) -> GlobalHeader;
+
+    fn dictionary_bank(&self) -> ArchiveDictionaryBank;
+
+    fn spawn(
+        self,
+        read_request_rx: Receiver<ReadRequest>,
+        task_tx: Sender<DecodeTask>,
+        result_tx: Sender<(usize, Duration, Result<DecodedBlock>)>,
+        buffer_pool: Arc<BufferPool>,
+        reader_threads: usize,
+    ) -> Vec<thread::JoinHandle<Result<()>>>;
+}
+
+struct SequentialDecodeReadBackend<R: Read + Seek> {
+    archive: ArchiveReader<R>,
+}
+
+impl<R: Read + Seek> SequentialDecodeReadBackend<R> {
+    fn new(archive: ArchiveReader<R>) -> Self {
+        Self { archive }
+    }
+}
+
+impl<R> DecodeReadBackend for SequentialDecodeReadBackend<R>
+where
+    R: Read + Seek + Send + 'static,
+{
+    fn source_kind(&self) -> ArchiveSourceKind {
+        self.archive.source_kind()
+    }
+
+    fn block_descriptors(&self) -> &[ChunkDescriptor] {
+        self.archive.block_descriptors()
+    }
+
+    fn global_header(&self) -> GlobalHeader {
+        self.archive.global_header()
+    }
+
+    fn dictionary_bank(&self) -> ArchiveDictionaryBank {
+        self.archive.manifest().dictionary_bank().clone()
+    }
+
+    fn spawn(
+        self,
+        read_request_rx: Receiver<ReadRequest>,
+        task_tx: Sender<DecodeTask>,
+        result_tx: Sender<(usize, Duration, Result<DecodedBlock>)>,
+        buffer_pool: Arc<BufferPool>,
+        _reader_threads: usize,
+    ) -> Vec<thread::JoinHandle<Result<()>>> {
+        vec![thread::spawn(move || {
+            spawn_io_reader(
+                self.archive,
+                read_request_rx,
+                task_tx,
+                result_tx,
+                buffer_pool,
+            )
+        })]
+    }
+}
+
+struct ParallelFileDecodeReadBackend {
+    archive: ArchiveReader<fs::File>,
+    file: Arc<fs::File>,
+    resolved_descriptors: Arc<Vec<ChunkDescriptor>>,
+}
+
+impl ParallelFileDecodeReadBackend {
+    fn new(archive: ArchiveReader<fs::File>, file: fs::File) -> Result<Self> {
+        let mut resolved_descriptors = Vec::with_capacity(archive.block_count() as usize);
+        for block_index in 0..archive.block_count() {
+            resolved_descriptors.push(archive.resolved_block_descriptor(block_index)?);
+        }
+
+        Ok(Self {
+            archive,
+            file: Arc::new(file),
+            resolved_descriptors: Arc::new(resolved_descriptors),
+        })
+    }
+}
+
+impl DecodeReadBackend for ParallelFileDecodeReadBackend {
+    fn source_kind(&self) -> ArchiveSourceKind {
+        self.archive.source_kind()
+    }
+
+    fn block_descriptors(&self) -> &[ChunkDescriptor] {
+        self.archive.block_descriptors()
+    }
+
+    fn global_header(&self) -> GlobalHeader {
+        self.archive.global_header()
+    }
+
+    fn dictionary_bank(&self) -> ArchiveDictionaryBank {
+        self.archive.manifest().dictionary_bank().clone()
+    }
+
+    fn spawn(
+        self,
+        read_request_rx: Receiver<ReadRequest>,
+        task_tx: Sender<DecodeTask>,
+        result_tx: Sender<(usize, Duration, Result<DecodedBlock>)>,
+        buffer_pool: Arc<BufferPool>,
+        reader_threads: usize,
+    ) -> Vec<thread::JoinHandle<Result<()>>> {
+        let reader_count = reader_threads.max(1);
+        let mut handles = Vec::with_capacity(reader_count);
+        for _ in 0..reader_count {
+            let local_rx = read_request_rx.clone();
+            let local_task_tx = task_tx.clone();
+            let local_result_tx = result_tx.clone();
+            let local_pool = Arc::clone(&buffer_pool);
+            let local_file = Arc::clone(&self.file);
+            let local_resolved = Arc::clone(&self.resolved_descriptors);
+            handles.push(thread::spawn(move || {
+                spawn_offset_io_reader(
+                    local_file,
+                    local_resolved,
+                    local_rx,
+                    local_task_tx,
+                    local_result_tx,
+                    local_pool,
+                )
+            }));
+        }
+        handles
+    }
+}
+
 impl Extractor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn extract_directory_to_path_filtered_with_metrics<R, S, T>(
@@ -556,8 +853,8 @@ impl Extractor {
         let manifest = selection.into_manifest();
         let writer =
             FilteredDirectoryRestoreWriter::create(output_path, manifest, projected_ranges)?;
-        let (decoded, mut writer) = self.decode_archive_to_writer(
-            archive,
+        let (decoded, mut writer) = self.decode_archive_to_writer_with_backend(
+            SequentialDecodeReadBackend::new(archive),
             archive_read_elapsed,
             ExtractContext {
                 started_at,
@@ -588,27 +885,93 @@ impl Extractor {
         })
     }
 
-    fn decode_archive_to_writer<R, W>(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn extract_directory_to_path_filtered_from_file_with_metrics<S, T>(
         &self,
-        archive: ArchiveReader<R>,
+        file: fs::File,
+        output_path: &Path,
+        filters: &[S],
+        regex_filters: &[T],
+        started_at: Instant,
+        options: &RunTelemetryOptions,
+        sink: &mut dyn TelemetrySink,
+    ) -> Result<DirectoryRestoreOutcome>
+    where
+        S: AsRef<str>,
+        T: AsRef<str>,
+    {
+        let archive_started = Instant::now();
+        let archive = ArchiveReader::new(file.try_clone()?)?;
+        let archive_read_elapsed = archive_started.elapsed();
+        if archive.source_kind() != ArchiveSourceKind::Directory {
+            return Err(crate::OxideError::InvalidFormat(
+                "archive is not a directory payload",
+            ));
+        }
+
+        let selection =
+            DirectoryExtractSelection::from_filters(archive.manifest(), filters, regex_filters)?;
+        let selected_ranges = selection.selected_ranges().to_vec();
+        let decode_plan = DecodePlan::from_ranges(archive.block_descriptors(), &selected_ranges);
+        let projected_ranges =
+            decode_plan.project_ranges(archive.block_descriptors(), &selected_ranges);
+        let manifest = selection.into_manifest();
+        let writer =
+            FilteredDirectoryRestoreWriter::create(output_path, manifest, projected_ranges)?;
+        let backend = ParallelFileDecodeReadBackend::new(archive, file)?;
+        let (decoded, mut writer) = self.decode_archive_to_writer_with_backend(
+            backend,
+            archive_read_elapsed,
+            ExtractContext {
+                started_at,
+                options,
+                sink,
+            },
+            Some(&selected_ranges),
+            writer,
+        )?;
+
+        let restore_stats = writer.finish()?;
+        let mut stage_timings = decoded.stage_timings;
+        apply_directory_restore_stats(&mut stage_timings, restore_stats);
+
+        Ok(DirectoryRestoreOutcome {
+            decoded: DecodedArchivePayload {
+                flags: decoded.flags,
+                payload: Vec::new(),
+                decoded_bytes_total: decoded.decoded_bytes_total,
+                archive_bytes_total: decoded.archive_bytes_total,
+                blocks_total: decoded.blocks_total,
+                workers: decoded.workers,
+                stage_timings,
+                pipeline_stats: decoded.pipeline_stats,
+            },
+            output_bytes_total: restore_stats.output_bytes_total,
+            entry_count: restore_stats.entry_count,
+        })
+    }
+
+    fn decode_archive_to_writer_with_backend<W, B>(
+        &self,
+        backend: B,
         archive_read_elapsed: Duration,
         ctx: ExtractContext<'_>,
         selected_ranges: Option<&[Range<u64>]>,
         writer: W,
     ) -> Result<(DecodeStreamOutcome, W)>
     where
-        R: Read + Seek + Send + 'static,
         W: OrderedChunkWriter + Send + 'static,
+        B: DecodeReadBackend,
     {
         let mut stage_timings = ExtractStageTimings::default();
         stage_timings.archive_read += archive_read_elapsed;
-        let source_kind = archive.source_kind();
+        let source_kind = backend.source_kind();
         let flags = directory::source_kind_flags(source_kind);
-        let block_descriptors = archive.block_descriptors().to_vec();
-        let archive_header = archive.global_header();
+        let block_descriptors = backend.block_descriptors().to_vec();
+        let archive_header = backend.global_header();
         let decode_plan = match selected_ranges {
             Some(ranges) => DecodePlan::from_ranges(&block_descriptors, ranges),
-            None => DecodePlan::all(archive.block_count() as usize),
+            None => DecodePlan::all(block_descriptors.len()),
         };
         let block_capacity = decode_plan.block_count();
         let worker_count = self.num_workers.max(1);
@@ -632,19 +995,15 @@ impl Extractor {
             reorder_pending_limit,
             block_capacity,
         );
-        let dictionary_bank = Arc::new(archive.manifest().dictionary_bank().clone());
+        let dictionary_bank = Arc::new(backend.dictionary_bank());
         let reader_buffer_pool = Arc::clone(&self.buffer_pool);
-        let reader_task_tx = task_tx.clone();
-        let reader_result_tx = result_tx.clone();
-        let io_reader_handle = thread::spawn(move || -> Result<()> {
-            spawn_io_reader(
-                archive,
-                read_request_rx,
-                reader_task_tx,
-                reader_result_tx,
-                reader_buffer_pool,
-            )
-        });
+        let reader_handles = backend.spawn(
+            read_request_rx,
+            task_tx.clone(),
+            result_tx.clone(),
+            reader_buffer_pool,
+            worker_count,
+        );
 
         for worker_id in 0..worker_count {
             let local_task_rx = task_rx.clone();
@@ -893,7 +1252,7 @@ impl Extractor {
         drop(ordered_write_tx);
         drop(result_rx);
 
-        let io_reader_result = join_io_reader(io_reader_handle);
+        let io_reader_result = join_io_readers(reader_handles);
         let workers_result = join_decode_workers(worker_handles);
         let ordered_writer_result = join_ordered_writer(ordered_writer_handle);
 
@@ -1105,6 +1464,63 @@ where
     archive.finish_sequential_extract_validation()
 }
 
+fn spawn_offset_io_reader(
+    file: Arc<fs::File>,
+    resolved_descriptors: Arc<Vec<ChunkDescriptor>>,
+    read_request_rx: Receiver<ReadRequest>,
+    task_tx: Sender<DecodeTask>,
+    result_tx: Sender<(usize, Duration, Result<DecodedBlock>)>,
+    buffer_pool: Arc<BufferPool>,
+) -> Result<()> {
+    while let Ok(request) = read_request_rx.recv() {
+        let read_started = Instant::now();
+        let header = *resolved_descriptors
+            .get(request.block_index as usize)
+            .ok_or(crate::OxideError::InvalidFormat(
+                "decode read block index out of range",
+            ))?;
+        let mut block_data = buffer_pool.acquire_with_capacity(header.encoded_len as usize);
+        block_data
+            .as_mut_vec()
+            .resize(header.encoded_len as usize, 0);
+        let read_result = read_exact_file_at(
+            file.as_ref(),
+            header.payload_offset,
+            block_data.as_mut_vec().as_mut_slice(),
+        )
+        .map_err(crate::OxideError::from);
+        let read_elapsed = read_started.elapsed();
+
+        match read_result {
+            Ok(()) => {
+                task_tx
+                    .send(DecodeTask {
+                        index: request.index,
+                        header,
+                        block_data,
+                        read_elapsed,
+                    })
+                    .map_err(|_| {
+                        crate::OxideError::CompressionError(
+                            "decode queue closed before I/O submission completed".to_string(),
+                        )
+                    })?;
+            }
+            Err(error) => {
+                result_tx
+                    .send((request.index, read_elapsed, Err(error)))
+                    .map_err(|_| {
+                        crate::OxideError::CompressionError(
+                            "decode result channel closed before I/O error delivery".to_string(),
+                        )
+                    })?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn receive_decode_result(
     result_rx: &Receiver<(usize, Duration, Result<DecodedBlock>)>,
     ctx: &mut DecodeResultContext<'_>,
@@ -1226,6 +1642,53 @@ fn abort_ordered_writer(
     }
 }
 
+#[cfg(unix)]
+fn read_exact_file_at(file: &fs::File, mut offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::FileExt;
+
+    let mut filled = 0usize;
+    while filled < buffer.len() {
+        let read = file.read_at(&mut buffer[filled..], offset)?;
+        if read == 0 {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "unexpected EOF while reading archive block",
+            ));
+        }
+        filled += read;
+        offset = offset.saturating_add(read as u64);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_exact_file_at(file: &fs::File, mut offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::os::windows::fs::FileExt;
+
+    let mut filled = 0usize;
+    while filled < buffer.len() {
+        let read = file.seek_read(&mut buffer[filled..], offset)?;
+        if read == 0 {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "unexpected EOF while reading archive block",
+            ));
+        }
+        filled += read;
+        offset = offset.saturating_add(read as u64);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_exact_file_at(_file: &fs::File, _offset: u64, _buffer: &mut [u8]) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "parallel offset reads are not supported on this platform",
+    ))
+}
+
 fn join_decode_workers(
     handles: Vec<thread::JoinHandle<DecodeWorkerOutcome>>,
 ) -> Result<Vec<WorkerRuntimeSnapshot>> {
@@ -1261,17 +1724,20 @@ fn join_decode_workers(
     Ok(workers)
 }
 
-fn join_io_reader(handle: thread::JoinHandle<Result<()>>) -> Result<()> {
-    handle.join().map_err(|payload| {
-        let details = if let Some(message) = payload.downcast_ref::<&str>() {
-            (*message).to_string()
-        } else if let Some(message) = payload.downcast_ref::<String>() {
-            message.clone()
-        } else {
-            "unknown panic payload".to_string()
-        };
-        crate::OxideError::CompressionError(format!("I/O reader thread panicked: {details}"))
-    })?
+fn join_io_readers(handles: Vec<thread::JoinHandle<Result<()>>>) -> Result<()> {
+    for handle in handles {
+        handle.join().map_err(|payload| {
+            let details = if let Some(message) = payload.downcast_ref::<&str>() {
+                (*message).to_string()
+            } else if let Some(message) = payload.downcast_ref::<String>() {
+                message.clone()
+            } else {
+                "unknown panic payload".to_string()
+            };
+            crate::OxideError::CompressionError(format!("I/O reader thread panicked: {details}"))
+        })??;
+    }
+    Ok(())
 }
 
 fn spawn_ordered_writer<W>(

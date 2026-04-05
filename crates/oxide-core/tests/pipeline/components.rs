@@ -237,6 +237,7 @@ mod directory_tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].source_path, PathBuf::from("root/a.json"));
         assert_eq!(batches[0].data.as_slice(), b"aaaabbbb");
+        assert_eq!(batches[0].stream_id, 1);
     }
 
     #[test]
@@ -270,6 +271,37 @@ mod directory_tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].source_path, PathBuf::from("root"));
         assert_eq!(batches[0].data.as_slice(), b"aaaabbbb");
+        assert_eq!(batches[0].stream_id, 1);
+    }
+
+    #[test]
+    fn submitter_assigns_distinct_stream_ids_per_source_group() {
+        let mut submitter = DirectoryBatchSubmitter::new(PathBuf::from("root"), 4);
+        let mut batches = Vec::new();
+
+        submitter
+            .push_bytes("root/a.txt", b"aaaa", false, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("first push should succeed");
+        submitter
+            .push_bytes("root/b.txt", b"bbbb", true, |batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("second push should succeed");
+        submitter
+            .finish(|batch| {
+                batches.push(batch);
+                Ok(())
+            })
+            .expect("finish should succeed");
+
+        assert_eq!(batches.len(), 2);
+        assert_ne!(batches[0].stream_id, 0);
+        assert_ne!(batches[1].stream_id, 0);
+        assert_ne!(batches[0].stream_id, batches[1].stream_id);
     }
 
     #[test]

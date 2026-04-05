@@ -122,6 +122,7 @@ impl InputScanner {
         let mut batches = Vec::with_capacity(estimated_batches.max(1));
         let mut start = 0usize;
         let source_path = path.to_path_buf();
+        let stream_id = 1;
         let mut id = 0usize;
         let map = mmap.mapping().ok_or(crate::OxideError::InvalidFormat(
             "missing mmap mapping for non-empty file",
@@ -134,7 +135,7 @@ impl InputScanner {
                 id,
                 source_path: source_path.clone(),
                 data: batch_data,
-                stream_id: 0,
+                stream_id,
                 compression_plan: self.compression_plan,
                 force_raw_storage: false,
             });

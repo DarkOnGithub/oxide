@@ -17,6 +17,7 @@ fn scanner_splits_file_into_fixed_size_batches() -> Result<(), Box<dyn std::erro
     assert_eq!(batches[1].data(), b"efgh");
     assert_eq!(batches[2].data(), b"ij");
     assert!(batches.iter().all(|batch| !batch.force_raw_storage));
+    assert!(batches.iter().all(|batch| batch.stream_id == 1));
 
     Ok(())
 }
