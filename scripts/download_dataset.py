@@ -33,6 +33,7 @@ class DatasetSpec:
     fallback_git: str | None = None
 
 
+# Base components
 COMPONENTS = {
     "silesia": DatasetSpec(
         "silesia", "archive",
@@ -46,14 +47,6 @@ COMPONENTS = {
         "linux", "archive",
         "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.13.tar.xz", "tar"
     ),
-    "nyctaxi-2015-01": DatasetSpec(
-        "nyctaxi-2015-01", "file",
-        "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2015-01.parquet"
-    ),
-    "nyctaxi-2015-02": DatasetSpec(
-        "nyctaxi-2015-02", "file",
-        "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2015-02.parquet"
-    ),
     "div2k": DatasetSpec(
         "div2k", "archive",
         "https://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_valid_HR.zip", "zip"
@@ -64,12 +57,24 @@ COMPONENTS = {
     ),
 }
 
+# Dynamically inject NYC Taxi datasets (~160MB-170MB each) to pad out the sizes accurately
+for year, month in [(2015, m) for m in range(1, 13)] + [(2016, m) for m in range(1, 7)]:
+    name = f"nyctaxi-{year}-{month:02d}"
+    COMPONENTS[name] = DatasetSpec(
+        name, "file",
+        f"https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_{year}-{month:02d}.parquet"
+    )
 
+taxi_2015 = [f"nyctaxi-2015-{m:02d}" for m in range(1, 13)] # ~2.0 GB Total
+taxi_2016 = [f"nyctaxi-2016-{m:02d}" for m in range(1, 7)]  # ~1.0 GB Total
+
+# Accurately scaled tiers
 TIERS = {
     "200mb": ["silesia"],
     "1gb": ["enwik9"],
-    "5gb": ["silesia", "enwik9", "linux", "nyctaxi-2015-01"],
-    "6gb": ["silesia", "enwik9", "linux", "nyctaxi-2015-01", "nyctaxi-2015-02", "div2k"],
+    "3gb": ["silesia", "enwik9", "linux"], # ~2.8 GB
+    "5gb": ["silesia", "enwik9", "linux", "div2k", *taxi_2015[:6]], # ~4.2 GB
+    "6gb": ["silesia", "enwik9", "linux", "div2k", *taxi_2015, *taxi_2016], # ~6.1 GB
     "10gb": ["chromium"],
 }
 
@@ -105,12 +110,10 @@ def filename_from_url(url: str, response=None) -> str:
     return Path(parsed.path).name or "download.bin"
 
 
-def download_file(url: str, dest: Path | None = None) -> Path:
-    print(f"Downloading {url}")
+def download_file(url: str, dest: Path) -> Path:
+    print(f"Downloading {url} -> {dest}")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=600, context=SSL_CONTEXT) as resp:
-        if dest is None:
-            dest = Path(filename_from_url(resp.geturl(), resp))
         tmp_path = dest.with_suffix(dest.suffix + ".part")
         with tmp_path.open("wb") as f:
             shutil.copyfileobj(resp, f, length=1024 * 1024)
@@ -173,8 +176,8 @@ def prepare_logs_fallback(spec: DatasetSpec, target_dir: Path, force: bool) -> N
         raise RuntimeError("Fallback repo cloned, but HDFS subdirectory not found.")
 
 
-def download_component(spec: DatasetSpec, output_dir: Path, force: bool, keep_archives: bool) -> None:
-    target_dir = output_dir / spec.name
+def download_component(spec: DatasetSpec, tier_dir: Path, force: bool, keep_archives: bool) -> None:
+    target_dir = tier_dir / spec.name
     if target_dir.exists() and not force:
         print(f"Skipping {spec.name} (already exists).")
         return
@@ -184,10 +187,13 @@ def download_component(spec: DatasetSpec, output_dir: Path, force: bool, keep_ar
     try:
         if spec.kind == "archive":
             target_dir.mkdir(parents=True, exist_ok=True)
-            archive_path = download_file(spec.source, None)
-            archive_dest = target_dir / archive_path.name
-            shutil.move(str(archive_path), archive_dest)
+            # Directly target the directory to avoid messy working-directory state
+            archive_name = Path(urllib.parse.urlparse(spec.source).path).name
+            archive_dest = target_dir / archive_name
+            
+            download_file(spec.source, archive_dest)
             extract_archive(archive_dest, target_dir, spec.archive_type or "zip")
+            
             if not keep_archives:
                 archive_dest.unlink()
 
@@ -216,14 +222,17 @@ def download_component(spec: DatasetSpec, output_dir: Path, force: bool, keep_ar
 
 def main() -> int:
     args = parse_args()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Establish the nested tier folder structure (e.g., ./datasets/6gb/)
+    tier_dir = args.output_dir / args.tier
+    tier_dir.mkdir(parents=True, exist_ok=True)
 
     selected_components = list(COMPONENTS.keys()) if args.tier == "all" else TIERS[args.tier]
 
     for comp_key in selected_components:
-        download_component(COMPONENTS[comp_key], args.output_dir, args.force, args.keep_archives)
+        download_component(COMPONENTS[comp_key], tier_dir, args.force, args.keep_archives)
 
-    print(f"\\nFinished preparing the {args.tier} suite.")
+    print(f"\nFinished preparing the {args.tier} suite in {tier_dir}.")
     return 0
 
 
