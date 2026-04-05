@@ -329,4 +329,3 @@ impl<R: Read + Seek> Iterator for BlockIterator<'_, R> {
         Some(self.reader.read_block(current))
     }
 }
-

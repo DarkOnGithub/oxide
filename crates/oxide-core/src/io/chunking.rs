@@ -1,9 +1,3 @@
-const CDC_WINDOW_SIZE: usize = 16;
-// The rolling-window slot math below uses bit masking instead of modulo, so the
-// window size must remain a power of two.
-const _: () = assert!(CDC_WINDOW_SIZE.is_power_of_two());
-const CDC_WINDOW_MASK: usize = CDC_WINDOW_SIZE - 1;
-
 /// Chunk boundary mode used by the scanner and planner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkingMode {
@@ -19,7 +13,6 @@ pub struct ChunkingPolicy {
     pub target_size: usize,
     pub max_size: usize,
     pub superchunk_size: usize,
-    pub cdc_mask: u64,
 }
 
 impl ChunkingPolicy {
@@ -31,7 +24,6 @@ impl ChunkingPolicy {
             target_size,
             max_size: target_size,
             superchunk_size: target_size.saturating_mul(8),
-            cdc_mask: 0,
         }
     }
 
@@ -45,7 +37,6 @@ impl ChunkingPolicy {
             target_size,
             max_size,
             superchunk_size: max_size.saturating_mul(8),
-            cdc_mask: cdc_mask_for_target(target_size),
         }
     }
 
@@ -77,51 +68,142 @@ impl ChunkingPolicy {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ChunkStreamState {
+    policy: ChunkingPolicy,
+    stream_offset: u64,
+    chunk_start_offset: u64,
+    chunk_len: usize,
+    hash: u64,
+    chunk_limit: usize,
+    normalization_target: usize,
+    short_mask: u64,
+    long_mask: u64,
+}
+
+impl ChunkStreamState {
+    pub fn new(policy: ChunkingPolicy) -> Self {
+        Self::with_offset(policy, 0)
+    }
+
+    pub fn with_offset(policy: ChunkingPolicy, offset: u64) -> Self {
+        let (short_mask, long_mask) = cdc_masks_for_target(policy.target_size);
+        let mut state = Self {
+            policy,
+            stream_offset: offset,
+            chunk_start_offset: offset,
+            chunk_len: 0,
+            hash: 0,
+            chunk_limit: 1,
+            normalization_target: 1,
+            short_mask,
+            long_mask,
+        };
+        state.recompute_chunk_limits();
+        state
+    }
+
+    pub fn current_chunk_len(&self) -> usize {
+        self.chunk_len
+    }
+
+    pub fn consume_until_boundary(&mut self, data: &[u8]) -> Option<usize> {
+        if data.is_empty() {
+            return None;
+        }
+
+        let take = self.remaining_capacity().min(data.len());
+        for (index, byte) in data[..take].iter().enumerate() {
+            self.hash = self
+                .hash
+                .rotate_left(1)
+                .wrapping_add(FASTCDC_GEAR[*byte as usize]);
+            self.chunk_len += 1;
+            self.stream_offset += 1;
+
+            if self.should_cut() {
+                self.start_new_chunk();
+                return Some(index + 1);
+            }
+        }
+
+        None
+    }
+
+    pub fn force_boundary(&mut self) {
+        if self.chunk_len == 0 {
+            return;
+        }
+
+        self.start_new_chunk();
+    }
+
+    fn should_cut(&self) -> bool {
+        match self.policy.mode {
+            ChunkingMode::Fixed => self.chunk_len >= self.chunk_limit,
+            ChunkingMode::Cdc => {
+                if self.chunk_len >= self.chunk_limit {
+                    return true;
+                }
+
+                if self.chunk_len < self.policy.min_size {
+                    return false;
+                }
+
+                if self.chunk_len < self.normalization_target {
+                    (self.hash & self.short_mask) == 0
+                } else {
+                    (self.hash & self.long_mask) == 0
+                }
+            }
+        }
+    }
+
+    fn remaining_capacity(&self) -> usize {
+        self.chunk_limit.saturating_sub(self.chunk_len).max(1)
+    }
+
+    fn start_new_chunk(&mut self) {
+        self.chunk_start_offset = self.stream_offset;
+        self.chunk_len = 0;
+        self.hash = 0;
+        self.recompute_chunk_limits();
+    }
+
+    fn recompute_chunk_limits(&mut self) {
+        let superchunk_limit = remaining_superchunk_budget(self.policy, self.chunk_start_offset);
+        let chunk_limit = match self.policy.mode {
+            ChunkingMode::Fixed => self.policy.target_size,
+            ChunkingMode::Cdc => self.policy.max_size,
+        };
+
+        self.chunk_limit = chunk_limit.min(superchunk_limit).max(1);
+        self.normalization_target = self
+            .policy
+            .target_size
+            .clamp(self.policy.min_size.min(self.chunk_limit), self.chunk_limit);
+    }
+}
+
 pub fn find_cdc_boundary(policy: ChunkingPolicy, data: &[u8], start: usize) -> usize {
     if start >= data.len() {
         return data.len();
     }
 
     let upper_bound = policy.upper_bound(start, data.len());
-    if upper_bound <= start.saturating_add(policy.min_size) {
+    if upper_bound <= start {
         return upper_bound;
     }
 
-    let mut hash = 0u64;
-    let mut window = [0u8; CDC_WINDOW_SIZE];
-    let mut filled = 0usize;
-    let mut slot = 0usize;
-
-    for (i, byte) in data[start..upper_bound].iter().enumerate() {
-        let index = start + i;
-        if filled < CDC_WINDOW_SIZE {
-            hash = hash.rotate_left(1) ^ CDC_TABLE[*byte as usize];
-            window[filled] = *byte;
-            filled += 1;
-            if filled == CDC_WINDOW_SIZE {
-                slot = (index + 1) & CDC_WINDOW_MASK;
-            }
-        } else {
-            let outgoing = window[slot];
-            window[slot] = *byte;
-            hash =
-                hash.rotate_left(1) ^ CDC_TABLE[*byte as usize] ^ CDC_OUT_TABLE[outgoing as usize];
-            slot = (slot + 1) & CDC_WINDOW_MASK;
-        }
-
-        let chunk_size = index + 1 - start;
-        if chunk_size >= policy.min_size
-            && chunk_size < policy.max_size
-            && (hash & policy.cdc_mask) == 0
-        {
-            return index + 1;
-        }
+    let mut state = ChunkStreamState::with_offset(policy, start as u64);
+    if let Some(boundary_len) = state.consume_until_boundary(&data[start..upper_bound]) {
+        start + boundary_len
+    } else {
+        upper_bound
     }
-
-    upper_bound
 }
 
-const fn cdc_mask_for_target(target_size: usize) -> u64 {
+const fn cdc_masks_for_target(target_size: usize) -> (u64, u64) {
     let mut value = if target_size == 0 {
         1
     } else {
@@ -133,11 +215,27 @@ const fn cdc_mask_for_target(target_size: usize) -> u64 {
         bits += 1;
     }
 
-    if bits >= 63 {
+    let small_bits = if bits >= 62 { 63 } else { bits + 1 };
+    let large_bits = if bits <= 1 {
+        1
+    } else if bits >= 64 {
+        63
+    } else {
+        bits - 1
+    };
+
+    let short_mask = if small_bits >= 63 {
         u64::MAX
     } else {
-        (1u64 << bits).saturating_sub(1)
-    }
+        (1u64 << small_bits).saturating_sub(1)
+    };
+    let long_mask = if large_bits >= 63 {
+        u64::MAX
+    } else {
+        (1u64 << large_bits).saturating_sub(1)
+    };
+
+    (short_mask, long_mask)
 }
 
 const fn splitmix64(mut state: u64) -> u64 {
@@ -148,7 +246,7 @@ const fn splitmix64(mut state: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-const fn build_cdc_table() -> [u64; 256] {
+const fn build_fastcdc_gear_table() -> [u64; 256] {
     let mut table = [0u64; 256];
     let mut index = 0usize;
     while index < 256 {
@@ -158,16 +256,29 @@ const fn build_cdc_table() -> [u64; 256] {
     table
 }
 
-const CDC_TABLE: [u64; 256] = build_cdc_table();
+const FASTCDC_GEAR: [u64; 256] = build_fastcdc_gear_table();
 
-const fn build_cdc_out_table() -> [u64; 256] {
-    let mut table = [0u64; 256];
-    let mut index = 0usize;
-    while index < 256 {
-        table[index] = CDC_TABLE[index].rotate_left(CDC_WINDOW_SIZE as u32);
-        index += 1;
+const fn remaining_superchunk_budget(policy: ChunkingPolicy, chunk_start_offset: u64) -> usize {
+    if policy.superchunk_size == 0 {
+        return match policy.mode {
+            ChunkingMode::Fixed => {
+                if policy.target_size == 0 {
+                    1
+                } else {
+                    policy.target_size
+                }
+            }
+            ChunkingMode::Cdc => {
+                if policy.max_size == 0 {
+                    1
+                } else {
+                    policy.max_size
+                }
+            }
+        };
     }
-    table
-}
 
-const CDC_OUT_TABLE: [u64; 256] = build_cdc_out_table();
+    let offset = (chunk_start_offset % policy.superchunk_size as u64) as usize;
+    let remaining = policy.superchunk_size.saturating_sub(offset);
+    if remaining == 0 { 1 } else { remaining }
+}

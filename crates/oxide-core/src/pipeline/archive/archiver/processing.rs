@@ -3,8 +3,9 @@ use std::time::Instant;
 
 use crate::buffer::BufferPool;
 use crate::compression::{
-    apply_compression_request_with_scratch, apply_compression_request_with_scratch_into,
-    recycle_compression_buffer, supports_direct_buffer_output, CompressionRequest,
+    CompressionRequest, apply_compression_request_with_scratch,
+    apply_compression_request_with_scratch_into, recycle_compression_buffer,
+    supports_direct_buffer_output,
 };
 use crate::core::WorkerScratchArena;
 use crate::dictionary::ArchiveDictionaryBank;
@@ -205,7 +206,9 @@ pub fn process_batch(
     let source = data.as_slice();
 
     if force_raw_storage {
-        config.processing_totals.record(source_len as u64, std::time::Duration::ZERO);
+        config
+            .processing_totals
+            .record(source_len as u64, std::time::Duration::ZERO);
         return Ok(CompressedBlock::with_chunk_encoding(
             id,
             stream_id,
@@ -217,7 +220,9 @@ pub fn process_batch(
     }
 
     if config.skip_compression {
-        config.processing_totals.record(source_len as u64, std::time::Duration::ZERO);
+        config
+            .processing_totals
+            .record(source_len as u64, std::time::Duration::ZERO);
         return Ok(CompressedBlock::with_chunk_encoding(
             id,
             stream_id,
@@ -230,9 +235,17 @@ pub fn process_batch(
 
     if config.raw_fallback_enabled
         && should_skip_full_compression_probe(source_len, plan)
-        && is_likely_incompressible_sample(source, &source_path, plan, config.dictionary_bank, scratch)?
+        && is_likely_incompressible_sample(
+            source,
+            &source_path,
+            plan,
+            config.dictionary_bank,
+            scratch,
+        )?
     {
-        config.processing_totals.record(source_len as u64, std::time::Duration::ZERO);
+        config
+            .processing_totals
+            .record(source_len as u64, std::time::Duration::ZERO);
         return Ok(CompressedBlock::with_chunk_encoding(
             id,
             stream_id,
@@ -244,7 +257,9 @@ pub fn process_batch(
     }
 
     let selected_dictionary =
-        config.dictionary_bank.select_for_chunk(plan.algo, source, Some(&source_path));
+        config
+            .dictionary_bank
+            .select_for_chunk(plan.algo, source, Some(&source_path));
     let dictionary_id = selected_dictionary
         .map(|dictionary| dictionary.id)
         .unwrap_or(0);
@@ -267,7 +282,9 @@ pub fn process_batch(
             compressed.as_mut_vec(),
         )?;
         let compression_elapsed = compression_started.elapsed();
-        config.processing_totals.record(source_len as u64, compression_elapsed);
+        config
+            .processing_totals
+            .record(source_len as u64, compression_elapsed);
 
         let raw_passthrough = config.raw_fallback_enabled && compressed.len() >= source_len;
         let data = if raw_passthrough {
@@ -290,7 +307,9 @@ pub fn process_batch(
     let compression_started = Instant::now();
     let compressed = apply_compression_request_with_scratch(request, scratch.compression())?;
     let compression_elapsed = compression_started.elapsed();
-    config.processing_totals.record(source_len as u64, compression_elapsed);
+    config
+        .processing_totals
+        .record(source_len as u64, compression_elapsed);
 
     let raw_passthrough = config.raw_fallback_enabled && compressed.len() >= source_len;
     let data = if raw_passthrough {
@@ -320,4 +339,3 @@ pub fn select_stored_payload<'a>(
     let payload = if raw_passthrough { source } else { compressed };
     (payload, raw_passthrough)
 }
-

@@ -363,7 +363,11 @@ impl Extractor {
         let (decoded, writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
-            ExtractContext { started_at, options, sink },
+            ExtractContext {
+                started_at,
+                options,
+                sink,
+            },
             None,
             writer,
         )?;
@@ -417,7 +421,11 @@ impl Extractor {
         let (mut decoded, mut writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
-            ExtractContext { started_at, options, sink },
+            ExtractContext {
+                started_at,
+                options,
+                sink,
+            },
             None,
             writer,
         )?;
@@ -467,7 +475,11 @@ impl Extractor {
         let (decoded, mut writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
-            ExtractContext { started_at, options, sink },
+            ExtractContext {
+                started_at,
+                options,
+                sink,
+            },
             None,
             writer,
         )?;
@@ -547,7 +559,11 @@ impl Extractor {
         let (decoded, mut writer) = self.decode_archive_to_writer(
             archive,
             archive_read_elapsed,
-            ExtractContext { started_at, options, sink },
+            ExtractContext {
+                started_at,
+                options,
+                sink,
+            },
             Some(&selected_ranges),
             writer,
         )?;
@@ -687,7 +703,10 @@ impl Extractor {
         let mut decoded_bytes_completed = 0u64;
         let mut received_indices = vec![false; block_capacity];
         let mut last_emit_at = Instant::now();
-        let emit_every = ctx.options.progress_interval.max(Duration::from_millis(100));
+        let emit_every = ctx
+            .options
+            .progress_interval
+            .max(Duration::from_millis(100));
         let mut decode_task_queue_peak = 0usize;
         let mut decode_result_queue_peak = 0usize;
         let mut ordered_write_queue_peak = 0usize;
@@ -729,8 +748,7 @@ impl Extractor {
                         received: &mut received,
                         first_error: &mut first_error,
                     };
-                    receive_decode_result(&result_rx, &mut decode_ctx)
-                    .and_then(|outcome| {
+                    receive_decode_result(&result_rx, &mut decode_ctx).and_then(|outcome| {
                         forward_processed_decode_result(
                             outcome,
                             &mut ordered_write_tx,
@@ -836,8 +854,7 @@ impl Extractor {
                     received: &mut received,
                     first_error: &mut first_error,
                 };
-                receive_decode_result(&result_rx, &mut decode_ctx)
-                .and_then(|outcome| {
+                receive_decode_result(&result_rx, &mut decode_ctx).and_then(|outcome| {
                     forward_processed_decode_result(
                         outcome,
                         &mut ordered_write_tx,
@@ -1390,4 +1407,3 @@ fn decode_block_payload_with_scratch(
     }
     Ok(decoded)
 }
-
