@@ -206,6 +206,37 @@ fn pipeline_seekable_archive_path_roundtrips_file_output() -> Result<(), Box<dyn
 }
 
 #[test]
+fn extract_path_file_roundtrips_with_file_backed_fast_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let data = build_text_fixture(384 * 1024);
+    let input = write_fixture(&data)?;
+    let archive_file = NamedTempFile::new()?;
+    let output = tempfile::tempdir()?;
+    let output_path = output.path().join("restored.txt");
+
+    let buffer_pool = Arc::new(BufferPool::new(64 * 1024, 128));
+    let pipeline = build_pipeline(32 * 1024, 4, Arc::clone(&buffer_pool), CompressionAlgo::Lz4);
+
+    pipeline.archive_path_seekable(
+        input.path(),
+        archive_file.reopen()?,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    let report = pipeline.extract_path_file(
+        archive_file.reopen()?,
+        &output_path,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(std::fs::read(output_path)?, data);
+    assert_eq!(report.decoded_bytes_total, 384 * 1024);
+    Ok(())
+}
+
+#[test]
 fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller()
 -> Result<(), Box<dyn std::error::Error>> {
     let data = build_incompressible_fixture(256 * 1024);

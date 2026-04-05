@@ -186,14 +186,14 @@ pub fn extract(args: ExtractArgs) -> AppResult {
 
     let mut sink = ExtractCliSink::new();
     let report = if only.is_empty() && only_regex.is_empty() {
-        pipeline.extract_path(
+        pipeline.extract_path_file(
             File::open(&input)?,
             &output_path,
             telemetry_options,
             Some(&mut sink),
         )?
     } else {
-        pipeline.extract_path_filtered_with_regex(
+        pipeline.extract_path_filtered_with_regex_file(
             File::open(&input)?,
             &output_path,
             &only,

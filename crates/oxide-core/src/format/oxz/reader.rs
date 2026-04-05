@@ -257,6 +257,11 @@ impl<R: Read + Seek> ArchiveReader<R> {
             .ok_or(OxideError::InvalidFormat("block index out of range"))
     }
 
+    pub(crate) fn resolved_block_descriptor(&self, index: u32) -> Result<ChunkDescriptor> {
+        let descriptor = self.block_descriptor(index)?;
+        self.resolve_data_descriptor(index, descriptor)
+    }
+
     pub(crate) fn block_descriptors(&self) -> &[ChunkDescriptor] {
         &self.chunk_descriptors
     }

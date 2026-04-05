@@ -7,6 +7,7 @@ use crossbeam_deque::{Injector, Steal, Stealer, Worker as DequeWorker};
 /// Lock-free work queue with a global injector and per-worker local queues.
 pub struct WorkStealingQueue<T> {
     global: Injector<T>,
+    preferred: Vec<Injector<T>>,
     local_workers: Vec<Mutex<Option<DequeWorker<T>>>>,
     stealers: Vec<Stealer<T>>,
     pending: AtomicUsize,
@@ -20,16 +21,19 @@ impl<T> WorkStealingQueue<T> {
         let worker_count = num_workers.max(1);
 
         let mut local_workers = Vec::with_capacity(worker_count);
+        let mut preferred = Vec::with_capacity(worker_count);
         let mut stealers = Vec::with_capacity(worker_count);
 
         for _ in 0..worker_count {
             let worker = DequeWorker::new_lifo();
             stealers.push(worker.stealer());
+            preferred.push(Injector::new());
             local_workers.push(Mutex::new(Some(worker)));
         }
 
         Self {
             global: Injector::new(),
+            preferred,
             local_workers,
             stealers,
             pending: AtomicUsize::new(0),
@@ -51,6 +55,14 @@ impl<T> WorkStealingQueue<T> {
     /// Submits work to the global injector queue.
     pub fn submit(&self, item: T) {
         self.global.push(item);
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        self.wait_condvar.notify_one();
+    }
+
+    /// Submits work to a worker-preferred injector queue.
+    pub fn submit_affine(&self, worker_id: usize, item: T) {
+        let target = worker_id % self.preferred.len().max(1);
+        self.preferred[target].push(item);
         self.pending.fetch_add(1, Ordering::AcqRel);
         self.wait_condvar.notify_one();
     }
@@ -145,7 +157,17 @@ impl<T> WorkStealingWorker<T> {
             return Some(item);
         }
 
+        if let Some(item) = self.steal_from_preferred(self.id) {
+            self.queue.decrement_pending();
+            return Some(item);
+        }
+
         if let Some(item) = self.steal_from_global() {
+            self.queue.decrement_pending();
+            return Some(item);
+        }
+
+        if let Some(item) = self.steal_from_other_preferred() {
             self.queue.decrement_pending();
             return Some(item);
         }
@@ -153,6 +175,10 @@ impl<T> WorkStealingWorker<T> {
         let item = self.steal_from_others()?;
         self.queue.decrement_pending();
         Some(item)
+    }
+
+    fn steal_from_preferred(&self, worker_id: usize) -> Option<T> {
+        self.retry_steal(|| self.queue.preferred[worker_id].steal_batch_and_pop(&self.local))
     }
 
     /// Waits for work to become available for this worker.
@@ -178,6 +204,28 @@ impl<T> WorkStealingWorker<T> {
 
             if let Some(item) =
                 self.retry_steal(|| self.queue.stealers[idx].steal_batch_and_pop(&self.local))
+            {
+                return Some(item);
+            }
+        }
+
+        None
+    }
+
+    fn steal_from_other_preferred(&self) -> Option<T> {
+        let len = self.queue.preferred.len();
+        if len <= 1 {
+            return None;
+        }
+
+        for offset in 1..=len {
+            let idx = (self.id + offset) % len;
+            if idx == self.id {
+                continue;
+            }
+
+            if let Some(item) =
+                self.retry_steal(|| self.queue.preferred[idx].steal_batch_and_pop(&self.local))
             {
                 return Some(item);
             }

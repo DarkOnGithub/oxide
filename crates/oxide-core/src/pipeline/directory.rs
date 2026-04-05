@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -70,6 +71,8 @@ pub struct DirectoryBatchSubmitter {
     pending_force_raw_storage: Option<bool>,
     pending_source_path: Option<PathBuf>,
     pending_extension: Option<String>,
+    stream_ids: BTreeMap<PathBuf, u32>,
+    next_stream_id: u32,
 }
 
 impl DirectoryBatchSubmitter {
@@ -114,6 +117,8 @@ impl DirectoryBatchSubmitter {
             pending_force_raw_storage: None,
             pending_source_path: None,
             pending_extension: None,
+            stream_ids: BTreeMap::new(),
+            next_stream_id: 1,
         }
     }
 
@@ -394,17 +399,29 @@ impl DirectoryBatchSubmitter {
     where
         F: FnMut(Batch) -> Result<()>,
     {
+        let stream_id = self.stream_id_for_path(&source_path);
         let batch = Batch {
             id: self.next_block_id,
             source_path,
             data,
-            stream_id: 0,
+            stream_id,
             compression_plan: self.compression_plan,
             force_raw_storage,
         };
         submit(batch)?;
         self.next_block_id += 1;
         Ok(())
+    }
+
+    fn stream_id_for_path(&mut self, source_path: &Path) -> u32 {
+        if let Some(&stream_id) = self.stream_ids.get(source_path) {
+            return stream_id;
+        }
+
+        let stream_id = self.next_stream_id;
+        self.next_stream_id = self.next_stream_id.saturating_add(1).max(1);
+        self.stream_ids.insert(source_path.to_path_buf(), stream_id);
+        stream_id
     }
 }
 

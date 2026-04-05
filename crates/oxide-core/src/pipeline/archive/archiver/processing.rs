@@ -211,6 +211,7 @@ fn is_likely_incompressible_sample(
                 level: plan.level,
                 lzma_extreme: plan.lzma_extreme,
                 lzma_dictionary_size: plan.lzma_dictionary_size,
+                stream_id: 0,
                 dictionary_id: 0,
                 dictionary: None,
             },
@@ -234,6 +235,7 @@ fn is_likely_incompressible_sample(
                 level: plan.level,
                 lzma_extreme: plan.lzma_extreme,
                 lzma_dictionary_size: plan.lzma_dictionary_size,
+                stream_id: 0,
                 dictionary_id: selected_dictionary
                     .map(|dictionary| dictionary.id)
                     .unwrap_or(0),
@@ -364,6 +366,7 @@ pub(crate) fn process_batch(
         level: plan.level,
         lzma_extreme: plan.lzma_extreme,
         lzma_dictionary_size: plan.lzma_dictionary_size,
+        stream_id,
         dictionary_id,
         dictionary: selected_dictionary.map(|dictionary| dictionary.bytes.as_slice()),
     };
