@@ -115,17 +115,15 @@ struct RestoreEntry {
 struct PreparedRestoreWorkItem {
     index: usize,
     restore_entry: RestoreEntry,
-    open_file_permit: Option<OpenFilePermit>,
-}
-
-enum OpenFilePermitAttempt {
-    Acquired(Option<OpenFilePermit>),
-    Unavailable,
 }
 
 #[derive(Debug)]
 enum PreparedRestoreEntry {
     Directory {
+        path: PathBuf,
+        entry: crate::ArchiveListingEntry,
+    },
+    File {
         path: PathBuf,
         entry: crate::ArchiveListingEntry,
     },
@@ -400,6 +398,11 @@ impl DirectoryRestoreWriter {
                 PreparedRestoreEntry::Directory { path, entry } => {
                     self.defer_directory_metadata(path, entry);
                 }
+                PreparedRestoreEntry::File { .. } => {
+                    return Err(crate::OxideError::CompressionError(
+                        "prepared file entry reached writer before in-order file open".to_string(),
+                    ));
+                }
                 PreparedRestoreEntry::FileReady {
                     path,
                     entry,
@@ -621,12 +624,11 @@ fn spawn_prepared_restore_entries(
         let worker_count = available_prepared_entry_workers(total_entries);
         if worker_count <= 1 {
             for restore_entry in entries {
-                let open_file_permit = acquire_open_file_permit_for_entry(
-                    &restore_entry.entry,
+                let prepared = prepare_restore_entry_in_order(
+                    restore_entry,
                     &open_file_permit_rx,
                     &open_file_permit_tx,
-                )?;
-                let prepared = prepare_restore_entry(restore_entry, open_file_permit);
+                );
                 let stop_after_send = prepared.is_err();
                 if tx.send(prepared).is_err() {
                     return Ok(());
@@ -659,8 +661,7 @@ fn spawn_prepared_restore_entries(
                     }
 
                     let index = work_item.index;
-                    let prepared =
-                        prepare_restore_entry(work_item.restore_entry, work_item.open_file_permit);
+                    let prepared = prepare_restore_entry(work_item.restore_entry);
                     if prepared.is_err() {
                         cancelled.store(true, Ordering::Relaxed);
                     }
@@ -680,48 +681,20 @@ fn spawn_prepared_restore_entries(
             .map(|(index, restore_entry)| PreparedRestoreWorkItem {
                 index,
                 restore_entry,
-                open_file_permit: None,
             })
             .collect::<VecDeque<_>>();
 
         let mut next_index = 0usize;
         let mut pending: BTreeMap<usize, Result<PreparedRestoreEntry>> = BTreeMap::new();
-        let mut in_flight_work = 0usize;
         let mut sent_error = false;
         while next_index < total_entries && !sent_error {
-            while let Some(mut work_item) = pending_work.pop_front() {
+            while let Some(work_item) = pending_work.pop_front() {
                 if cancelled.load(Ordering::Relaxed) {
                     break;
                 }
 
-                if work_item.open_file_permit.is_none() {
-                    match try_acquire_open_file_permit_for_entry(
-                        &work_item.restore_entry.entry,
-                        &open_file_permit_rx,
-                        &open_file_permit_tx,
-                    )? {
-                        OpenFilePermitAttempt::Acquired(open_file_permit) => {
-                            work_item.open_file_permit = open_file_permit;
-                        }
-                        OpenFilePermitAttempt::Unavailable => {
-                            if in_flight_work == 0 {
-                                work_item.open_file_permit = acquire_open_file_permit_for_entry(
-                                    &work_item.restore_entry.entry,
-                                    &open_file_permit_rx,
-                                    &open_file_permit_tx,
-                                )?;
-                            } else {
-                                pending_work.push_front(work_item);
-                                break;
-                            }
-                        }
-                    }
-                }
-
                 match work_tx.try_send(work_item) {
-                    Ok(()) => {
-                        in_flight_work = in_flight_work.saturating_add(1);
-                    }
+                    Ok(()) => {}
                     Err(TrySendError::Full(work_item)) => {
                         pending_work.push_front(work_item);
                         break;
@@ -735,6 +708,11 @@ fn spawn_prepared_restore_entries(
             }
 
             while let Some(prepared) = pending.remove(&next_index) {
+                let prepared = prepare_prepared_entry_in_order(
+                    prepared,
+                    &open_file_permit_rx,
+                    &open_file_permit_tx,
+                );
                 sent_error = prepared.is_err();
                 if tx.send(prepared).is_err() {
                     cancelled.store(true, Ordering::Relaxed);
@@ -751,16 +729,11 @@ fn spawn_prepared_restore_entries(
                 break;
             }
 
-            if in_flight_work == 0 {
-                continue;
-            }
-
             let (index, prepared) = result_rx.recv().map_err(|_| {
                 crate::OxideError::CompressionError(
                     "prepared entry workers exited before completion".to_string(),
                 )
             })?;
-            in_flight_work = in_flight_work.saturating_sub(1);
             pending.insert(index, prepared);
         }
 
@@ -791,28 +764,11 @@ fn spawn_prepared_restore_entries(
     (rx, handle)
 }
 
-fn prepare_restore_entry(
-    restore_entry: RestoreEntry,
-    open_file_permit: Option<OpenFilePermit>,
-) -> Result<PreparedRestoreEntry> {
+fn prepare_restore_entry(restore_entry: RestoreEntry) -> Result<PreparedRestoreEntry> {
     let RestoreEntry { path, entry } = restore_entry;
     match entry.kind {
         crate::ArchiveEntryKind::Directory => Ok(PreparedRestoreEntry::Directory { path, entry }),
-        crate::ArchiveEntryKind::File => {
-            let permit = open_file_permit.ok_or(crate::OxideError::CompressionError(
-                "file restore entry missing pre-open file permit".to_string(),
-            ))?;
-            let open_started = Instant::now();
-            let file = fs::File::create(&path)?;
-            let writer = PendingFileWriter::new(file, entry.size);
-            Ok(PreparedRestoreEntry::FileReady {
-                path,
-                entry,
-                writer,
-                permit,
-                open_elapsed: open_started.elapsed(),
-            })
-        }
+        crate::ArchiveEntryKind::File => Ok(PreparedRestoreEntry::File { path, entry }),
         crate::ArchiveEntryKind::Symlink => {
             let target = entry.target.as_deref().ok_or(OxideError::InvalidFormat(
                 "symlink manifest entry missing target",
@@ -828,35 +784,39 @@ fn prepare_restore_entry(
     }
 }
 
-fn acquire_open_file_permit_for_entry(
-    entry: &crate::ArchiveListingEntry,
+fn prepare_restore_entry_in_order(
+    restore_entry: RestoreEntry,
     open_file_permit_rx: &Receiver<()>,
     open_file_permit_tx: &Sender<()>,
-) -> Result<Option<OpenFilePermit>> {
-    if matches!(entry.kind, crate::ArchiveEntryKind::File) {
-        return acquire_open_file_permit(open_file_permit_rx, open_file_permit_tx).map(Some);
-    }
-
-    Ok(None)
+) -> Result<PreparedRestoreEntry> {
+    prepare_prepared_entry_in_order(
+        prepare_restore_entry(restore_entry),
+        open_file_permit_rx,
+        open_file_permit_tx,
+    )
 }
 
-fn try_acquire_open_file_permit_for_entry(
-    entry: &crate::ArchiveListingEntry,
+fn prepare_prepared_entry_in_order(
+    prepared: Result<PreparedRestoreEntry>,
     open_file_permit_rx: &Receiver<()>,
     open_file_permit_tx: &Sender<()>,
-) -> Result<OpenFilePermitAttempt> {
-    if !matches!(entry.kind, crate::ArchiveEntryKind::File) {
-        return Ok(OpenFilePermitAttempt::Acquired(None));
-    }
-
-    match open_file_permit_rx.try_recv() {
-        Ok(()) => Ok(OpenFilePermitAttempt::Acquired(Some(OpenFilePermit {
-            release_tx: open_file_permit_tx.clone(),
-        }))),
-        Err(TryRecvError::Empty) => Ok(OpenFilePermitAttempt::Unavailable),
-        Err(TryRecvError::Disconnected) => Err(crate::OxideError::CompressionError(
-            "pre-opened file permit queue closed before completion".to_string(),
-        )),
+) -> Result<PreparedRestoreEntry> {
+    let prepared = prepared?;
+    match prepared {
+        PreparedRestoreEntry::File { path, entry } => {
+            let permit = acquire_open_file_permit(open_file_permit_rx, open_file_permit_tx)?;
+            let open_started = Instant::now();
+            let file = fs::File::create(&path)?;
+            let writer = PendingFileWriter::new(file, entry.size);
+            Ok(PreparedRestoreEntry::FileReady {
+                path,
+                entry,
+                writer,
+                permit,
+                open_elapsed: open_started.elapsed(),
+            })
+        }
+        other => Ok(other),
     }
 }
 
