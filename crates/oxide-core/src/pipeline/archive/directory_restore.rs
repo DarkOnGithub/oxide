@@ -31,8 +31,10 @@ const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
 const MAX_METADATA_WORKERS: usize = 8;
 const MAX_PREPARED_ENTRY_WORKERS: usize = 8;
 const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 256;
+const BASE_PREOPENED_FILE_WINDOW_MULTIPLIER: usize = 16;
+const PREOPENED_FILE_WINDOW_BONUS_STEP: usize = 4;
 const MIN_PREOPENED_FILE_WINDOW_CAPACITY: usize = 64;
-const MAX_PREOPENED_FILE_WINDOW_CAPACITY: usize = 256;
+const MAX_PREOPENED_FILE_WINDOW_CAPACITY: usize = 512;
 const MIN_READY_ENTRY_WINDOW_CAPACITY: usize = 32;
 const MAX_READY_ENTRY_WINDOW_CAPACITY: usize = 128;
 const DIRECT_FILE_WRITE_MAX_BYTES: u64 = 32 * 1024;
@@ -661,18 +663,58 @@ fn prepared_entry_window_config_for_counts(
             MAX_READY_ENTRY_WINDOW_CAPACITY,
         )
         .min(entry_count);
-    let preopened_file_window_capacity = parallelism
-        .saturating_mul(16)
-        .clamp(
-            MIN_PREOPENED_FILE_WINDOW_CAPACITY,
-            MAX_PREOPENED_FILE_WINDOW_CAPACITY,
-        )
-        .min(file_count);
+    let preopened_file_window_capacity =
+        adaptive_preopened_file_window_capacity(entry_count, file_count, parallelism);
 
     PreparedEntryWindowConfig {
         preopened_file_window_capacity,
         ready_entry_window_capacity,
     }
+}
+
+fn adaptive_preopened_file_window_capacity(
+    entry_count: usize,
+    file_count: usize,
+    parallelism: usize,
+) -> usize {
+    let entry_count = entry_count.max(1);
+    let file_count = file_count.max(1);
+    let parallelism = parallelism.max(1);
+
+    let base_capacity = parallelism.saturating_mul(BASE_PREOPENED_FILE_WINDOW_MULTIPLIER);
+    let file_density_per_thousand = file_count.saturating_mul(1000).div_ceil(entry_count);
+    let files_per_worker = file_count.div_ceil(parallelism);
+
+    // Only boost the file-open window when the workload is both file-heavy and
+    // deep enough per worker to keep additional pre-opened files useful. That
+    // avoids inflating FD pressure for sparse or short manifests while still
+    // widening the window on large file-dense restores.
+    let density_bonus_scale = match file_density_per_thousand {
+        850.. => 4,
+        600.. => 3,
+        350.. => 2,
+        150.. => 1,
+        _ => 0,
+    };
+    let backlog_bonus_scale = match files_per_worker {
+        128.. => 4,
+        64.. => 3,
+        32.. => 2,
+        16.. => 1,
+        _ => 0,
+    };
+    let bonus_scale = density_bonus_scale.min(backlog_bonus_scale);
+    let adaptive_bonus = parallelism
+        .saturating_mul(PREOPENED_FILE_WINDOW_BONUS_STEP)
+        .saturating_mul(bonus_scale);
+
+    base_capacity
+        .saturating_add(adaptive_bonus)
+        .clamp(
+            MIN_PREOPENED_FILE_WINDOW_CAPACITY,
+            MAX_PREOPENED_FILE_WINDOW_CAPACITY,
+        )
+        .min(file_count)
 }
 
 fn spawn_prepared_restore_entries(
@@ -1301,8 +1343,60 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 192,
+                preopened_file_window_capacity: 384,
                 ready_entry_window_capacity: 96,
+            }
+        );
+    }
+
+    #[test]
+    fn prepared_entry_windows_adapt_for_file_heavy_workloads() {
+        let config = prepared_entry_window_config_for_counts(10_000, 5_000, 16);
+
+        assert_eq!(
+            config,
+            PreparedEntryWindowConfig {
+                preopened_file_window_capacity: 384,
+                ready_entry_window_capacity: 128,
+            }
+        );
+    }
+
+    #[test]
+    fn prepared_entry_windows_do_not_boost_sparse_file_workloads() {
+        let config = prepared_entry_window_config_for_counts(10_000, 1_000, 16);
+
+        assert_eq!(
+            config,
+            PreparedEntryWindowConfig {
+                preopened_file_window_capacity: 256,
+                ready_entry_window_capacity: 128,
+            }
+        );
+    }
+
+    #[test]
+    fn prepared_entry_windows_only_boost_when_density_and_backlog_align() {
+        let config = prepared_entry_window_config_for_counts(1_000, 240, 16);
+
+        assert_eq!(
+            config,
+            PreparedEntryWindowConfig {
+                preopened_file_window_capacity: 240,
+                ready_entry_window_capacity: 128,
+            }
+        );
+    }
+
+    #[test]
+    fn prepared_entry_windows_respect_safe_upper_clamp() {
+        let config = prepared_entry_window_config_for_counts(10_000, 10_000, 64);
+
+        assert_eq!(
+            config,
+            PreparedEntryWindowConfig {
+                preopened_file_window_capacity: MAX_PREOPENED_FILE_WINDOW_CAPACITY,
+                ready_entry_window_capacity: MAX_READY_ENTRY_WINDOW_CAPACITY,
             }
         );
     }
