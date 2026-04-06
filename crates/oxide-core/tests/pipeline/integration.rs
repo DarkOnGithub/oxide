@@ -971,6 +971,18 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
         report
             .main_thread
             .stage_us
+            .contains_key("prepared_file_open")
+    );
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("prepared_file_wait")
+    );
+    assert!(
+        report
+            .main_thread
+            .stage_us
             .contains_key("output_prepare_directories")
     );
     assert!(report.main_thread.stage_us.contains_key("output_write"));

@@ -985,7 +985,7 @@ impl Extractor {
         let worker_count = self.num_workers.max(1);
         let inflight_block_limit = extract_inflight_block_limit(
             block_capacity,
-            block_profile.max_queue_block_bytes(),
+            block_profile.budgeted_queue_block_bytes(),
             &self.performance,
         );
         let queue_capacity =
@@ -1381,11 +1381,13 @@ impl Extractor {
 struct ExtractBlockProfile {
     max_encoded_len: usize,
     max_raw_len: usize,
+    queue_block_bytes_p95: usize,
 }
 
 impl ExtractBlockProfile {
     fn from_plan(headers: &[ChunkDescriptor], plan: &DecodePlan) -> Self {
         let mut profile = Self::default();
+        let mut queue_block_bytes = Vec::with_capacity(plan.block_count());
         for (block_index, header) in headers.iter().enumerate() {
             if !plan.includes(block_index) {
                 continue;
@@ -1393,13 +1395,30 @@ impl ExtractBlockProfile {
 
             profile.max_encoded_len = profile.max_encoded_len.max(header.encoded_len as usize);
             profile.max_raw_len = profile.max_raw_len.max(header.raw_len as usize);
+            queue_block_bytes.push((header.raw_len as usize).max(header.encoded_len as usize));
         }
+        profile.queue_block_bytes_p95 = percentile_ceil(&mut queue_block_bytes, 95);
         profile
     }
 
     fn max_queue_block_bytes(self) -> usize {
         self.max_raw_len.max(self.max_encoded_len).max(1)
     }
+
+    fn budgeted_queue_block_bytes(self) -> usize {
+        self.queue_block_bytes_p95.max(1)
+    }
+}
+
+fn percentile_ceil(values: &mut [usize], percentile: usize) -> usize {
+    if values.is_empty() {
+        return 0;
+    }
+
+    values.sort_unstable();
+    let percentile = percentile.clamp(1, 100);
+    let rank = values.len().saturating_mul(percentile).div_ceil(100);
+    values[rank.saturating_sub(1)]
 }
 
 fn select_extract_buffer_pool(
@@ -1417,13 +1436,13 @@ fn select_extract_buffer_pool(
 #[inline]
 fn extract_inflight_block_limit(
     block_capacity: usize,
-    block_bytes: usize,
+    budgeted_block_bytes: usize,
     performance: &PipelinePerformanceOptions,
 ) -> usize {
-    let block_bytes = block_bytes.max(1);
-    let inflight_bytes = performance.max_inflight_bytes.max(block_bytes);
+    let budgeted_block_bytes = budgeted_block_bytes.max(1);
+    let inflight_bytes = performance.max_inflight_bytes.max(budgeted_block_bytes);
     inflight_bytes
-        .div_ceil(block_bytes)
+        .div_ceil(budgeted_block_bytes)
         .max(1)
         .min(block_capacity.max(1))
 }
@@ -1989,9 +2008,38 @@ mod tests {
             ExtractBlockProfile {
                 max_encoded_len: 256,
                 max_raw_len: 2048,
+                queue_block_bytes_p95: 2048,
             }
         );
         assert_eq!(profile.max_queue_block_bytes(), 2048);
+        assert_eq!(profile.budgeted_queue_block_bytes(), 2048);
+    }
+
+    #[test]
+    fn extract_queue_budget_uses_p95_instead_of_max_outlier() {
+        let mut headers = Vec::new();
+        for index in 0..19u64 {
+            headers.push(ChunkDescriptor::new(
+                index * 1024,
+                1024,
+                1024,
+                CompressionAlgo::Lz4,
+                0,
+            ));
+        }
+        headers.push(ChunkDescriptor::new(
+            19 * 1024,
+            8 * 1024 * 1024,
+            8 * 1024 * 1024,
+            CompressionAlgo::Lz4,
+            0,
+        ));
+
+        let plan = DecodePlan::all(headers.len());
+        let profile = ExtractBlockProfile::from_plan(&headers, &plan);
+
+        assert_eq!(profile.max_queue_block_bytes(), 8 * 1024 * 1024);
+        assert_eq!(profile.budgeted_queue_block_bytes(), 1024);
     }
 
     #[test]

@@ -358,6 +358,8 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
                     ("writer_enqueue_blocked", "writer enqueue blocked"),
                     ("merge", "merge"),
                     ("directory_decode", "directory decode"),
+                    ("prepared_file_open", "prepared file open"),
+                    ("prepared_file_wait", "prepared file wait"),
                     ("output_prepare_directories", "prepare output dirs"),
                     ("output_write", "output write"),
                     ("output_create", "output create"),
