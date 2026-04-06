@@ -31,8 +31,6 @@ const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
 const MAX_METADATA_WORKERS: usize = 8;
 const MAX_PREPARED_ENTRY_WORKERS: usize = 8;
 const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 256;
-const MAX_DIRECTORY_WRITE_SHARDS: usize = 4;
-const DIRECTORY_WRITE_BATCH_QUEUE_CAPACITY: usize = 16;
 const BASE_PREOPENED_FILE_WINDOW_MULTIPLIER: usize = 16;
 const PREOPENED_FILE_WINDOW_BONUS_STEP: usize = 4;
 const MIN_PREOPENED_FILE_WINDOW_CAPACITY: usize = 64;
@@ -192,44 +190,6 @@ struct ReadyFileWrite {
 }
 
 #[derive(Debug)]
-struct WriteSpan {
-    file_id: u64,
-    range: Range<usize>,
-    eof: bool,
-}
-
-#[derive(Debug)]
-enum ShardBatchItem {
-    Open {
-        file_id: u64,
-        ready_file: ReadyFileWrite,
-    },
-    Write(WriteSpan),
-}
-
-#[derive(Debug)]
-struct ShardWriteBatch {
-    block: Arc<[u8]>,
-    items: Vec<ShardBatchItem>,
-}
-
-#[derive(Debug, Default)]
-struct FileWriteShardOutcome {
-    completed_data_files: usize,
-    pending_file_metadata: Vec<PendingMetadata>,
-    stats: DirectoryRestoreStats,
-}
-
-#[derive(Debug)]
-struct ActiveShardFile {
-    file_id: u64,
-    path: PathBuf,
-    entry: crate::ArchiveListingEntry,
-    writer: PendingFileWriter,
-    permit: OpenFilePermit,
-}
-
-#[derive(Debug)]
 enum RestorePlannerMessage {
     ReadyFile(ReadyFileWrite),
     Finished(RestorePlannerOutcome),
@@ -300,10 +260,11 @@ impl DirectoryExtractSelection {
 
 #[derive(Debug)]
 struct PendingFile {
-    file_id: u64,
-    shard_id: usize,
     remaining: u64,
-    ready_file: Option<ReadyFileWrite>,
+    path: PathBuf,
+    entry: crate::ArchiveListingEntry,
+    writer: PendingFileWriter,
+    permit: OpenFilePermit,
 }
 
 struct OpenFilePermit {
@@ -373,7 +334,6 @@ pub(crate) struct DirectoryRestoreWriter {
     root: PathBuf,
     data_file_count_total: usize,
     completed_data_files: usize,
-    next_file_id: u64,
     pending_file: Option<PendingFile>,
     created_directories: HashSet<PathBuf>,
     pending_file_metadata: Vec<PendingMetadata>,
@@ -381,8 +341,6 @@ pub(crate) struct DirectoryRestoreWriter {
     planner_finished: bool,
     planner_rx: Receiver<Result<RestorePlannerMessage>>,
     planner_handle: Option<thread::JoinHandle<Result<()>>>,
-    file_write_txs: Vec<Sender<ShardWriteBatch>>,
-    file_write_handles: Vec<thread::JoinHandle<Result<FileWriteShardOutcome>>>,
     stats: DirectoryRestoreStats,
 }
 
@@ -404,20 +362,10 @@ impl DirectoryRestoreWriter {
     pub(crate) fn create(root: &Path, manifest: ArchiveManifest) -> Result<Self> {
         let entries = build_restore_entries(root, manifest)?;
         let window_config = prepared_entry_window_config(&entries);
-        let data_file_count = entries
-            .iter()
-            .filter(|restore_entry| {
-                matches!(restore_entry.entry.kind, crate::ArchiveEntryKind::File)
-                    && restore_entry.entry.size > 0
-            })
-            .count();
-        let shard_count = available_directory_write_shards(data_file_count);
-        let (file_write_txs, file_write_handles) = spawn_file_write_shards(shard_count);
         let mut writer = Self {
             root: root.to_path_buf(),
             data_file_count_total: 0,
             completed_data_files: 0,
-            next_file_id: 0,
             pending_file: None,
             created_directories: HashSet::new(),
             pending_file_metadata: Vec::new(),
@@ -425,8 +373,6 @@ impl DirectoryRestoreWriter {
             planner_finished: false,
             planner_rx: never(),
             planner_handle: None,
-            file_write_txs,
-            file_write_handles,
             stats: DirectoryRestoreStats::default(),
         };
         writer.ensure_directory_exists(root)?;
@@ -448,20 +394,11 @@ impl DirectoryRestoreWriter {
 
         self.wait_for_planner_completion()?;
 
-        if self.pending_file.is_some() {
+        if self.pending_file.is_some() || self.completed_data_files != self.data_file_count_total {
             return Err(crate::OxideError::InvalidFormat(
                 "directory restore ended before all entries completed",
             ));
         }
-
-        self.join_file_write_shards()?;
-
-        if self.completed_data_files != self.data_file_count_total {
-            return Err(crate::OxideError::InvalidFormat(
-                "directory restore ended before all entries completed",
-            ));
-        }
-
         self.finalize_file_metadata()?;
         self.finalize_directories()?;
         self.join_planner()?;
@@ -489,6 +426,16 @@ impl DirectoryRestoreWriter {
         }
 
         Ok(())
+    }
+
+    fn defer_file_metadata(&mut self, path: PathBuf, entry: crate::ArchiveListingEntry) {
+        self.pending_file_metadata
+            .push(PendingMetadata::new(path, entry));
+    }
+
+    fn defer_directory_metadata(&mut self, path: PathBuf, entry: crate::ArchiveListingEntry) {
+        self.pending_directory_metadata
+            .push(PendingMetadata::new(path, entry));
     }
 
     fn prepare_output_directories(&mut self, entries: &[RestoreEntry]) -> Result<()> {
@@ -566,17 +513,13 @@ impl DirectoryRestoreWriter {
         message: RestorePlannerMessage,
     ) -> Result<Option<PendingFile>> {
         match message {
-            RestorePlannerMessage::ReadyFile(ready_file) => {
-                let file_id = self.next_file_id;
-                self.next_file_id = self.next_file_id.saturating_add(1);
-                let remaining = ready_file.entry.size;
-                Ok(Some(PendingFile {
-                    file_id,
-                    shard_id: self.file_write_shard_for_file(file_id),
-                    remaining,
-                    ready_file: Some(ready_file),
-                }))
-            }
+            RestorePlannerMessage::ReadyFile(ready_file) => Ok(Some(PendingFile {
+                remaining: ready_file.entry.size,
+                path: ready_file.path,
+                entry: ready_file.entry,
+                writer: ready_file.writer,
+                permit: ready_file.permit,
+            })),
             RestorePlannerMessage::Finished(outcome) => {
                 self.apply_planner_outcome(outcome);
                 Ok(None)
@@ -596,36 +539,13 @@ impl DirectoryRestoreWriter {
 
     fn wait_for_planner_completion(&mut self) -> Result<()> {
         while !self.planner_finished {
-            match self.planner_rx.try_recv() {
-                Ok(message) => self.discard_planner_message(message?)?,
-                Err(TryRecvError::Empty) => {
-                    let message = self.planner_rx.recv().map_err(|_| {
-                        crate::OxideError::CompressionError(
-                            "restore planner queue closed before completion".to_string(),
-                        )
-                    })?;
-                    self.discard_planner_message(message?)?;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    return self.handle_planner_disconnect().map(|_| ());
-                }
-            }
+            let Some(ready_file) = self.next_pending_file()? else {
+                continue;
+            };
+            drop(ready_file);
         }
 
         Ok(())
-    }
-
-    fn discard_planner_message(&mut self, message: RestorePlannerMessage) -> Result<()> {
-        match message {
-            // `finish()` may reach here after payload bytes are exhausted. Any
-            // additional ready files are intentionally dropped so the final
-            // completed-vs-expected file count check reports truncation.
-            RestorePlannerMessage::ReadyFile(_ready_file) => Ok(()),
-            RestorePlannerMessage::Finished(outcome) => {
-                self.apply_planner_outcome(outcome);
-                Ok(())
-            }
-        }
     }
 
     fn handle_planner_disconnect(&mut self) -> Result<Option<PendingFile>> {
@@ -659,70 +579,22 @@ impl DirectoryRestoreWriter {
     }
 
     fn finalize_pending_file(&mut self) -> Result<()> {
-        let _pending = self.pending_file.take().ok_or(OxideError::InvalidFormat(
+        let pending = self.pending_file.take().ok_or(OxideError::InvalidFormat(
             "directory restore missing pending file after write completion",
         ))?;
-        Ok(())
-    }
-
-    fn file_write_shard_for_file(&self, file_id: u64) -> usize {
-        let shard_count = self.file_write_txs.len().max(1);
-        (file_id as usize) % shard_count
-    }
-
-    fn send_file_write_batch(&mut self, shard_id: usize, batch: ShardWriteBatch) -> Result<()> {
-        let tx = self
-            .file_write_txs
-            .get(shard_id)
-            .ok_or(OxideError::InvalidFormat(
-                "directory restore missing file write shard",
-            ))?;
-        tx.send(batch).map_err(|_| {
-            crate::OxideError::CompressionError(
-                "file write shard closed before completion".to_string(),
-            )
-        })
-    }
-
-    fn join_file_write_shards(&mut self) -> Result<()> {
-        if self.file_write_handles.is_empty() {
-            return Ok(());
-        }
-
-        self.file_write_txs.clear();
-
-        for handle in self.file_write_handles.drain(..) {
-            let outcome = join_file_write_shard_handle(handle)?;
-            self.completed_data_files = self
-                .completed_data_files
-                .saturating_add(outcome.completed_data_files);
-            self.pending_file_metadata
-                .extend(outcome.pending_file_metadata);
-            self.stats.merge(outcome.stats);
-        }
-
-        Ok(())
-    }
-
-    fn flush_shard_batches(
-        &mut self,
-        block: &Arc<[u8]>,
-        shard_batches: &mut [Vec<ShardBatchItem>],
-    ) -> Result<()> {
-        for (shard_id, items) in shard_batches.iter_mut().enumerate() {
-            if items.is_empty() {
-                continue;
-            }
-
-            self.send_file_write_batch(
-                shard_id,
-                ShardWriteBatch {
-                    block: Arc::clone(block),
-                    items: std::mem::take(items),
-                },
-            )?;
-        }
-
+        let PendingFile {
+            path,
+            entry,
+            writer,
+            permit,
+            ..
+        } = pending;
+        let started = Instant::now();
+        let _file = writer.into_inner()?;
+        self.stats.record_output_flush(started.elapsed());
+        drop(permit);
+        self.defer_file_metadata(path, entry);
+        self.completed_data_files = self.completed_data_files.saturating_add(1);
         Ok(())
     }
 
@@ -803,125 +675,6 @@ fn output_buffer_capacity(entry_size: u64) -> Option<usize> {
     }
 
     Some(OUTPUT_BUFFER_CAPACITY)
-}
-
-fn available_directory_write_shards(file_count: usize) -> usize {
-    if file_count == 0 {
-        return 1;
-    }
-
-    thread::available_parallelism()
-        .unwrap_or(NonZeroUsize::MIN)
-        .get()
-        .div_ceil(4)
-        .max(1)
-        .min(MAX_DIRECTORY_WRITE_SHARDS)
-        .min(file_count)
-}
-
-fn spawn_file_write_shards(
-    shard_count: usize,
-) -> (
-    Vec<Sender<ShardWriteBatch>>,
-    Vec<thread::JoinHandle<Result<FileWriteShardOutcome>>>,
-) {
-    let shard_count = shard_count.max(1);
-    let mut txs = Vec::with_capacity(shard_count);
-    let mut handles = Vec::with_capacity(shard_count);
-
-    for _ in 0..shard_count {
-        let (tx, rx) = bounded::<ShardWriteBatch>(DIRECTORY_WRITE_BATCH_QUEUE_CAPACITY);
-        txs.push(tx);
-        handles.push(thread::spawn(move || -> Result<FileWriteShardOutcome> {
-            let mut outcome = FileWriteShardOutcome::default();
-            let mut active_file: Option<ActiveShardFile> = None;
-
-            while let Ok(batch) = rx.recv() {
-                for item in batch.items {
-                    match item {
-                        ShardBatchItem::Open {
-                            file_id,
-                            ready_file,
-                        } => {
-                            if active_file.is_some() {
-                                return Err(crate::OxideError::InvalidFormat(
-                                    "file write shard received a new file before finishing the previous one",
-                                ));
-                            }
-
-                            active_file = Some(ActiveShardFile {
-                                file_id,
-                                path: ready_file.path,
-                                entry: ready_file.entry,
-                                writer: ready_file.writer,
-                                permit: ready_file.permit,
-                            });
-                        }
-                        ShardBatchItem::Write(span) => {
-                            let active = active_file.as_mut().ok_or(OxideError::InvalidFormat(
-                                "file write shard received data without an active file",
-                            ))?;
-                            if active.file_id != span.file_id {
-                                return Err(crate::OxideError::InvalidFormat(
-                                    "file write shard received out-of-order file data",
-                                ));
-                            }
-
-                            let started = Instant::now();
-                            active.writer.write_all(&batch.block[span.range.clone()])?;
-                            outcome.stats.record_output_data(started.elapsed());
-
-                            if span.eof {
-                                let ActiveShardFile {
-                                    path,
-                                    entry,
-                                    writer,
-                                    permit,
-                                    ..
-                                } = active_file.take().ok_or(OxideError::InvalidFormat(
-                                    "file write shard lost its active file before completion",
-                                ))?;
-                                let started = Instant::now();
-                                let _file = writer.into_inner()?;
-                                outcome.stats.record_output_flush(started.elapsed());
-                                drop(permit);
-                                outcome.completed_data_files =
-                                    outcome.completed_data_files.saturating_add(1);
-                                outcome
-                                    .pending_file_metadata
-                                    .push(PendingMetadata::new(path, entry));
-                            }
-                        }
-                    }
-                }
-            }
-
-            if active_file.is_some() {
-                return Err(crate::OxideError::InvalidFormat(
-                    "file write shard closed with a pending file",
-                ));
-            }
-
-            Ok(outcome)
-        }));
-    }
-
-    (txs, handles)
-}
-
-fn join_file_write_shard_handle(
-    handle: thread::JoinHandle<Result<FileWriteShardOutcome>>,
-) -> Result<FileWriteShardOutcome> {
-    handle.join().map_err(|payload| {
-        let details = if let Some(message) = payload.downcast_ref::<&str>() {
-            (*message).to_string()
-        } else if let Some(message) = payload.downcast_ref::<String>() {
-            message.clone()
-        } else {
-            "unknown panic payload".to_string()
-        };
-        crate::OxideError::CompressionError(format!("file write shard panicked: {details}"))
-    })?
 }
 
 fn available_prepared_entry_workers(item_count: usize) -> usize {
@@ -1612,63 +1365,27 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
             self.stats.directory_decode += decode_started.elapsed();
         }
 
-        let block = Arc::<[u8]>::from(bytes);
-        let mut shard_batches = (0..self.file_write_txs.len())
-            .map(|_| Vec::<ShardBatchItem>::new())
-            .collect::<Vec<_>>();
-        let mut block_offset = 0usize;
-
         while !bytes.is_empty() {
-            let (shard_id, take, finished_file, open_item) = {
+            let (take, finished_file) = {
                 let pending = self.pending_file.as_mut().ok_or(OxideError::InvalidFormat(
                     "directory archive contains file data beyond manifest entries",
                 ))?;
 
                 let take = bytes.len().min(pending.remaining as usize);
                 pending.remaining -= take as u64;
-                (
-                    pending.shard_id,
-                    take,
-                    pending.remaining == 0,
-                    pending
-                        .ready_file
-                        .take()
-                        .map(|ready_file| ShardBatchItem::Open {
-                            file_id: pending.file_id,
-                            ready_file,
-                        }),
-                )
+                let started = Instant::now();
+                pending.writer.write_all(&bytes[..take])?;
+                self.stats.record_output_data(started.elapsed());
+                (take, pending.remaining == 0)
             };
-
-            if let Some(open_item) = open_item {
-                shard_batches[shard_id].push(open_item);
-            }
-            let file_id = self
-                .pending_file
-                .as_ref()
-                .map(|pending| pending.file_id)
-                .ok_or(OxideError::InvalidFormat(
-                    "directory restore missing pending file during write",
-                ))?;
-            shard_batches[shard_id].push(ShardBatchItem::Write(WriteSpan {
-                file_id,
-                range: block_offset..block_offset + take,
-                eof: finished_file,
-            }));
 
             self.stats.output_bytes_total =
                 self.stats.output_bytes_total.saturating_add(take as u64);
             bytes = &bytes[take..];
-            block_offset += take;
 
             if finished_file {
                 self.finalize_pending_file()?;
                 if !bytes.is_empty() {
-                    // Flush completed-file batches before waiting for the next
-                    // ready file so shard workers can close files and release
-                    // permits. That avoids circular waits on tiny-file runs
-                    // where one ordered chunk spans many file boundaries.
-                    self.flush_shard_batches(&block, &mut shard_batches)?;
                     let decode_started = Instant::now();
                     if !self.ensure_pending_file_for_write()? {
                         return Err(OxideError::InvalidFormat(
@@ -1679,8 +1396,6 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
                 }
             }
         }
-
-        self.flush_shard_batches(&block, &mut shard_batches)?;
 
         self.stats.ordered_write_time += ordered_write_started.elapsed();
 
@@ -1929,59 +1644,6 @@ mod tests {
         assert_eq!(
             std::fs::read(temp.path().join("nested/second.txt")).expect("read second"),
             b"data"
-        );
-    }
-
-    #[test]
-    fn restore_many_small_files_across_shards_and_chunk_boundaries() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut entries = Vec::new();
-        let mut payload = Vec::new();
-
-        for index in 0..32u64 {
-            entries.push(file_entry(format!("nested/file-{index}.bin"), 1, index));
-            payload.push(index as u8);
-        }
-
-        let mut writer = DirectoryRestoreWriter::create(temp.path(), ArchiveManifest::new(entries))
-            .expect("create writer");
-        for chunk in payload.chunks(7) {
-            writer.write_chunk(chunk).expect("write chunk");
-        }
-        writer.finish().expect("finish restore");
-
-        for index in 0..32u64 {
-            assert_eq!(
-                std::fs::read(temp.path().join(format!("nested/file-{index}.bin")))
-                    .expect("read restored file"),
-                vec![index as u8]
-            );
-        }
-    }
-
-    #[test]
-    fn restore_many_tiny_files_in_one_chunk_finishes_without_deadlock() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut entries = Vec::new();
-        let mut payload = Vec::new();
-
-        for index in 0..640u64 {
-            entries.push(file_entry(format!("nested/file-{index}.bin"), 1, index));
-            payload.push((index % 251) as u8);
-        }
-
-        let mut writer = DirectoryRestoreWriter::create(temp.path(), ArchiveManifest::new(entries))
-            .expect("create writer");
-        writer.write_chunk(&payload).expect("write payload");
-        writer.finish().expect("finish restore");
-
-        assert_eq!(
-            std::fs::read(temp.path().join("nested/file-0.bin")).expect("read first"),
-            vec![0]
-        );
-        assert_eq!(
-            std::fs::read(temp.path().join("nested/file-639.bin")).expect("read last"),
-            vec![(639 % 251) as u8]
         );
     }
 
