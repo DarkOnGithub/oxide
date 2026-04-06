@@ -1406,6 +1406,8 @@ fn apply_directory_restore_stats(
         .ordered_write
         .saturating_sub(restore_stats.ordered_write_time);
     stage_timings.directory_decode += restore_stats.directory_decode;
+    stage_timings.prepared_file_open += restore_stats.prepared_file_open;
+    stage_timings.prepared_file_wait += restore_stats.prepared_file_wait;
     stage_timings.output_prepare_directories += restore_stats.output_prepare_directories;
     stage_timings.output_write += restore_stats.output_write;
     stage_timings.output_create += restore_stats.output_create;
