@@ -1740,6 +1740,54 @@ fn extract_directory_archive_preserves_empty_file_metadata()
 }
 
 #[test]
+fn extract_directory_archive_with_many_files_across_preopen_window()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    for index in 0..96 {
+        let path = format!("window/file-{index:03}.txt");
+        let data = if index < 8 {
+            vec![(index % 251) as u8; 32 * 1024]
+        } else {
+            vec![(index % 251) as u8]
+        };
+        write_directory_file(&source, &path, &data)?;
+    }
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 64));
+    let pipeline = build_pipeline(8 * 1024, 4, buffer_pool, CompressionAlgo::Lz4);
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+
+    let restored_root = tempfile::tempdir()?;
+    let restored = restored_root.path().join("out");
+    pipeline.extract_path(
+        Cursor::new(archive),
+        &restored,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    for index in 0..96 {
+        assert_eq!(
+            std::fs::read(restored.join(format!("window/file-{index:03}.txt")))?,
+            if index < 8 {
+                vec![(index % 251) as u8; 32 * 1024]
+            } else {
+                vec![(index % 251) as u8]
+            }
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn extract_archive_ignores_footer_crc_mismatch() -> Result<(), Box<dyn std::error::Error>> {
     let data = build_text_fixture(96 * 1024);
     let file = write_fixture(&data)?;
