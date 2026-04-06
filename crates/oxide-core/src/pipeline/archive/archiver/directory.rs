@@ -1,7 +1,7 @@
 use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError, TrySendError, bounded, select};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
@@ -9,10 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::WorkerPool;
-use crate::dictionary::{
-    ArchiveDictionaryBank, ArchiveDictionaryMode, DICTIONARY_SAMPLE_WINDOW_SIZE, DictionaryTrainer,
-    dictionary_sample_offsets,
-};
+use crate::dictionary::{ArchiveDictionaryBank, ArchiveDictionaryMode, DictionaryTrainer};
 use crate::format::{ArchiveBlockWriter, ArchiveManifest, ReorderBuffer};
 use crate::io::MmapInput;
 use crate::pipeline::directory::{self, DirectoryBatchSubmitter};
@@ -62,6 +59,7 @@ where
         probe_plans: file_probe_plans,
         file_order,
     } = directory::plan_directory_files(&discovery, block_size);
+    let mut directory_dictionary_trainer = dictionary_trainer(config, &discovery);
 
     let block_count = directory::estimate_directory_block_count_with_file_order(
         &discovery,
@@ -69,8 +67,9 @@ where
         &file_probe_plans,
         chunking_policy,
         producer_compression_plan,
+        directory_dictionary_trainer.as_mut(),
     )?;
-    let dictionary_bank = train_directory_dictionary_bank(config, &discovery)?;
+    let dictionary_bank = finalize_directory_dictionary_bank(config, directory_dictionary_trainer)?;
     let manifest = directory::manifest_from_discovery_with_file_order(&discovery, &file_order)?
         .with_dictionary_bank(dictionary_bank.clone());
     let input_bytes_total = discovery.input_bytes_total;
@@ -953,32 +952,36 @@ fn fail_directory_queueing(
     first_error.get_or_insert(error);
 }
 
-fn train_directory_dictionary_bank(
+fn finalize_directory_dictionary_bank(
     config: &ArchivePipelineConfig,
-    discovery: &directory::DirectoryDiscovery,
+    trainer: Option<DictionaryTrainer>,
 ) -> Result<ArchiveDictionaryBank> {
     if let Some(dictionary_bank) = config.imported_dictionary_bank.as_ref() {
         return Ok(dictionary_bank.clone());
     }
 
-    if config.skip_compression || config.compression_algo != crate::CompressionAlgo::Zstd {
-        return Ok(ArchiveDictionaryBank::default());
+    match trainer {
+        Some(trainer) => trainer.build(
+            config.compression_algo,
+            config.performance.compression_level,
+        ),
+        None => Ok(ArchiveDictionaryBank::default()),
+    }
+}
+
+fn dictionary_trainer(
+    config: &ArchivePipelineConfig,
+    discovery: &directory::DirectoryDiscovery,
+) -> Option<DictionaryTrainer> {
+    if config.imported_dictionary_bank.is_some()
+        || config.skip_compression
+        || config.compression_algo != crate::CompressionAlgo::Zstd
+    {
+        return None;
     }
 
     let dictionary_mode = effective_directory_dictionary_mode(config, discovery);
-    if dictionary_mode == ArchiveDictionaryMode::Off {
-        return Ok(ArchiveDictionaryBank::default());
-    }
-
-    let mut trainer = DictionaryTrainer::new(dictionary_mode);
-    for file in &discovery.files {
-        let _ = observe_directory_dictionary_samples(&mut trainer, &file.full_path, file.size);
-    }
-
-    trainer.build(
-        config.compression_algo,
-        config.performance.compression_level,
-    )
+    (dictionary_mode != ArchiveDictionaryMode::Off).then(|| DictionaryTrainer::new(dictionary_mode))
 }
 
 fn effective_directory_dictionary_mode(
@@ -1003,27 +1006,4 @@ fn effective_directory_dictionary_mode(
     }
 
     ArchiveDictionaryMode::Auto
-}
-
-fn observe_directory_dictionary_samples(
-    trainer: &mut DictionaryTrainer,
-    path: &Path,
-    file_size: u64,
-) -> Result<()> {
-    if file_size == 0 {
-        return Ok(());
-    }
-
-    let mut handle = fs::File::open(path)?;
-    let mut sample = vec![0u8; DICTIONARY_SAMPLE_WINDOW_SIZE];
-    for offset in dictionary_sample_offsets(usize::try_from(file_size).unwrap_or(usize::MAX)) {
-        handle.seek(SeekFrom::Start(offset as u64))?;
-        let read = handle.read(sample.as_mut_slice())?;
-        if read == 0 {
-            continue;
-        }
-        trainer.observe_with_path(path, &sample[..read]);
-    }
-
-    Ok(())
 }

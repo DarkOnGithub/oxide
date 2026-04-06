@@ -8,7 +8,10 @@ use bytes::Bytes;
 use jwalk::WalkDir;
 use memmap2::Mmap;
 
-use crate::dictionary::normalized_extension_from_path;
+use crate::dictionary::{
+    DICTIONARY_SAMPLE_WINDOW_SIZE, DictionaryTrainer, dictionary_sample_offsets,
+    normalized_extension_from_path,
+};
 use crate::format::should_force_raw_storage;
 use crate::io::{ChunkStreamState, ChunkingMode, ChunkingPolicy, MmapInput};
 use crate::types::{Batch, BatchData, ChunkEncodingPlan, CompressionAlgo, Result};
@@ -636,6 +639,7 @@ pub(super) fn estimate_directory_block_count_with_file_order(
     file_probe_plans: &[FileProbePlan],
     chunking_policy: ChunkingPolicy,
     compression_plan: ChunkEncodingPlan,
+    mut dictionary_trainer: Option<&mut DictionaryTrainer>,
 ) -> Result<u32> {
     if discovery.files.len() != file_probe_plans.len() {
         return Err(crate::OxideError::InvalidFormat(
@@ -667,6 +671,10 @@ pub(super) fn estimate_directory_block_count_with_file_order(
                 file_size,
                 file_probe_plans[file_index].force_raw_storage,
             );
+
+            if let Some(trainer) = dictionary_trainer.as_deref_mut() {
+                let _ = observe_dictionary_samples_from_file(trainer, &file.full_path, file.size);
+            }
         }
 
         return u32::try_from(planner.finish())
@@ -694,22 +702,195 @@ pub(super) fn estimate_directory_block_count_with_file_order(
             let mmap = MmapInput::open(&file.full_path)?;
             if let Some(map) = mmap.mapping() {
                 planner.push_bytes(&file.full_path, &map[..], force_raw_storage);
+                if let Some(trainer) = dictionary_trainer.as_deref_mut() {
+                    observe_dictionary_samples_from_bytes(trainer, &file.full_path, &map[..]);
+                }
             }
             continue;
         }
 
         let mut file_reader = fs::File::open(&file.full_path)?;
+        let mut sampled = dictionary_trainer
+            .as_ref()
+            .map(|_| DirectoryDictionarySampler::new(file_size));
+        let mut file_offset = 0usize;
         loop {
             let read = file_reader.read(&mut read_buffer)?;
             if read == 0 {
                 break;
             }
+
+            if let Some(sampler) = sampled.as_mut() {
+                sampler.observe_chunk(file_offset, &read_buffer[..read]);
+            }
             planner.push_bytes(&file.full_path, &read_buffer[..read], force_raw_storage);
+            file_offset = file_offset.saturating_add(read);
+        }
+
+        if let (Some(trainer), Some(sampler)) = (dictionary_trainer.as_deref_mut(), sampled) {
+            sampler.finish(trainer, &file.full_path);
         }
     }
 
     u32::try_from(planner.finish())
         .map_err(|_| crate::OxideError::InvalidFormat("too many blocks for OXZ v2"))
+}
+
+fn observe_dictionary_samples_from_file(
+    trainer: &mut DictionaryTrainer,
+    path: &Path,
+    file_size: u64,
+) -> Result<()> {
+    let file_size = usize::try_from(file_size).unwrap_or(usize::MAX);
+    if file_size == 0 {
+        return Ok(());
+    }
+
+    let mut handle = fs::File::open(path)?;
+    let mut sampler = DirectoryDictionarySampler::new(file_size);
+    let mut sample = vec![0u8; DICTIONARY_SAMPLE_WINDOW_SIZE];
+    for window in sampler.windows.iter_mut() {
+        use std::io::{Seek, SeekFrom};
+
+        handle.seek(SeekFrom::Start(window.start as u64))?;
+        let read = handle.read(sample.as_mut_slice())?;
+        if read == 0 {
+            continue;
+        }
+
+        window
+            .bytes
+            .extend_from_slice(&sample[..read.min(window.end - window.start)]);
+    }
+
+    sampler.finish(trainer, path);
+    Ok(())
+}
+
+fn observe_dictionary_samples_from_bytes(
+    trainer: &mut DictionaryTrainer,
+    path: &Path,
+    bytes: &[u8],
+) {
+    for offset in dictionary_sample_offsets(bytes.len()) {
+        let end = offset
+            .saturating_add(DICTIONARY_SAMPLE_WINDOW_SIZE)
+            .min(bytes.len());
+        trainer.observe_with_path(path, &bytes[offset..end]);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryDictionarySampler {
+    windows: Vec<DictionarySampleWindow>,
+}
+
+impl DirectoryDictionarySampler {
+    fn new(file_size: usize) -> Self {
+        Self {
+            windows: dictionary_sample_offsets(file_size)
+                .into_iter()
+                .map(|start| DictionarySampleWindow::new(start, file_size))
+                .collect(),
+        }
+    }
+
+    fn observe_chunk(&mut self, chunk_start: usize, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        let chunk_end = chunk_start.saturating_add(chunk.len());
+        for window in &mut self.windows {
+            if window.is_complete() || chunk_end <= window.start || chunk_start >= window.end {
+                continue;
+            }
+
+            let copy_start = (window.start + window.bytes.len()).max(chunk_start);
+            let copy_end = window.end.min(chunk_end);
+            if copy_start >= copy_end {
+                continue;
+            }
+
+            let source_start = copy_start - chunk_start;
+            let source_end = copy_end - chunk_start;
+            window
+                .bytes
+                .extend_from_slice(&chunk[source_start..source_end]);
+        }
+    }
+
+    fn finish(self, trainer: &mut DictionaryTrainer, path: &Path) {
+        for window in self.windows {
+            if !window.bytes.is_empty() {
+                trainer.observe_with_path(path, &window.bytes);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DictionarySampleWindow {
+    start: usize,
+    end: usize,
+    bytes: Vec<u8>,
+}
+
+impl DictionarySampleWindow {
+    fn new(start: usize, file_size: usize) -> Self {
+        let end = start
+            .saturating_add(DICTIONARY_SAMPLE_WINDOW_SIZE)
+            .min(file_size);
+        Self {
+            start,
+            end,
+            bytes: Vec::with_capacity(end.saturating_sub(start)),
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.bytes.len() >= self.end.saturating_sub(self.start)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_dictionary_sampler_reassembles_window_bytes_across_chunks() {
+        let data = (0..(DICTIONARY_SAMPLE_WINDOW_SIZE * 3 + 137))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let expected = dictionary_sample_offsets(data.len())
+            .into_iter()
+            .map(|offset| {
+                let end = offset
+                    .saturating_add(DICTIONARY_SAMPLE_WINDOW_SIZE)
+                    .min(data.len());
+                data[offset..end].to_vec()
+            })
+            .collect::<Vec<_>>();
+
+        let mut sampler = DirectoryDictionarySampler::new(data.len());
+        let chunk_sizes = [97usize, 4093, 257, 8191, 521, 16384];
+        let mut offset = 0usize;
+        let mut chunk_index = 0usize;
+        while offset < data.len() {
+            let chunk_size = chunk_sizes[chunk_index % chunk_sizes.len()];
+            let end = offset.saturating_add(chunk_size).min(data.len());
+            sampler.observe_chunk(offset, &data[offset..end]);
+            offset = end;
+            chunk_index += 1;
+        }
+
+        let actual = sampler
+            .windows
+            .into_iter()
+            .map(|window| window.bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
 }
 
 fn directory_fragment_file_size_threshold(block_size: usize) -> u64 {
