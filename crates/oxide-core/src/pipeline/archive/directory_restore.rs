@@ -63,6 +63,28 @@ pub(crate) struct DirectoryRestoreStats {
 }
 
 impl DirectoryRestoreStats {
+    fn merge(&mut self, other: Self) {
+        self.directory_decode += other.directory_decode;
+        self.ordered_write_time += other.ordered_write_time;
+        self.prepared_file_open += other.prepared_file_open;
+        self.prepared_file_permit_wait += other.prepared_file_permit_wait;
+        self.prepared_file_wait += other.prepared_file_wait;
+        self.output_prepare_directories += other.output_prepare_directories;
+        self.output_write += other.output_write;
+        self.output_create += other.output_create;
+        self.output_create_directories += other.output_create_directories;
+        self.output_create_files += other.output_create_files;
+        self.output_data += other.output_data;
+        self.output_flush += other.output_flush;
+        self.output_metadata += other.output_metadata;
+        self.output_metadata_files += other.output_metadata_files;
+        self.output_metadata_directories += other.output_metadata_directories;
+        self.output_bytes_total = self
+            .output_bytes_total
+            .saturating_add(other.output_bytes_total);
+        self.entry_count = self.entry_count.saturating_add(other.entry_count);
+    }
+
     fn record_prepared_file_open(&mut self, elapsed: Duration) {
         self.prepared_file_open += elapsed;
     }
@@ -157,6 +179,28 @@ enum PreparedRestoreEntry {
         entry: crate::ArchiveListingEntry,
         create_elapsed: Duration,
     },
+}
+
+#[derive(Debug)]
+struct ReadyFileWrite {
+    path: PathBuf,
+    entry: crate::ArchiveListingEntry,
+    writer: PendingFileWriter,
+    permit: OpenFilePermit,
+}
+
+#[derive(Debug)]
+enum RestorePlannerMessage {
+    ReadyFile(ReadyFileWrite),
+    Finished(RestorePlannerOutcome),
+}
+
+#[derive(Debug, Default)]
+struct RestorePlannerOutcome {
+    data_file_count_total: usize,
+    pending_file_metadata: Vec<PendingMetadata>,
+    pending_directory_metadata: Vec<PendingMetadata>,
+    stats: DirectoryRestoreStats,
 }
 
 #[derive(Debug)]
@@ -275,19 +319,28 @@ struct PendingMetadata {
     depth: usize,
 }
 
+impl PendingMetadata {
+    fn new(path: PathBuf, entry: crate::ArchiveListingEntry) -> Self {
+        Self {
+            depth: path_depth(&path),
+            path,
+            entry,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct DirectoryRestoreWriter {
     root: PathBuf,
-    entry_count_total: usize,
-    next_entry: usize,
+    data_file_count_total: usize,
+    completed_data_files: usize,
     pending_file: Option<PendingFile>,
-    ready_entries: VecDeque<PreparedRestoreEntry>,
     created_directories: HashSet<PathBuf>,
     pending_file_metadata: Vec<PendingMetadata>,
     pending_directory_metadata: Vec<PendingMetadata>,
-    ready_entry_window_capacity: usize,
-    prepared_entry_rx: Receiver<Result<PreparedRestoreEntry>>,
-    prepared_entry_handle: Option<thread::JoinHandle<Result<()>>>,
+    planner_finished: bool,
+    planner_rx: Receiver<Result<RestorePlannerMessage>>,
+    planner_handle: Option<thread::JoinHandle<Result<()>>>,
     stats: DirectoryRestoreStats,
 }
 
@@ -311,29 +364,26 @@ impl DirectoryRestoreWriter {
         let window_config = prepared_entry_window_config(&entries);
         let mut writer = Self {
             root: root.to_path_buf(),
-            entry_count_total: entries.len(),
-            next_entry: 0,
+            data_file_count_total: 0,
+            completed_data_files: 0,
             pending_file: None,
-            ready_entries: VecDeque::with_capacity(window_config.ready_entry_window_capacity),
             created_directories: HashSet::new(),
             pending_file_metadata: Vec::new(),
             pending_directory_metadata: Vec::new(),
-            ready_entry_window_capacity: window_config.ready_entry_window_capacity,
-            prepared_entry_rx: never(),
-            prepared_entry_handle: None,
+            planner_finished: false,
+            planner_rx: never(),
+            planner_handle: None,
             stats: DirectoryRestoreStats::default(),
         };
         writer.ensure_directory_exists(root)?;
         writer.prepare_output_directories(&entries)?;
-        let (prepared_entry_rx, prepared_entry_handle) =
-            spawn_prepared_restore_entries(entries, window_config);
-        writer.prepared_entry_rx = prepared_entry_rx;
-        writer.prepared_entry_handle = Some(prepared_entry_handle);
+        let (planner_rx, planner_handle) = spawn_restore_planner(entries, window_config);
+        writer.planner_rx = planner_rx;
+        writer.planner_handle = Some(planner_handle);
         Ok(writer)
     }
 
     pub(crate) fn finish(&mut self) -> Result<DirectoryRestoreStats> {
-        self.advance_entries()?;
         if let Some(pending) = self.pending_file.as_ref()
             && pending.remaining > 0
         {
@@ -341,14 +391,17 @@ impl DirectoryRestoreWriter {
                 "truncated file payload during directory restore",
             ));
         }
-        if self.pending_file.is_some() || self.next_entry != self.entry_count_total {
+
+        self.wait_for_planner_completion()?;
+
+        if self.pending_file.is_some() || self.completed_data_files != self.data_file_count_total {
             return Err(crate::OxideError::InvalidFormat(
                 "directory restore ended before all entries completed",
             ));
         }
         self.finalize_file_metadata()?;
         self.finalize_directories()?;
-        self.join_prepared_entries()?;
+        self.join_planner()?;
         Ok(self.stats)
     }
 
@@ -376,19 +429,13 @@ impl DirectoryRestoreWriter {
     }
 
     fn defer_file_metadata(&mut self, path: PathBuf, entry: crate::ArchiveListingEntry) {
-        self.pending_file_metadata.push(PendingMetadata {
-            depth: path_depth(&path),
-            path,
-            entry,
-        });
+        self.pending_file_metadata
+            .push(PendingMetadata::new(path, entry));
     }
 
     fn defer_directory_metadata(&mut self, path: PathBuf, entry: crate::ArchiveListingEntry) {
-        self.pending_directory_metadata.push(PendingMetadata {
-            depth: path_depth(&path),
-            path,
-            entry,
-        });
+        self.pending_directory_metadata
+            .push(PendingMetadata::new(path, entry));
     }
 
     fn prepare_output_directories(&mut self, entries: &[RestoreEntry]) -> Result<()> {
@@ -414,101 +461,106 @@ impl DirectoryRestoreWriter {
         Ok(())
     }
 
-    fn advance_entries(&mut self) -> Result<()> {
-        self.fill_ready_entries()?;
+    fn ensure_pending_file_for_write(&mut self) -> Result<bool> {
+        if self.pending_file.is_some() {
+            return Ok(true);
+        }
 
-        while self.pending_file.is_none() && self.next_entry < self.entry_count_total {
-            let prepared_entry = self.next_ready_entry()?;
-            self.next_entry += 1;
-            self.stats.entry_count = self.stats.entry_count.saturating_add(1);
+        self.pending_file = self.next_pending_file()?;
+        Ok(self.pending_file.is_some())
+    }
 
-            match prepared_entry {
-                PreparedRestoreEntry::Directory { path, entry } => {
-                    self.defer_directory_metadata(path, entry);
-                }
-                PreparedRestoreEntry::File { .. } => {
-                    return Err(crate::OxideError::CompressionError(
-                        "prepared file entry reached writer before in-order file open".to_string(),
-                    ));
-                }
-                PreparedRestoreEntry::FileReady {
-                    path,
-                    entry,
-                    writer,
-                    permit,
-                    permit_wait_elapsed,
-                    open_elapsed,
-                } => {
-                    self.stats
-                        .record_prepared_file_permit_wait(permit_wait_elapsed);
-                    self.stats.record_prepared_file_open(open_elapsed);
-                    if entry.size == 0 {
-                        let started = Instant::now();
-                        let _file = writer.into_inner()?;
-                        self.stats.record_output_flush(started.elapsed());
-                        self.defer_file_metadata(path, entry);
-                        continue;
+    fn next_pending_file(&mut self) -> Result<Option<PendingFile>> {
+        loop {
+            match self.planner_rx.try_recv() {
+                Ok(message) => {
+                    if let Some(pending_file) = self.consume_planner_message(message?)? {
+                        return Ok(Some(pending_file));
                     }
-
-                    self.pending_file = Some(PendingFile {
-                        remaining: entry.size,
-                        path,
-                        entry,
-                        writer,
-                        permit,
-                    });
+                    if self.planner_finished {
+                        return Ok(None);
+                    }
                 }
-                PreparedRestoreEntry::Symlink {
-                    path,
-                    entry,
-                    create_elapsed,
-                } => {
-                    self.stats.record_output_create_file(create_elapsed);
-                    self.defer_file_metadata(path, entry);
-                }
-            }
-
-            self.fill_ready_entries()?;
-        }
-
-        Ok(())
-    }
-
-    fn fill_ready_entries(&mut self) -> Result<()> {
-        while self.ready_entries.len() < self.ready_entry_window_capacity
-            && self.next_entry + self.ready_entries.len() < self.entry_count_total
-        {
-            match self.prepared_entry_rx.try_recv() {
-                Ok(prepared) => self.ready_entries.push_back(prepared?),
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    return Err(crate::OxideError::CompressionError(
-                        "prepared entry queue closed before completion".to_string(),
-                    ));
-                }
+                Err(TryRecvError::Disconnected) => return self.handle_planner_disconnect(),
             }
         }
 
-        Ok(())
-    }
-
-    fn next_ready_entry(&mut self) -> Result<PreparedRestoreEntry> {
-        if let Some(prepared_entry) = self.ready_entries.pop_front() {
-            return Ok(prepared_entry);
+        if self.planner_finished {
+            return Ok(None);
         }
 
         let wait_started = Instant::now();
-        let prepared_entry = self.prepared_entry_rx.recv().map_err(|_| {
-            crate::OxideError::CompressionError(
-                "prepared entry queue closed before completion".to_string(),
-            )
-        })?;
-        self.stats.record_prepared_file_wait(wait_started.elapsed());
-        prepared_entry
+        loop {
+            match self.planner_rx.recv() {
+                Ok(message) => {
+                    self.stats.record_prepared_file_wait(wait_started.elapsed());
+                    if let Some(pending_file) = self.consume_planner_message(message?)? {
+                        return Ok(Some(pending_file));
+                    }
+                    return Ok(None);
+                }
+                Err(_) => {
+                    self.stats.record_prepared_file_wait(wait_started.elapsed());
+                    return self.handle_planner_disconnect();
+                }
+            }
+        }
     }
 
-    fn join_prepared_entries(&mut self) -> Result<()> {
-        let Some(handle) = self.prepared_entry_handle.take() else {
+    fn consume_planner_message(
+        &mut self,
+        message: RestorePlannerMessage,
+    ) -> Result<Option<PendingFile>> {
+        match message {
+            RestorePlannerMessage::ReadyFile(ready_file) => Ok(Some(PendingFile {
+                remaining: ready_file.entry.size,
+                path: ready_file.path,
+                entry: ready_file.entry,
+                writer: ready_file.writer,
+                permit: ready_file.permit,
+            })),
+            RestorePlannerMessage::Finished(outcome) => {
+                self.apply_planner_outcome(outcome);
+                Ok(None)
+            }
+        }
+    }
+
+    fn apply_planner_outcome(&mut self, outcome: RestorePlannerOutcome) {
+        self.planner_finished = true;
+        self.data_file_count_total = outcome.data_file_count_total;
+        self.pending_file_metadata
+            .extend(outcome.pending_file_metadata);
+        self.pending_directory_metadata
+            .extend(outcome.pending_directory_metadata);
+        self.stats.merge(outcome.stats);
+    }
+
+    fn wait_for_planner_completion(&mut self) -> Result<()> {
+        while !self.planner_finished {
+            let Some(ready_file) = self.next_pending_file()? else {
+                continue;
+            };
+            drop(ready_file);
+        }
+
+        Ok(())
+    }
+
+    fn handle_planner_disconnect(&mut self) -> Result<Option<PendingFile>> {
+        self.join_planner()?;
+        if self.planner_finished {
+            Ok(None)
+        } else {
+            Err(crate::OxideError::CompressionError(
+                "restore planner queue closed before completion".to_string(),
+            ))
+        }
+    }
+
+    fn join_planner(&mut self) -> Result<()> {
+        let Some(handle) = self.planner_handle.take() else {
             return Ok(());
         };
 
@@ -521,7 +573,7 @@ impl DirectoryRestoreWriter {
                 "unknown panic payload".to_string()
             };
             crate::OxideError::CompressionError(format!(
-                "prepared entry worker thread panicked: {details}"
+                "restore planner thread panicked: {details}"
             ))
         })?
     }
@@ -542,6 +594,7 @@ impl DirectoryRestoreWriter {
         self.stats.record_output_flush(started.elapsed());
         drop(permit);
         self.defer_file_metadata(path, entry);
+        self.completed_data_files = self.completed_data_files.saturating_add(1);
         Ok(())
     }
 
@@ -715,6 +768,110 @@ fn adaptive_preopened_file_window_capacity(
             MAX_PREOPENED_FILE_WINDOW_CAPACITY,
         )
         .min(file_count)
+}
+
+fn spawn_restore_planner(
+    entries: Vec<RestoreEntry>,
+    window_config: PreparedEntryWindowConfig,
+) -> (
+    Receiver<Result<RestorePlannerMessage>>,
+    thread::JoinHandle<Result<()>>,
+) {
+    // Phase 3 split: the planner owns manifest-order coordination and emits
+    // only data-bearing file work to the executor. Non-data entries and
+    // deferred metadata stay off the write hot path and are merged at finish.
+    let (tx, rx) =
+        bounded::<Result<RestorePlannerMessage>>(window_config.ready_entry_window_capacity);
+    let handle = thread::spawn(move || -> Result<()> {
+        let (prepared_entry_rx, prepared_entry_handle) =
+            spawn_prepared_restore_entries(entries, window_config);
+        let mut outcome = RestorePlannerOutcome::default();
+
+        let planner_result = (|| -> Result<bool> {
+            while let Ok(prepared) = prepared_entry_rx.recv() {
+                let prepared = prepared?;
+                outcome.stats.entry_count = outcome.stats.entry_count.saturating_add(1);
+
+                match prepared {
+                    PreparedRestoreEntry::Directory { path, entry } => {
+                        outcome
+                            .pending_directory_metadata
+                            .push(PendingMetadata::new(path, entry));
+                    }
+                    PreparedRestoreEntry::File { .. } => {
+                        let _ = tx.send(Err(crate::OxideError::CompressionError(
+                            "prepared file entry reached planner before in-order file open"
+                                .to_string(),
+                        )));
+                        return Ok(false);
+                    }
+                    PreparedRestoreEntry::FileReady {
+                        path,
+                        entry,
+                        writer,
+                        permit,
+                        permit_wait_elapsed,
+                        open_elapsed,
+                    } => {
+                        outcome
+                            .stats
+                            .record_prepared_file_permit_wait(permit_wait_elapsed);
+                        outcome.stats.record_prepared_file_open(open_elapsed);
+
+                        if entry.size == 0 {
+                            let started = Instant::now();
+                            let _file = writer.into_inner()?;
+                            outcome.stats.record_output_flush(started.elapsed());
+                            outcome
+                                .pending_file_metadata
+                                .push(PendingMetadata::new(path, entry));
+                            drop(permit);
+                            continue;
+                        }
+
+                        outcome.data_file_count_total =
+                            outcome.data_file_count_total.saturating_add(1);
+                        if tx
+                            .send(Ok(RestorePlannerMessage::ReadyFile(ReadyFileWrite {
+                                path,
+                                entry,
+                                writer,
+                                permit,
+                            })))
+                            .is_err()
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    PreparedRestoreEntry::Symlink {
+                        path,
+                        entry,
+                        create_elapsed,
+                    } => {
+                        outcome.stats.record_output_create_file(create_elapsed);
+                        outcome
+                            .pending_file_metadata
+                            .push(PendingMetadata::new(path, entry));
+                    }
+                }
+            }
+
+            Ok(true)
+        })();
+
+        let join_result = join_prepared_restore_entries_handle(prepared_entry_handle);
+        match (planner_result, join_result) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(true), Ok(())) => {
+                let _ = tx.send(Ok(RestorePlannerMessage::Finished(outcome)));
+                Ok(())
+            }
+            (Ok(false), Ok(())) => Ok(()),
+        }
+    });
+
+    (rx, handle)
 }
 
 fn spawn_prepared_restore_entries(
@@ -944,6 +1101,21 @@ fn spawn_prepared_restore_entries(
     });
 
     (rx, handle)
+}
+
+fn join_prepared_restore_entries_handle(handle: thread::JoinHandle<Result<()>>) -> Result<()> {
+    handle.join().map_err(|payload| {
+        let details = if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        crate::OxideError::CompressionError(format!(
+            "prepared entry worker thread panicked: {details}"
+        ))
+    })?
 }
 
 fn prepare_restore_entry(restore_entry: RestoreEntry) -> Result<PreparedRestoreEntry> {
@@ -1183,9 +1355,15 @@ impl FilteredDirectoryRestoreWriter {
 impl OrderedChunkWriter for DirectoryRestoreWriter {
     fn write_chunk(&mut self, mut bytes: &[u8]) -> Result<()> {
         let ordered_write_started = Instant::now();
-        let decode_started = Instant::now();
-        self.advance_entries()?;
-        self.stats.directory_decode += decode_started.elapsed();
+        if !bytes.is_empty() && self.pending_file.is_none() {
+            let decode_started = Instant::now();
+            if !self.ensure_pending_file_for_write()? {
+                return Err(OxideError::InvalidFormat(
+                    "directory archive contains file data beyond manifest entries",
+                ));
+            }
+            self.stats.directory_decode += decode_started.elapsed();
+        }
 
         while !bytes.is_empty() {
             let (take, finished_file) = {
@@ -1204,13 +1382,18 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
             self.stats.output_bytes_total =
                 self.stats.output_bytes_total.saturating_add(take as u64);
             bytes = &bytes[take..];
-            self.fill_ready_entries()?;
 
             if finished_file {
                 self.finalize_pending_file()?;
-                let decode_started = Instant::now();
-                self.advance_entries()?;
-                self.stats.directory_decode += decode_started.elapsed();
+                if !bytes.is_empty() {
+                    let decode_started = Instant::now();
+                    if !self.ensure_pending_file_for_write()? {
+                        return Err(OxideError::InvalidFormat(
+                            "directory archive contains file data beyond manifest entries",
+                        ));
+                    }
+                    self.stats.directory_decode += decode_started.elapsed();
+                }
             }
         }
 
@@ -1311,10 +1494,22 @@ fn normalize_filter(raw: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::{ArchiveListingEntry, ArchiveTimestamp};
+    use crate::{ArchiveListingEntry, ArchiveTimestamp, OxideError};
+
+    fn file_entry(path: impl Into<String>, size: u64, content_offset: u64) -> ArchiveListingEntry {
+        ArchiveListingEntry::file(
+            path.into(),
+            size,
+            0o644,
+            ArchiveTimestamp::default(),
+            0,
+            0,
+            content_offset,
+        )
+    }
 
     fn file_work_item(index: usize, path: PathBuf) -> PreparedRestoreWorkItem {
         PreparedRestoreWorkItem {
@@ -1428,6 +1623,86 @@ mod tests {
     }
 
     #[test]
+    fn restore_multiple_files_across_chunk_boundaries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest = ArchiveManifest::new(vec![
+            file_entry("nested/first.txt", 4, 0),
+            file_entry("nested/second.txt", 4, 4),
+        ]);
+
+        let mut writer =
+            DirectoryRestoreWriter::create(temp.path(), manifest).expect("create writer");
+        writer.write_chunk(b"te").expect("write first chunk");
+        writer.write_chunk(b"stda").expect("write second chunk");
+        writer.write_chunk(b"ta").expect("write third chunk");
+        writer.finish().expect("finish restore");
+
+        assert_eq!(
+            std::fs::read(temp.path().join("nested/first.txt")).expect("read first"),
+            b"test"
+        );
+        assert_eq!(
+            std::fs::read(temp.path().join("nested/second.txt")).expect("read second"),
+            b"data"
+        );
+    }
+
+    #[test]
+    fn restore_finishes_manifests_with_only_empty_entries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest = ArchiveManifest::new(vec![
+            ArchiveListingEntry::directory(
+                "nested".to_string(),
+                0o755,
+                ArchiveTimestamp::default(),
+                0,
+                0,
+            ),
+            file_entry("nested/empty.txt", 0, 0),
+        ]);
+
+        let mut writer =
+            DirectoryRestoreWriter::create(temp.path(), manifest).expect("create writer");
+        let stats = writer.finish().expect("finish restore");
+
+        assert!(temp.path().join("nested").is_dir());
+        assert_eq!(
+            std::fs::metadata(temp.path().join("nested/empty.txt"))
+                .expect("empty file metadata")
+                .len(),
+            0
+        );
+        assert_eq!(stats.entry_count, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_finishes_manifests_with_symlink_entries_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest = ArchiveManifest::new(vec![ArchiveListingEntry {
+            path: "link".to_string(),
+            kind: crate::ArchiveEntryKind::Symlink,
+            target: Some("target.txt".to_string()),
+            size: 0,
+            mode: 0o777,
+            mtime: ArchiveTimestamp::default(),
+            uid: 0,
+            gid: 0,
+            content_offset: 0,
+        }]);
+
+        let mut writer =
+            DirectoryRestoreWriter::create(temp.path(), manifest).expect("create writer");
+        let stats = writer.finish().expect("finish restore");
+
+        assert_eq!(
+            std::fs::read_link(temp.path().join("link")).expect("read link"),
+            Path::new("target.txt")
+        );
+        assert_eq!(stats.entry_count, 1);
+    }
+
+    #[test]
     fn prepare_restore_entry_with_open_returns_file_ready() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("data.bin");
@@ -1491,6 +1766,64 @@ mod tests {
                 .expect("second reserve after release")
         );
         assert!(second.reserved_open_permit.is_some());
+    }
+
+    #[test]
+    fn restore_finish_rejects_truncated_payload_mid_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest = ArchiveManifest::new(vec![file_entry("nested/file.txt", 4, 0)]);
+
+        let mut writer =
+            DirectoryRestoreWriter::create(temp.path(), manifest).expect("create writer");
+        writer.write_chunk(b"te").expect("write partial payload");
+
+        let error = writer
+            .finish()
+            .expect_err("finish should reject truncation");
+        assert!(matches!(
+            error,
+            OxideError::InvalidFormat("truncated file payload during directory restore")
+        ));
+    }
+
+    #[test]
+    fn restore_finish_rejects_missing_later_file_payload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest = ArchiveManifest::new(vec![
+            file_entry("nested/first.txt", 4, 0),
+            file_entry("nested/second.txt", 4, 4),
+        ]);
+
+        let mut writer =
+            DirectoryRestoreWriter::create(temp.path(), manifest).expect("create writer");
+        writer.write_chunk(b"test").expect("write first file");
+
+        let error = writer
+            .finish()
+            .expect_err("finish should reject missing later payload");
+        assert!(matches!(
+            error,
+            OxideError::InvalidFormat("directory restore ended before all entries completed")
+        ));
+    }
+
+    #[test]
+    fn restore_write_chunk_rejects_payload_beyond_manifest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest = ArchiveManifest::new(vec![file_entry("nested/file.txt", 4, 0)]);
+
+        let mut writer =
+            DirectoryRestoreWriter::create(temp.path(), manifest).expect("create writer");
+        let error = writer
+            .write_chunk(b"test!")
+            .expect_err("write should reject extra payload");
+
+        assert!(matches!(
+            error,
+            OxideError::InvalidFormat(
+                "directory archive contains file data beyond manifest entries"
+            )
+        ));
     }
 }
 
