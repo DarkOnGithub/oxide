@@ -77,6 +77,7 @@ pub struct ExtractStageTimings {
     pub ordered_write: Duration,
     pub directory_decode: Duration,
     pub prepared_file_open: Duration,
+    pub prepared_file_permit_wait: Duration,
     pub prepared_file_wait: Duration,
     pub output_prepare_directories: Duration,
     pub output_write: Duration,

@@ -977,6 +977,12 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
         report
             .main_thread
             .stage_us
+            .contains_key("prepared_file_permit_wait")
+    );
+    assert!(
+        report
+            .main_thread
+            .stage_us
             .contains_key("prepared_file_wait")
     );
     assert!(

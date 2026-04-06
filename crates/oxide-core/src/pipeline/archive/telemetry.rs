@@ -540,6 +540,13 @@ pub fn build_extract_report(
             .min(u64::MAX as u128) as u64,
     );
     main_thread.stage_us.insert(
+        "prepared_file_permit_wait".to_string(),
+        stage_timings
+            .prepared_file_permit_wait
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
         "prepared_file_wait".to_string(),
         stage_timings
             .prepared_file_wait
