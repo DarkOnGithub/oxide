@@ -533,6 +533,20 @@ pub fn build_extract_report(
             .min(u64::MAX as u128) as u64,
     );
     main_thread.stage_us.insert(
+        "prepared_file_open".to_string(),
+        stage_timings
+            .prepared_file_open
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
+        "prepared_file_wait".to_string(),
+        stage_timings
+            .prepared_file_wait
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
+    main_thread.stage_us.insert(
         "output_prepare_directories".to_string(),
         stage_timings
             .output_prepare_directories

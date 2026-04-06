@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
@@ -13,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
-use crossbeam_channel::{Receiver, bounded, never, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded, never, unbounded};
 use regex::RegexSet;
 
 use crate::OxideError;
@@ -30,6 +31,7 @@ const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
 const MAX_METADATA_WORKERS: usize = 8;
 const MAX_PREPARED_ENTRY_WORKERS: usize = 8;
 const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 256;
+const PREOPENED_FILE_WINDOW_CAPACITY: usize = 64;
 const DIRECT_FILE_WRITE_MAX_BYTES: u64 = 32 * 1024;
 const SMALL_FILE_BUFFER_MAX_BYTES: u64 = 256 * 1024;
 const MEDIUM_FILE_BUFFER_MAX_BYTES: u64 = 1024 * 1024;
@@ -38,6 +40,8 @@ const MEDIUM_FILE_BUFFER_MAX_BYTES: u64 = 1024 * 1024;
 pub(crate) struct DirectoryRestoreStats {
     pub(crate) directory_decode: Duration,
     pub(crate) ordered_write_time: Duration,
+    pub(crate) prepared_file_open: Duration,
+    pub(crate) prepared_file_wait: Duration,
     pub(crate) output_prepare_directories: Duration,
     pub(crate) output_write: Duration,
     pub(crate) output_create: Duration,
@@ -53,6 +57,14 @@ pub(crate) struct DirectoryRestoreStats {
 }
 
 impl DirectoryRestoreStats {
+    fn record_prepared_file_open(&mut self, elapsed: Duration) {
+        self.prepared_file_open += elapsed;
+    }
+
+    fn record_prepared_file_wait(&mut self, elapsed: Duration) {
+        self.prepared_file_wait += elapsed;
+    }
+
     fn record_output_prepare_directories(&mut self, elapsed: Duration) {
         self.output_prepare_directories += elapsed;
     }
@@ -104,9 +116,12 @@ enum PreparedRestoreEntry {
         path: PathBuf,
         entry: crate::ArchiveListingEntry,
     },
-    File {
+    FileReady {
         path: PathBuf,
         entry: crate::ArchiveListingEntry,
+        writer: PendingFileWriter,
+        permit: OpenFilePermit,
+        open_elapsed: Duration,
     },
     Symlink {
         path: PathBuf,
@@ -176,6 +191,23 @@ struct PendingFile {
     path: PathBuf,
     entry: crate::ArchiveListingEntry,
     writer: PendingFileWriter,
+    permit: OpenFilePermit,
+}
+
+struct OpenFilePermit {
+    release_tx: Sender<()>,
+}
+
+impl fmt::Debug for OpenFilePermit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenFilePermit").finish_non_exhaustive()
+    }
+}
+
+impl Drop for OpenFilePermit {
+    fn drop(&mut self) {
+        let _ = self.release_tx.send(());
+    }
 }
 
 #[derive(Debug)]
@@ -343,7 +375,9 @@ impl DirectoryRestoreWriter {
 
     fn advance_entries(&mut self) -> Result<()> {
         while self.pending_file.is_none() && self.next_entry < self.entry_count_total {
+            let wait_started = Instant::now();
             let prepared_entry = self.receive_prepared_entry()?;
+            self.stats.record_prepared_file_wait(wait_started.elapsed());
             self.next_entry += 1;
             self.stats.entry_count = self.stats.entry_count.saturating_add(1);
 
@@ -351,12 +385,14 @@ impl DirectoryRestoreWriter {
                 PreparedRestoreEntry::Directory { path, entry } => {
                     self.defer_directory_metadata(path, entry);
                 }
-                PreparedRestoreEntry::File { path, entry } => {
-                    let started = Instant::now();
-                    let file = fs::File::create(&path)?;
-                    self.stats.record_output_create_file(started.elapsed());
-                    let writer = PendingFileWriter::new(file, entry.size);
-
+                PreparedRestoreEntry::FileReady {
+                    path,
+                    entry,
+                    writer,
+                    permit,
+                    open_elapsed,
+                } => {
+                    self.stats.record_prepared_file_open(open_elapsed);
                     if entry.size == 0 {
                         let started = Instant::now();
                         let _file = writer.into_inner()?;
@@ -370,6 +406,7 @@ impl DirectoryRestoreWriter {
                         path,
                         entry,
                         writer,
+                        permit,
                     });
                 }
                 PreparedRestoreEntry::Symlink {
@@ -421,11 +458,13 @@ impl DirectoryRestoreWriter {
             path,
             entry,
             writer,
+            permit,
             ..
         } = pending;
         let started = Instant::now();
         let _file = writer.into_inner()?;
         self.stats.record_output_flush(started.elapsed());
+        drop(permit);
         self.defer_file_metadata(path, entry);
         Ok(())
     }
@@ -526,11 +565,25 @@ fn spawn_prepared_restore_entries(
 ) {
     let (tx, rx) = bounded::<Result<PreparedRestoreEntry>>(PREPARED_ENTRY_QUEUE_CAPACITY);
     let handle = thread::spawn(move || -> Result<()> {
+        let (open_file_permit_tx, open_file_permit_rx) =
+            bounded::<()>(PREOPENED_FILE_WINDOW_CAPACITY);
+        for _ in 0..PREOPENED_FILE_WINDOW_CAPACITY {
+            open_file_permit_tx.send(()).map_err(|_| {
+                crate::OxideError::CompressionError(
+                    "pre-opened file permit queue closed during initialization".to_string(),
+                )
+            })?;
+        }
+
         let total_entries = entries.len();
         let worker_count = available_prepared_entry_workers(total_entries);
         if worker_count <= 1 {
             for restore_entry in entries {
-                let prepared = prepare_restore_entry(restore_entry);
+                let prepared = prepare_restore_entry(
+                    restore_entry,
+                    &open_file_permit_rx,
+                    &open_file_permit_tx,
+                );
                 let stop_after_send = prepared.is_err();
                 if tx.send(prepared).is_err() {
                     return Ok(());
@@ -553,6 +606,8 @@ fn spawn_prepared_restore_entries(
             let work_rx = work_rx.clone();
             let result_tx = result_tx.clone();
             let cancelled = Arc::clone(&cancelled);
+            let open_file_permit_rx = open_file_permit_rx.clone();
+            let open_file_permit_tx = open_file_permit_tx.clone();
             worker_handles.push(thread::spawn(move || -> Result<()> {
                 while !cancelled.load(Ordering::Relaxed) {
                     let Ok((index, restore_entry)) = work_rx.recv() else {
@@ -562,7 +617,11 @@ fn spawn_prepared_restore_entries(
                         return Ok(());
                     }
 
-                    let prepared = prepare_restore_entry(restore_entry);
+                    let prepared = prepare_restore_entry(
+                        restore_entry,
+                        &open_file_permit_rx,
+                        &open_file_permit_tx,
+                    );
                     if prepared.is_err() {
                         cancelled.store(true, Ordering::Relaxed);
                     }
@@ -617,6 +676,8 @@ fn spawn_prepared_restore_entries(
         }
 
         cancelled.store(true, Ordering::Relaxed);
+        drop(pending);
+        drop(result_rx);
 
         for handle in worker_handles {
             handle.join().map_err(|payload| {
@@ -639,11 +700,27 @@ fn spawn_prepared_restore_entries(
     (rx, handle)
 }
 
-fn prepare_restore_entry(restore_entry: RestoreEntry) -> Result<PreparedRestoreEntry> {
+fn prepare_restore_entry(
+    restore_entry: RestoreEntry,
+    open_file_permit_rx: &Receiver<()>,
+    open_file_permit_tx: &Sender<()>,
+) -> Result<PreparedRestoreEntry> {
     let RestoreEntry { path, entry } = restore_entry;
     match entry.kind {
         crate::ArchiveEntryKind::Directory => Ok(PreparedRestoreEntry::Directory { path, entry }),
-        crate::ArchiveEntryKind::File => Ok(PreparedRestoreEntry::File { path, entry }),
+        crate::ArchiveEntryKind::File => {
+            let permit = acquire_open_file_permit(open_file_permit_rx, open_file_permit_tx)?;
+            let open_started = Instant::now();
+            let file = fs::File::create(&path)?;
+            let writer = PendingFileWriter::new(file, entry.size);
+            Ok(PreparedRestoreEntry::FileReady {
+                path,
+                entry,
+                writer,
+                permit,
+                open_elapsed: open_started.elapsed(),
+            })
+        }
         crate::ArchiveEntryKind::Symlink => {
             let target = entry.target.as_deref().ok_or(OxideError::InvalidFormat(
                 "symlink manifest entry missing target",
@@ -657,6 +734,20 @@ fn prepare_restore_entry(restore_entry: RestoreEntry) -> Result<PreparedRestoreE
             })
         }
     }
+}
+
+fn acquire_open_file_permit(
+    open_file_permit_rx: &Receiver<()>,
+    open_file_permit_tx: &Sender<()>,
+) -> Result<OpenFilePermit> {
+    open_file_permit_rx.recv().map_err(|_| {
+        crate::OxideError::CompressionError(
+            "pre-opened file permit queue closed before completion".to_string(),
+        )
+    })?;
+    Ok(OpenFilePermit {
+        release_tx: open_file_permit_tx.clone(),
+    })
 }
 
 fn apply_pending_metadata_in_parallel(entries: &[PendingMetadata]) -> Result<()> {
