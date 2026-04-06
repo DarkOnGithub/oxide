@@ -359,6 +359,7 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
                     ("merge", "merge"),
                     ("directory_decode", "directory decode"),
                     ("prepared_file_open", "prepared file open"),
+                    ("prepared_file_permit_wait", "prepared file permit wait"),
                     ("prepared_file_wait", "prepared file wait"),
                     ("output_prepare_directories", "prepare output dirs"),
                     ("output_write", "output write"),

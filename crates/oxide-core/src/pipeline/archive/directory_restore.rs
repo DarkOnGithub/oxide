@@ -31,8 +31,10 @@ const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
 const MAX_METADATA_WORKERS: usize = 8;
 const MAX_PREPARED_ENTRY_WORKERS: usize = 8;
 const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 256;
-const PREOPENED_FILE_WINDOW_CAPACITY: usize = 64;
-const READY_ENTRY_WINDOW_CAPACITY: usize = 32;
+const MIN_PREOPENED_FILE_WINDOW_CAPACITY: usize = 64;
+const MAX_PREOPENED_FILE_WINDOW_CAPACITY: usize = 256;
+const MIN_READY_ENTRY_WINDOW_CAPACITY: usize = 32;
+const MAX_READY_ENTRY_WINDOW_CAPACITY: usize = 128;
 const DIRECT_FILE_WRITE_MAX_BYTES: u64 = 32 * 1024;
 const SMALL_FILE_BUFFER_MAX_BYTES: u64 = 256 * 1024;
 const MEDIUM_FILE_BUFFER_MAX_BYTES: u64 = 1024 * 1024;
@@ -42,6 +44,7 @@ pub(crate) struct DirectoryRestoreStats {
     pub(crate) directory_decode: Duration,
     pub(crate) ordered_write_time: Duration,
     pub(crate) prepared_file_open: Duration,
+    pub(crate) prepared_file_permit_wait: Duration,
     pub(crate) prepared_file_wait: Duration,
     pub(crate) output_prepare_directories: Duration,
     pub(crate) output_write: Duration,
@@ -60,6 +63,10 @@ pub(crate) struct DirectoryRestoreStats {
 impl DirectoryRestoreStats {
     fn record_prepared_file_open(&mut self, elapsed: Duration) {
         self.prepared_file_open += elapsed;
+    }
+
+    fn record_prepared_file_permit_wait(&mut self, elapsed: Duration) {
+        self.prepared_file_permit_wait += elapsed;
     }
 
     fn record_prepared_file_wait(&mut self, elapsed: Duration) {
@@ -132,6 +139,7 @@ enum PreparedRestoreEntry {
         entry: crate::ArchiveListingEntry,
         writer: PendingFileWriter,
         permit: OpenFilePermit,
+        permit_wait_elapsed: Duration,
         open_elapsed: Duration,
     },
     Symlink {
@@ -267,9 +275,16 @@ pub(crate) struct DirectoryRestoreWriter {
     created_directories: HashSet<PathBuf>,
     pending_file_metadata: Vec<PendingMetadata>,
     pending_directory_metadata: Vec<PendingMetadata>,
+    ready_entry_window_capacity: usize,
     prepared_entry_rx: Receiver<Result<PreparedRestoreEntry>>,
     prepared_entry_handle: Option<thread::JoinHandle<Result<()>>>,
     stats: DirectoryRestoreStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreparedEntryWindowConfig {
+    preopened_file_window_capacity: usize,
+    ready_entry_window_capacity: usize,
 }
 
 #[derive(Debug)]
@@ -283,22 +298,25 @@ pub(crate) struct FilteredDirectoryRestoreWriter {
 impl DirectoryRestoreWriter {
     pub(crate) fn create(root: &Path, manifest: ArchiveManifest) -> Result<Self> {
         let entries = build_restore_entries(root, manifest)?;
+        let window_config = prepared_entry_window_config(&entries);
         let mut writer = Self {
             root: root.to_path_buf(),
             entry_count_total: entries.len(),
             next_entry: 0,
             pending_file: None,
-            ready_entries: VecDeque::with_capacity(READY_ENTRY_WINDOW_CAPACITY),
+            ready_entries: VecDeque::with_capacity(window_config.ready_entry_window_capacity),
             created_directories: HashSet::new(),
             pending_file_metadata: Vec::new(),
             pending_directory_metadata: Vec::new(),
+            ready_entry_window_capacity: window_config.ready_entry_window_capacity,
             prepared_entry_rx: never(),
             prepared_entry_handle: None,
             stats: DirectoryRestoreStats::default(),
         };
         writer.ensure_directory_exists(root)?;
         writer.prepare_output_directories(&entries)?;
-        let (prepared_entry_rx, prepared_entry_handle) = spawn_prepared_restore_entries(entries);
+        let (prepared_entry_rx, prepared_entry_handle) =
+            spawn_prepared_restore_entries(entries, window_config);
         writer.prepared_entry_rx = prepared_entry_rx;
         writer.prepared_entry_handle = Some(prepared_entry_handle);
         Ok(writer)
@@ -408,8 +426,11 @@ impl DirectoryRestoreWriter {
                     entry,
                     writer,
                     permit,
+                    permit_wait_elapsed,
                     open_elapsed,
                 } => {
+                    self.stats
+                        .record_prepared_file_permit_wait(permit_wait_elapsed);
                     self.stats.record_prepared_file_open(open_elapsed);
                     if entry.size == 0 {
                         let started = Instant::now();
@@ -444,7 +465,7 @@ impl DirectoryRestoreWriter {
     }
 
     fn fill_ready_entries(&mut self) -> Result<()> {
-        while self.ready_entries.len() < READY_ENTRY_WINDOW_CAPACITY
+        while self.ready_entries.len() < self.ready_entry_window_capacity
             && self.next_entry + self.ready_entries.len() < self.entry_count_total
         {
             match self.prepared_entry_rx.try_recv() {
@@ -602,8 +623,53 @@ fn available_prepared_entry_workers(item_count: usize) -> usize {
         .max(1)
 }
 
+fn prepared_entry_window_config(entries: &[RestoreEntry]) -> PreparedEntryWindowConfig {
+    let entry_count = entries.len().max(1);
+    let file_count = entries
+        .iter()
+        .filter(|restore_entry| matches!(restore_entry.entry.kind, crate::ArchiveEntryKind::File))
+        .count()
+        .max(1);
+    let parallelism = thread::available_parallelism()
+        .unwrap_or(NonZeroUsize::MIN)
+        .get();
+
+    prepared_entry_window_config_for_counts(entry_count, file_count, parallelism)
+}
+
+fn prepared_entry_window_config_for_counts(
+    entry_count: usize,
+    file_count: usize,
+    parallelism: usize,
+) -> PreparedEntryWindowConfig {
+    let entry_count = entry_count.max(1);
+    let file_count = file_count.max(1);
+    let parallelism = parallelism.max(1);
+
+    let ready_entry_window_capacity = parallelism
+        .saturating_mul(8)
+        .clamp(
+            MIN_READY_ENTRY_WINDOW_CAPACITY,
+            MAX_READY_ENTRY_WINDOW_CAPACITY,
+        )
+        .min(entry_count);
+    let preopened_file_window_capacity = parallelism
+        .saturating_mul(16)
+        .clamp(
+            MIN_PREOPENED_FILE_WINDOW_CAPACITY,
+            MAX_PREOPENED_FILE_WINDOW_CAPACITY,
+        )
+        .min(file_count);
+
+    PreparedEntryWindowConfig {
+        preopened_file_window_capacity,
+        ready_entry_window_capacity,
+    }
+}
+
 fn spawn_prepared_restore_entries(
     entries: Vec<RestoreEntry>,
+    window_config: PreparedEntryWindowConfig,
 ) -> (
     Receiver<Result<PreparedRestoreEntry>>,
     thread::JoinHandle<Result<()>>,
@@ -611,8 +677,8 @@ fn spawn_prepared_restore_entries(
     let (tx, rx) = bounded::<Result<PreparedRestoreEntry>>(PREPARED_ENTRY_QUEUE_CAPACITY);
     let handle = thread::spawn(move || -> Result<()> {
         let (open_file_permit_tx, open_file_permit_rx) =
-            bounded::<()>(PREOPENED_FILE_WINDOW_CAPACITY);
-        for _ in 0..PREOPENED_FILE_WINDOW_CAPACITY {
+            bounded::<()>(window_config.preopened_file_window_capacity);
+        for _ in 0..window_config.preopened_file_window_capacity {
             open_file_permit_tx.send(()).map_err(|_| {
                 crate::OxideError::CompressionError(
                     "pre-opened file permit queue closed during initialization".to_string(),
@@ -804,7 +870,9 @@ fn prepare_prepared_entry_in_order(
     let prepared = prepared?;
     match prepared {
         PreparedRestoreEntry::File { path, entry } => {
+            let permit_wait_started = Instant::now();
             let permit = acquire_open_file_permit(open_file_permit_rx, open_file_permit_tx)?;
+            let permit_wait_elapsed = permit_wait_started.elapsed();
             let open_started = Instant::now();
             let file = fs::File::create(&path)?;
             let writer = PendingFileWriter::new(file, entry.size);
@@ -813,6 +881,7 @@ fn prepare_prepared_entry_in_order(
                 entry,
                 writer,
                 permit,
+                permit_wait_elapsed,
                 open_elapsed: open_started.elapsed(),
             })
         }
@@ -1039,6 +1108,50 @@ fn normalize_filter(raw: &str) -> Result<String> {
     }
 
     Ok(parts.join("/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_entry_windows_scale_with_parallelism() {
+        let config = prepared_entry_window_config_for_counts(10_000, 10_000, 12);
+
+        assert_eq!(
+            config,
+            PreparedEntryWindowConfig {
+                preopened_file_window_capacity: 192,
+                ready_entry_window_capacity: 96,
+            }
+        );
+    }
+
+    #[test]
+    fn prepared_entry_windows_are_capped_by_workload() {
+        let config = prepared_entry_window_config_for_counts(12, 5, 32);
+
+        assert_eq!(
+            config,
+            PreparedEntryWindowConfig {
+                preopened_file_window_capacity: 5,
+                ready_entry_window_capacity: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn prepared_entry_windows_respect_minimums_for_large_workloads() {
+        let config = prepared_entry_window_config_for_counts(10_000, 10_000, 1);
+
+        assert_eq!(
+            config,
+            PreparedEntryWindowConfig {
+                preopened_file_window_capacity: MIN_PREOPENED_FILE_WINDOW_CAPACITY,
+                ready_entry_window_capacity: MIN_READY_ENTRY_WINDOW_CAPACITY,
+            }
+        );
+    }
 }
 
 fn path_matches_filter(path: &str, filter: &str) -> bool {
