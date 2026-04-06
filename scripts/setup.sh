@@ -10,21 +10,29 @@ echo "Updating package lists..."
 sudo apt update -y
 
 # 2. Install System Dependencies
-# Includes 7zip, squashfs-tools, and Python environment tools
 echo "Installing 7zip, squashfs-tools, curl, build-essential, python3-pip, and python3-venv..."
 sudo apt install -y 7zip squashfs-tools curl build-essential python3-pip python3-venv
 
-# 3. Install Rust
-if ! command -v rustc &> /dev/null; then
-    echo "Installing Rust via rustup..."
+# 3. Install Rust & Cargo
+if ! command -v cargo &> /dev/null; then
+    echo "Installing Rust and Cargo via rustup..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    
+    # Load Cargo into the current script session
     source "$HOME/.cargo/env"
+    
+    # Ensure Cargo is available in future terminal sessions
+    if ! grep -q 'source "$HOME/.cargo/env"' "$HOME/.bashrc"; then
+        echo 'source "$HOME/.cargo/env"' >> "$HOME/.bashrc"
+    fi
 else
-    echo "Rust is already installed."
+    echo "Cargo/Rust is already installed."
 fi
 
+# Verify Cargo is working
+cargo --version
+
 # 4. Set up Python Virtual Environment and Install Rich
-# Ubuntu 24.04 requires a virtual environment for pip installs
 echo "Setting up Python virtual environment..."
 if [ ! -d "venv" ]; then
     python3 -m venv venv
@@ -51,5 +59,7 @@ fi
 
 echo "-------------------------------------------"
 echo "All tasks complete!"
-echo "To use this environment again, run: source venv/bin/activate"
+echo "Cargo is now available as a command."
+echo "To use the Python environment, run: source venv/bin/activate"
+echo "To use Cargo in this current window, run: source ~/.bashrc"
 echo "-------------------------------------------"
