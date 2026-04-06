@@ -14,6 +14,7 @@ use crate::compression::CompressionScratchArena;
 use crate::core::WorkerRuntimeSnapshot;
 use crate::dictionary::ArchiveDictionaryBank;
 use crate::format::{ArchiveReader, ChunkDescriptor, GlobalHeader};
+use crate::pipeline::types::PipelinePerformanceOptions;
 use crate::telemetry::{ReportValue, RunTelemetryOptions, TelemetrySink};
 use crate::types::Result;
 
@@ -331,13 +332,19 @@ pub(crate) struct DirectoryRestoreOutcome {
 pub struct Extractor {
     pub num_workers: usize,
     buffer_pool: Arc<BufferPool>,
+    performance: PipelinePerformanceOptions,
 }
 
 impl Extractor {
-    pub fn new(num_workers: usize, buffer_pool: Arc<BufferPool>) -> Self {
+    pub fn new(
+        num_workers: usize,
+        buffer_pool: Arc<BufferPool>,
+        performance: PipelinePerformanceOptions,
+    ) -> Self {
         Self {
             num_workers,
             buffer_pool,
+            performance,
         }
     }
 
@@ -974,12 +981,30 @@ impl Extractor {
             None => DecodePlan::all(block_descriptors.len()),
         };
         let block_capacity = decode_plan.block_count();
+        let block_profile = ExtractBlockProfile::from_plan(&block_descriptors, &decode_plan);
         let worker_count = self.num_workers.max(1);
-        let queue_capacity = decode_queue_capacity(worker_count, block_capacity);
-        let ordered_write_queue_capacity =
-            ordered_write_queue_capacity(worker_count, queue_capacity, block_capacity);
-        let reorder_pending_limit =
-            reorder_pending_limit(ordered_write_queue_capacity, block_capacity);
+        let inflight_block_limit = extract_inflight_block_limit(
+            block_capacity,
+            block_profile.max_queue_block_bytes(),
+            &self.performance,
+        );
+        let queue_capacity =
+            decode_queue_capacity(worker_count, block_capacity, inflight_block_limit);
+        let ordered_write_queue_capacity = ordered_write_queue_capacity(
+            worker_count,
+            queue_capacity,
+            block_capacity,
+            inflight_block_limit,
+        );
+        let reorder_pending_limit = reorder_pending_limit(
+            ordered_write_queue_capacity,
+            block_capacity,
+            inflight_block_limit,
+        );
+        let reader_buffer_pool =
+            select_extract_buffer_pool(&self.buffer_pool, block_profile.max_encoded_len);
+        let decode_buffer_pool =
+            select_extract_buffer_pool(&self.buffer_pool, block_profile.max_raw_len);
 
         let (read_request_tx, read_request_rx) = bounded::<ReadRequest>(queue_capacity);
         let (task_tx, task_rx) = bounded::<DecodeTask>(queue_capacity);
@@ -996,7 +1021,6 @@ impl Extractor {
             block_capacity,
         );
         let dictionary_bank = Arc::new(backend.dictionary_bank());
-        let reader_buffer_pool = Arc::clone(&self.buffer_pool);
         let reader_handles = backend.spawn(
             read_request_rx,
             task_tx.clone(),
@@ -1009,7 +1033,7 @@ impl Extractor {
             let local_task_rx = task_rx.clone();
             let local_result_tx = result_tx.clone();
             let local_runtime = Arc::clone(&runtime_state);
-            let local_buffer_pool = Arc::clone(&self.buffer_pool);
+            let local_buffer_pool = Arc::clone(&decode_buffer_pool);
             let local_dictionary_bank = Arc::clone(&dictionary_bank);
             let handle = thread::spawn(move || -> DecodeWorkerOutcome {
                 let started = Instant::now();
@@ -1353,11 +1377,67 @@ impl Extractor {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ExtractBlockProfile {
+    max_encoded_len: usize,
+    max_raw_len: usize,
+}
+
+impl ExtractBlockProfile {
+    fn from_plan(headers: &[ChunkDescriptor], plan: &DecodePlan) -> Self {
+        let mut profile = Self::default();
+        for (block_index, header) in headers.iter().enumerate() {
+            if !plan.includes(block_index) {
+                continue;
+            }
+
+            profile.max_encoded_len = profile.max_encoded_len.max(header.encoded_len as usize);
+            profile.max_raw_len = profile.max_raw_len.max(header.raw_len as usize);
+        }
+        profile
+    }
+
+    fn max_queue_block_bytes(self) -> usize {
+        self.max_raw_len.max(self.max_encoded_len).max(1)
+    }
+}
+
+fn select_extract_buffer_pool(
+    base_pool: &Arc<BufferPool>,
+    required_capacity: usize,
+) -> Arc<BufferPool> {
+    let required_capacity = required_capacity.max(1);
+    if base_pool.default_capacity() >= required_capacity {
+        return Arc::clone(base_pool);
+    }
+
+    Arc::new(BufferPool::new(required_capacity, base_pool.max_buffers()))
+}
+
 #[inline]
-fn decode_queue_capacity(worker_count: usize, block_capacity: usize) -> usize {
+fn extract_inflight_block_limit(
+    block_capacity: usize,
+    block_bytes: usize,
+    performance: &PipelinePerformanceOptions,
+) -> usize {
+    let block_bytes = block_bytes.max(1);
+    let inflight_bytes = performance.max_inflight_bytes.max(block_bytes);
+    inflight_bytes
+        .div_ceil(block_bytes)
+        .max(1)
+        .min(block_capacity.max(1))
+}
+
+#[inline]
+fn decode_queue_capacity(
+    worker_count: usize,
+    block_capacity: usize,
+    inflight_block_limit: usize,
+) -> usize {
     worker_count
         .saturating_mul(DECODE_QUEUE_MULTIPLIER)
         .max(MIN_DECODE_QUEUE_CAPACITY)
+        .min(inflight_block_limit.max(1))
         .min(block_capacity.max(1))
         .max(1)
 }
@@ -1367,19 +1447,28 @@ fn ordered_write_queue_capacity(
     worker_count: usize,
     decode_queue_capacity: usize,
     block_capacity: usize,
+    inflight_block_limit: usize,
 ) -> usize {
-    worker_count
+    let bounded = worker_count
         .saturating_mul(ORDERED_WRITE_QUEUE_MULTIPLIER)
         .max(MIN_ORDERED_WRITE_QUEUE_CAPACITY)
+        .min(inflight_block_limit.max(1))
+        .min(block_capacity.max(1))
+        .max(1);
+    bounded
         .max(decode_queue_capacity)
         .min(block_capacity.max(1))
-        .max(1)
 }
 
 #[inline]
-fn reorder_pending_limit(ordered_write_queue_capacity: usize, block_capacity: usize) -> usize {
+fn reorder_pending_limit(
+    ordered_write_queue_capacity: usize,
+    block_capacity: usize,
+    inflight_block_limit: usize,
+) -> usize {
     ordered_write_queue_capacity
         .saturating_mul(REORDER_PENDING_MULTIPLIER)
+        .min(inflight_block_limit.max(1))
         .min(block_capacity.max(1))
         .max(1)
 }
@@ -1874,4 +1963,73 @@ fn decode_block_payload_with_scratch(
         ));
     }
     Ok(decoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CompressionAlgo, PipelinePerformanceOptions};
+
+    #[test]
+    fn extract_block_profile_uses_selected_blocks_only() {
+        let headers = vec![
+            ChunkDescriptor::new(0, 1024, 128, CompressionAlgo::Lz4, 0),
+            ChunkDescriptor::new(128, 4096, 512, CompressionAlgo::Lz4, 0),
+            ChunkDescriptor::new(640, 2048, 256, CompressionAlgo::Lz4, 0),
+        ];
+        let plan = DecodePlan {
+            selected_blocks: vec![true, false, true],
+            block_count: 2,
+        };
+
+        let profile = ExtractBlockProfile::from_plan(&headers, &plan);
+
+        assert_eq!(
+            profile,
+            ExtractBlockProfile {
+                max_encoded_len: 256,
+                max_raw_len: 2048,
+            }
+        );
+        assert_eq!(profile.max_queue_block_bytes(), 2048);
+    }
+
+    #[test]
+    fn extract_inflight_limit_respects_byte_budget() {
+        let mut performance = PipelinePerformanceOptions::default();
+        performance.max_inflight_bytes = 16 * 1024 * 1024;
+
+        let inflight = extract_inflight_block_limit(10_000, 1024 * 1024, &performance);
+
+        assert_eq!(inflight, 16);
+    }
+
+    #[test]
+    fn extract_queue_capacity_is_limited_by_byte_budget() {
+        let queue = decode_queue_capacity(16, 10_000, 12);
+        let ordered = ordered_write_queue_capacity(16, queue, 10_000, 12);
+        let reorder = reorder_pending_limit(ordered, 10_000, 12);
+
+        assert_eq!(queue, 12);
+        assert_eq!(ordered, 12);
+        assert_eq!(reorder, 12);
+    }
+
+    #[test]
+    fn extract_buffer_pool_reuses_base_pool_when_capacity_is_sufficient() {
+        let base = Arc::new(BufferPool::new(1024, 8));
+        let selected = select_extract_buffer_pool(&base, 512);
+
+        assert!(Arc::ptr_eq(&base, &selected));
+    }
+
+    #[test]
+    fn extract_buffer_pool_grows_to_match_archive_profile() {
+        let base = Arc::new(BufferPool::new(1024, 8));
+        let selected = select_extract_buffer_pool(&base, 4096);
+
+        assert!(!Arc::ptr_eq(&base, &selected));
+        assert_eq!(selected.default_capacity(), 4096);
+        assert_eq!(selected.max_buffers(), base.max_buffers());
+    }
 }
