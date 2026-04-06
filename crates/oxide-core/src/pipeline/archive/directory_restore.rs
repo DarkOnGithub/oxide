@@ -122,6 +122,14 @@ struct RestoreEntry {
 struct PreparedRestoreWorkItem {
     index: usize,
     restore_entry: RestoreEntry,
+    reserved_open_permit: Option<ReservedOpenFilePermit>,
+    permit_wait_started: Option<Instant>,
+}
+
+#[derive(Debug)]
+struct ReservedOpenFilePermit {
+    permit: OpenFilePermit,
+    wait_elapsed: Duration,
 }
 
 #[derive(Debug)]
@@ -690,7 +698,7 @@ fn spawn_prepared_restore_entries(
         let worker_count = available_prepared_entry_workers(total_entries);
         if worker_count <= 1 {
             for restore_entry in entries {
-                let prepared = prepare_restore_entry_in_order(
+                let prepared = prepare_restore_entry_with_open(
                     restore_entry,
                     &open_file_permit_rx,
                     &open_file_permit_tx,
@@ -717,6 +725,8 @@ fn spawn_prepared_restore_entries(
             let work_rx = work_rx.clone();
             let result_tx = result_tx.clone();
             let cancelled = Arc::clone(&cancelled);
+            let open_file_permit_rx = open_file_permit_rx.clone();
+            let open_file_permit_tx = open_file_permit_tx.clone();
             worker_handles.push(thread::spawn(move || -> Result<()> {
                 while !cancelled.load(Ordering::Relaxed) {
                     let Ok(work_item) = work_rx.recv() else {
@@ -727,7 +737,11 @@ fn spawn_prepared_restore_entries(
                     }
 
                     let index = work_item.index;
-                    let prepared = prepare_restore_entry(work_item.restore_entry);
+                    let prepared = prepare_restore_work_item_with_open(
+                        work_item,
+                        &open_file_permit_rx,
+                        &open_file_permit_tx,
+                    );
                     if prepared.is_err() {
                         cancelled.store(true, Ordering::Relaxed);
                     }
@@ -747,20 +761,84 @@ fn spawn_prepared_restore_entries(
             .map(|(index, restore_entry)| PreparedRestoreWorkItem {
                 index,
                 restore_entry,
+                reserved_open_permit: None,
+                permit_wait_started: None,
             })
             .collect::<VecDeque<_>>();
 
         let mut next_index = 0usize;
         let mut pending: BTreeMap<usize, Result<PreparedRestoreEntry>> = BTreeMap::new();
+        let mut in_flight = 0usize;
         let mut sent_error = false;
         while next_index < total_entries && !sent_error {
+            while let Some(prepared) = pending.remove(&next_index) {
+                sent_error = prepared.is_err();
+                if tx.send(prepared).is_err() {
+                    cancelled.store(true, Ordering::Relaxed);
+                    sent_error = true;
+                    break;
+                }
+                next_index += 1;
+                if sent_error {
+                    break;
+                }
+            }
+
+            if next_index >= total_entries || sent_error {
+                break;
+            }
+
             while let Some(work_item) = pending_work.pop_front() {
                 if cancelled.load(Ordering::Relaxed) {
                     break;
                 }
 
+                let mut work_item = work_item;
+                if matches!(
+                    work_item.restore_entry.entry.kind,
+                    crate::ArchiveEntryKind::File
+                ) && work_item.reserved_open_permit.is_none()
+                {
+                    match try_reserve_open_file_permit_for_work_item(
+                        &mut work_item,
+                        &open_file_permit_rx,
+                        &open_file_permit_tx,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            if in_flight == 0 {
+                                if let Err(error) = reserve_open_file_permit_for_work_item(
+                                    &mut work_item,
+                                    &open_file_permit_rx,
+                                    &open_file_permit_tx,
+                                ) {
+                                    cancelled.store(true, Ordering::Relaxed);
+                                    sent_error = true;
+                                    if tx.send(Err(error)).is_err() {
+                                        return Ok(());
+                                    }
+                                    break;
+                                }
+                            } else {
+                                pending_work.push_front(work_item);
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            cancelled.store(true, Ordering::Relaxed);
+                            sent_error = true;
+                            if tx.send(Err(error)).is_err() {
+                                return Ok(());
+                            }
+                            break;
+                        }
+                    }
+                }
+
                 match work_tx.try_send(work_item) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        in_flight += 1;
+                    }
                     Err(TrySendError::Full(work_item)) => {
                         pending_work.push_front(work_item);
                         break;
@@ -774,11 +852,6 @@ fn spawn_prepared_restore_entries(
             }
 
             while let Some(prepared) = pending.remove(&next_index) {
-                let prepared = prepare_prepared_entry_in_order(
-                    prepared,
-                    &open_file_permit_rx,
-                    &open_file_permit_tx,
-                );
                 sent_error = prepared.is_err();
                 if tx.send(prepared).is_err() {
                     cancelled.store(true, Ordering::Relaxed);
@@ -800,6 +873,7 @@ fn spawn_prepared_restore_entries(
                     "prepared entry workers exited before completion".to_string(),
                 )
             })?;
+            in_flight = in_flight.saturating_sub(1);
             pending.insert(index, prepared);
         }
 
@@ -850,29 +924,55 @@ fn prepare_restore_entry(restore_entry: RestoreEntry) -> Result<PreparedRestoreE
     }
 }
 
-fn prepare_restore_entry_in_order(
+fn prepare_restore_entry_with_open(
     restore_entry: RestoreEntry,
     open_file_permit_rx: &Receiver<()>,
     open_file_permit_tx: &Sender<()>,
 ) -> Result<PreparedRestoreEntry> {
-    prepare_prepared_entry_in_order(
+    prepare_prepared_entry_with_open(
         prepare_restore_entry(restore_entry),
+        None,
         open_file_permit_rx,
         open_file_permit_tx,
     )
 }
 
-fn prepare_prepared_entry_in_order(
+fn prepare_restore_work_item_with_open(
+    work_item: PreparedRestoreWorkItem,
+    open_file_permit_rx: &Receiver<()>,
+    open_file_permit_tx: &Sender<()>,
+) -> Result<PreparedRestoreEntry> {
+    let PreparedRestoreWorkItem {
+        restore_entry,
+        reserved_open_permit,
+        ..
+    } = work_item;
+    prepare_prepared_entry_with_open(
+        prepare_restore_entry(restore_entry),
+        reserved_open_permit,
+        open_file_permit_rx,
+        open_file_permit_tx,
+    )
+}
+
+fn prepare_prepared_entry_with_open(
     prepared: Result<PreparedRestoreEntry>,
+    reserved_open_permit: Option<ReservedOpenFilePermit>,
     open_file_permit_rx: &Receiver<()>,
     open_file_permit_tx: &Sender<()>,
 ) -> Result<PreparedRestoreEntry> {
     let prepared = prepared?;
     match prepared {
         PreparedRestoreEntry::File { path, entry } => {
-            let permit_wait_started = Instant::now();
-            let permit = acquire_open_file_permit(open_file_permit_rx, open_file_permit_tx)?;
-            let permit_wait_elapsed = permit_wait_started.elapsed();
+            let (permit, permit_wait_elapsed) = match reserved_open_permit {
+                Some(reserved) => (reserved.permit, reserved.wait_elapsed),
+                None => {
+                    let permit_wait_started = Instant::now();
+                    let permit =
+                        acquire_open_file_permit(open_file_permit_rx, open_file_permit_tx)?;
+                    (permit, permit_wait_started.elapsed())
+                }
+            };
             let open_started = Instant::now();
             let file = fs::File::create(&path)?;
             let writer = PendingFileWriter::new(file, entry.size);
@@ -887,6 +987,63 @@ fn prepare_prepared_entry_in_order(
         }
         other => Ok(other),
     }
+}
+
+fn try_reserve_open_file_permit_for_work_item(
+    work_item: &mut PreparedRestoreWorkItem,
+    open_file_permit_rx: &Receiver<()>,
+    open_file_permit_tx: &Sender<()>,
+) -> Result<bool> {
+    debug_assert!(matches!(
+        work_item.restore_entry.entry.kind,
+        crate::ArchiveEntryKind::File
+    ));
+
+    let wait_started = work_item
+        .permit_wait_started
+        .get_or_insert_with(Instant::now);
+    match open_file_permit_rx.try_recv() {
+        Ok(()) => {
+            work_item.reserved_open_permit = Some(ReservedOpenFilePermit {
+                permit: OpenFilePermit {
+                    release_tx: open_file_permit_tx.clone(),
+                },
+                wait_elapsed: wait_started.elapsed(),
+            });
+            work_item.permit_wait_started = None;
+            Ok(true)
+        }
+        Err(TryRecvError::Empty) => Ok(false),
+        Err(TryRecvError::Disconnected) => Err(crate::OxideError::CompressionError(
+            "pre-opened file permit queue closed before completion".to_string(),
+        )),
+    }
+}
+
+fn reserve_open_file_permit_for_work_item(
+    work_item: &mut PreparedRestoreWorkItem,
+    open_file_permit_rx: &Receiver<()>,
+    open_file_permit_tx: &Sender<()>,
+) -> Result<()> {
+    debug_assert!(matches!(
+        work_item.restore_entry.entry.kind,
+        crate::ArchiveEntryKind::File
+    ));
+
+    if work_item.reserved_open_permit.is_some() {
+        return Ok(());
+    }
+
+    let wait_started = work_item
+        .permit_wait_started
+        .get_or_insert_with(Instant::now);
+    let permit = acquire_open_file_permit(open_file_permit_rx, open_file_permit_tx)?;
+    work_item.reserved_open_permit = Some(ReservedOpenFilePermit {
+        permit,
+        wait_elapsed: wait_started.elapsed(),
+    });
+    work_item.permit_wait_started = None;
+    Ok(())
 }
 
 fn acquire_open_file_permit(
@@ -1112,7 +1269,30 @@ fn normalize_filter(raw: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::{ArchiveListingEntry, ArchiveTimestamp};
+
+    fn file_work_item(index: usize, path: PathBuf) -> PreparedRestoreWorkItem {
+        PreparedRestoreWorkItem {
+            index,
+            restore_entry: RestoreEntry {
+                path,
+                entry: ArchiveListingEntry::file(
+                    format!("file-{index}.bin"),
+                    8,
+                    0o644,
+                    ArchiveTimestamp::default(),
+                    0,
+                    0,
+                    0,
+                ),
+            },
+            reserved_open_permit: None,
+            permit_wait_started: None,
+        }
+    }
 
     #[test]
     fn prepared_entry_windows_scale_with_parallelism() {
@@ -1151,6 +1331,72 @@ mod tests {
                 ready_entry_window_capacity: MIN_READY_ENTRY_WINDOW_CAPACITY,
             }
         );
+    }
+
+    #[test]
+    fn prepare_restore_entry_with_open_returns_file_ready() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("data.bin");
+        let restore_entry = RestoreEntry {
+            path: path.clone(),
+            entry: ArchiveListingEntry::file(
+                "data.bin".to_string(),
+                8,
+                0o644,
+                ArchiveTimestamp::default(),
+                0,
+                0,
+                0,
+            ),
+        };
+        let (permit_tx, permit_rx) = bounded(1);
+        permit_tx.send(()).expect("seed permit");
+
+        let prepared = prepare_restore_entry_with_open(restore_entry, &permit_rx, &permit_tx)
+            .expect("file should prepare");
+
+        match prepared {
+            PreparedRestoreEntry::FileReady {
+                path: prepared_path,
+                writer,
+                permit,
+                ..
+            } => {
+                assert_eq!(prepared_path, path);
+                assert!(path.exists());
+                let _file = writer.into_inner().expect("writer should flush");
+                drop(permit);
+            }
+            other => panic!("expected FileReady, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn work_items_reserve_open_permits_in_order() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (permit_tx, permit_rx) = bounded(1);
+        permit_tx.send(()).expect("seed permit");
+
+        let mut first = file_work_item(0, temp.path().join("first.bin"));
+        let mut second = file_work_item(1, temp.path().join("second.bin"));
+
+        assert!(
+            try_reserve_open_file_permit_for_work_item(&mut first, &permit_rx, &permit_tx)
+                .expect("first reserve")
+        );
+        assert!(first.reserved_open_permit.is_some());
+        assert!(
+            !try_reserve_open_file_permit_for_work_item(&mut second, &permit_rx, &permit_tx)
+                .expect("second should wait")
+        );
+
+        drop(first.reserved_open_permit.take());
+
+        assert!(
+            try_reserve_open_file_permit_for_work_item(&mut second, &permit_rx, &permit_tx)
+                .expect("second reserve after release")
+        );
+        assert!(second.reserved_open_permit.is_some());
     }
 }
 
