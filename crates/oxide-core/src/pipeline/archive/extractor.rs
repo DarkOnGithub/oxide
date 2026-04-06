@@ -30,6 +30,7 @@ use super::types::*;
 
 const DECODE_QUEUE_MULTIPLIER: usize = 4;
 const ORDERED_WRITE_QUEUE_MULTIPLIER: usize = 8;
+const ORDERED_WRITE_HEADROOM_SHARE_DENOMINATOR: usize = 4;
 // Large archives can have substantial decode skew; keep enough headroom for
 // late blocks without failing the extraction outright.
 const REORDER_PENDING_MULTIPLIER: usize = 8;
@@ -995,6 +996,7 @@ impl Extractor {
             queue_capacity,
             block_capacity,
             inflight_block_limit,
+            block_profile,
         );
         let reorder_pending_limit = reorder_pending_limit(
             ordered_write_queue_capacity,
@@ -1467,16 +1469,42 @@ fn ordered_write_queue_capacity(
     decode_queue_capacity: usize,
     block_capacity: usize,
     inflight_block_limit: usize,
+    block_profile: ExtractBlockProfile,
 ) -> usize {
-    let bounded = worker_count
+    let worker_bounded = worker_count
         .saturating_mul(ORDERED_WRITE_QUEUE_MULTIPLIER)
         .max(MIN_ORDERED_WRITE_QUEUE_CAPACITY)
         .min(inflight_block_limit.max(1))
         .min(block_capacity.max(1))
         .max(1);
-    bounded
+
+    let inflight_headroom = inflight_block_limit.saturating_sub(decode_queue_capacity);
+    let adaptive_headroom = inflight_headroom
+        .saturating_mul(ordered_write_headroom_share_numerator(block_profile))
+        .div_ceil(ORDERED_WRITE_HEADROOM_SHARE_DENOMINATOR);
+    let adaptive_bounded = decode_queue_capacity.saturating_add(adaptive_headroom);
+
+    worker_bounded
+        .max(adaptive_bounded)
         .max(decode_queue_capacity)
+        .min(inflight_block_limit.max(1))
         .min(block_capacity.max(1))
+}
+
+#[inline]
+fn ordered_write_headroom_share_numerator(block_profile: ExtractBlockProfile) -> usize {
+    let skew_ratio = block_profile
+        .max_queue_block_bytes()
+        .div_ceil(block_profile.budgeted_queue_block_bytes());
+
+    // Keep most of the inflight headroom available to the ordered writer when
+    // block sizes are uniform, but taper that share as byte skew rises so the
+    // queue policy stays conservative on archives with heavier tails.
+    match skew_ratio {
+        0..=2 => 3,
+        3..=4 => 2,
+        _ => 1,
+    }
 }
 
 #[inline]
@@ -2054,9 +2082,70 @@ mod tests {
     }
 
     #[test]
+    fn ordered_write_queue_expands_into_inflight_headroom_for_uniform_blocks() {
+        let profile = ExtractBlockProfile {
+            max_encoded_len: 1024 * 1024,
+            max_raw_len: 1024 * 1024,
+            queue_block_bytes_p95: 1024 * 1024,
+        };
+        let queue = decode_queue_capacity(16, 10_000, 256);
+        let ordered = ordered_write_queue_capacity(16, queue, 10_000, 256, profile);
+
+        assert_eq!(queue, 64);
+        assert_eq!(ordered, 208);
+    }
+
+    #[test]
+    fn ordered_write_queue_stays_worker_bounded_for_skewed_blocks() {
+        let profile = ExtractBlockProfile {
+            max_encoded_len: 8 * 1024 * 1024,
+            max_raw_len: 8 * 1024 * 1024,
+            queue_block_bytes_p95: 1024 * 1024,
+        };
+        let queue = decode_queue_capacity(16, 10_000, 256);
+        let ordered = ordered_write_queue_capacity(16, queue, 10_000, 256, profile);
+
+        assert_eq!(queue, 64);
+        assert_eq!(ordered, 128);
+    }
+
+    #[test]
+    fn ordered_write_headroom_share_steps_down_at_skew_thresholds() {
+        let low_skew = ExtractBlockProfile {
+            max_encoded_len: 2 * 1024,
+            max_raw_len: 2 * 1024,
+            queue_block_bytes_p95: 1024,
+        };
+        let medium_skew = ExtractBlockProfile {
+            max_encoded_len: 4 * 1024,
+            max_raw_len: 4 * 1024,
+            queue_block_bytes_p95: 1024,
+        };
+        let high_skew = ExtractBlockProfile {
+            max_encoded_len: 5 * 1024,
+            max_raw_len: 5 * 1024,
+            queue_block_bytes_p95: 1024,
+        };
+
+        assert_eq!(ordered_write_headroom_share_numerator(low_skew), 3);
+        assert_eq!(ordered_write_headroom_share_numerator(medium_skew), 2);
+        assert_eq!(ordered_write_headroom_share_numerator(high_skew), 1);
+    }
+
+    #[test]
     fn extract_queue_capacity_is_limited_by_byte_budget() {
         let queue = decode_queue_capacity(16, 10_000, 12);
-        let ordered = ordered_write_queue_capacity(16, queue, 10_000, 12);
+        let ordered = ordered_write_queue_capacity(
+            16,
+            queue,
+            10_000,
+            12,
+            ExtractBlockProfile {
+                max_encoded_len: 1024,
+                max_raw_len: 1024,
+                queue_block_bytes_p95: 1024,
+            },
+        );
         let reorder = reorder_pending_limit(ordered, 10_000, 12);
 
         assert_eq!(queue, 12);
