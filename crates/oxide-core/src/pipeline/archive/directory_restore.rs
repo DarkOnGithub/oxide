@@ -22,7 +22,7 @@ use crate::format::ArchiveManifest;
 use crate::types::Result;
 
 use super::super::directory;
-use super::reorder_writer::OrderedChunkWriter;
+use super::reorder_writer::{OrderedChunkWriter, OwnedChunk, SharedChunk};
 
 pub(crate) const OUTPUT_BUFFER_CAPACITY: usize = 1024 * 1024;
 const MEDIUM_OUTPUT_BUFFER_CAPACITY: usize = 256 * 1024;
@@ -378,7 +378,8 @@ enum WriteShardTask {
     },
     WriteData {
         file_id: usize,
-        bytes: std::sync::Arc<[u8]>,
+        chunk: SharedChunk,
+        range: Range<usize>,
         finish: bool,
     },
     Abort,
@@ -488,6 +489,7 @@ pub(crate) struct DirectoryRestoreWriter {
     created_directories: HashSet<PathBuf>,
     pending_file_metadata: Vec<PendingMetadata>,
     pending_directory_metadata: Vec<PendingMetadata>,
+    ready_files: VecDeque<ReadyFileWrite>,
     planner_finished: bool,
     planner_rx: Receiver<Result<RestorePlannerMessage>>,
     planner_handle: Option<thread::JoinHandle<Result<()>>>,
@@ -773,7 +775,8 @@ fn run_write_shard_inner(
             }
             WriteShardTask::WriteData {
                 file_id,
-                bytes,
+                chunk,
+                range,
                 finish,
             } => {
                 let current = pending.as_mut().ok_or_else(|| {
@@ -788,7 +791,7 @@ fn run_write_shard_inner(
                 }
 
                 let write_started = Instant::now();
-                current.writer.write_all(&bytes)?;
+                current.writer.write_all(&chunk.as_ref()[range])?;
                 outcome.output_data += write_started.elapsed();
 
                 if finish {
@@ -861,6 +864,7 @@ impl DirectoryRestoreWriter {
             created_directories: HashSet::new(),
             pending_file_metadata: Vec::new(),
             pending_directory_metadata: Vec::new(),
+            ready_files: VecDeque::new(),
             planner_finished: false,
             planner_rx: never(),
             planner_handle: None,
@@ -964,25 +968,44 @@ impl DirectoryRestoreWriter {
         Ok(self.pending_file.is_some())
     }
 
-    fn next_pending_file(
-        &mut self,
-        track_file_transition_wait: bool,
-    ) -> Result<Option<PendingFile>> {
+    fn ready_file_frontier_depth(&self) -> usize {
+        self.ready_files
+            .len()
+            .saturating_add(self.planner_rx.len())
+            .max(1)
+    }
+
+    fn drain_planner_ready_files(&mut self) -> Result<()> {
         loop {
             match self.planner_rx.try_recv() {
                 Ok(message) => {
                     self.stats
                         .record_planner_ready_queue_peak(self.planner_rx.len());
-                    if let Some(pending_file) = self.consume_planner_message(message?)? {
-                        return Ok(Some(pending_file));
-                    }
+                    self.consume_planner_message(message?)?;
                     if self.planner_finished {
-                        return Ok(None);
+                        return Ok(());
                     }
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return self.handle_planner_disconnect(),
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => {
+                    let _ = self.handle_planner_disconnect()?;
+                    return Ok(());
+                }
             }
+        }
+    }
+
+    fn next_pending_file(
+        &mut self,
+        track_file_transition_wait: bool,
+    ) -> Result<Option<PendingFile>> {
+        if let Some(ready_file) = self.ready_files.pop_front() {
+            return self.pending_file_from_ready_file(ready_file).map(Some);
+        }
+
+        self.drain_planner_ready_files()?;
+        if let Some(ready_file) = self.ready_files.pop_front() {
+            return self.pending_file_from_ready_file(ready_file).map(Some);
         }
 
         if self.planner_finished {
@@ -1000,10 +1023,14 @@ impl DirectoryRestoreWriter {
                     }
                     self.stats
                         .record_planner_ready_queue_peak(self.planner_rx.len());
-                    if let Some(pending_file) = self.consume_planner_message(message?)? {
-                        return Ok(Some(pending_file));
+                    self.consume_planner_message(message?)?;
+                    self.drain_planner_ready_files()?;
+                    if let Some(ready_file) = self.ready_files.pop_front() {
+                        return self.pending_file_from_ready_file(ready_file).map(Some);
                     }
-                    return Ok(None);
+                    if self.planner_finished {
+                        return Ok(None);
+                    }
                 }
                 Err(_) => {
                     let wait_elapsed = wait_started.elapsed();
@@ -1011,59 +1038,65 @@ impl DirectoryRestoreWriter {
                     if track_file_transition_wait {
                         self.stats.record_file_transition_wait(wait_elapsed);
                     }
-                    return self.handle_planner_disconnect();
+                    let _ = self.handle_planner_disconnect()?;
+                    return match self.ready_files.pop_front() {
+                        Some(ready_file) => self.pending_file_from_ready_file(ready_file).map(Some),
+                        None => Ok(None),
+                    };
                 }
             }
         }
     }
 
-    fn consume_planner_message(
-        &mut self,
-        message: RestorePlannerMessage,
-    ) -> Result<Option<PendingFile>> {
+    fn consume_planner_message(&mut self, message: RestorePlannerMessage) -> Result<()> {
         match message {
             RestorePlannerMessage::ReadyFile(ready_file) => {
                 self.stats
-                    .record_ready_file_frontier(self.planner_rx.len().saturating_add(1));
-                if let Some(write_shards) = self.write_shards.as_mut() {
-                    let file_size = ready_file.entry.size;
-                    let (file_id, shard) = write_shards.reserve_file(file_size);
-                    if let Err(error) = write_shards.send_task(
-                        shard,
-                        WriteShardTask::OpenFile {
-                            file_id,
-                            writer: ready_file.writer,
-                            permit: ready_file.permit,
-                        },
-                        &mut self.stats,
-                        &mut self.pending_file_metadata,
-                        &mut self.completed_data_files,
-                    ) {
-                        write_shards.release_file(shard, file_size);
-                        return Err(error);
-                    }
-                    Ok(Some(PendingFile {
-                        remaining: ready_file.entry.size,
-                        path: ready_file.path,
-                        entry: ready_file.entry,
-                        state: PendingFileState::Sharded { file_id, shard },
-                    }))
-                } else {
-                    Ok(Some(PendingFile {
-                        remaining: ready_file.entry.size,
-                        path: ready_file.path,
-                        entry: ready_file.entry,
-                        state: PendingFileState::Local {
-                            writer: ready_file.writer,
-                            permit: ready_file.permit,
-                        },
-                    }))
-                }
+                    .record_ready_file_frontier(self.ready_file_frontier_depth());
+                self.ready_files.push_back(ready_file);
+                Ok(())
             }
             RestorePlannerMessage::Finished(outcome) => {
                 self.apply_planner_outcome(outcome);
-                Ok(None)
+                Ok(())
             }
+        }
+    }
+
+    fn pending_file_from_ready_file(&mut self, ready_file: ReadyFileWrite) -> Result<PendingFile> {
+        if let Some(write_shards) = self.write_shards.as_mut() {
+            let file_size = ready_file.entry.size;
+            let (file_id, shard) = write_shards.reserve_file(file_size);
+            if let Err(error) = write_shards.send_task(
+                shard,
+                WriteShardTask::OpenFile {
+                    file_id,
+                    writer: ready_file.writer,
+                    permit: ready_file.permit,
+                },
+                &mut self.stats,
+                &mut self.pending_file_metadata,
+                &mut self.completed_data_files,
+            ) {
+                write_shards.release_file(shard, file_size);
+                return Err(error);
+            }
+            Ok(PendingFile {
+                remaining: ready_file.entry.size,
+                path: ready_file.path,
+                entry: ready_file.entry,
+                state: PendingFileState::Sharded { file_id, shard },
+            })
+        } else {
+            Ok(PendingFile {
+                remaining: ready_file.entry.size,
+                path: ready_file.path,
+                entry: ready_file.entry,
+                state: PendingFileState::Local {
+                    writer: ready_file.writer,
+                    permit: ready_file.permit,
+                },
+            })
         }
     }
 
@@ -1080,10 +1113,24 @@ impl DirectoryRestoreWriter {
     fn wait_for_planner_completion(&mut self) -> Result<()> {
         while !self.planner_finished {
             self.try_receive_write_shard_completions()?;
-            let Some(ready_file) = self.next_pending_file(false)? else {
-                continue;
-            };
-            drop(ready_file);
+            self.drain_planner_ready_files()?;
+            if self.planner_finished {
+                break;
+            }
+
+            let wait_started = Instant::now();
+            match self.planner_rx.recv() {
+                Ok(message) => {
+                    self.stats.record_prepared_file_wait(wait_started.elapsed());
+                    self.stats
+                        .record_planner_ready_queue_peak(self.planner_rx.len());
+                    self.consume_planner_message(message?)?;
+                }
+                Err(_) => {
+                    self.stats.record_prepared_file_wait(wait_started.elapsed());
+                    let _ = self.handle_planner_disconnect()?;
+                }
+            }
         }
 
         Ok(())
@@ -1161,6 +1208,121 @@ impl DirectoryRestoreWriter {
                 let _ = (file_id, path, entry);
             }
         }
+        Ok(())
+    }
+
+    fn write_shared_chunk(&mut self, chunk: SharedChunk, range: Range<usize>) -> Result<()> {
+        let bytes = &chunk.as_ref()[range.clone()];
+        self.write_chunk_range(bytes, Some(&chunk), range.start)
+    }
+
+    fn write_chunk_range(
+        &mut self,
+        mut bytes: &[u8],
+        shared_chunk: Option<&SharedChunk>,
+        shared_offset: usize,
+    ) -> Result<()> {
+        let ordered_write_started = Instant::now();
+        self.try_receive_write_shard_completions()?;
+        if !bytes.is_empty() && self.pending_file.is_none() {
+            let decode_started = Instant::now();
+            if !self.ensure_pending_file_for_write()? {
+                return Err(OxideError::InvalidFormat(
+                    "directory archive contains file data beyond manifest entries",
+                ));
+            }
+            self.stats.directory_decode += decode_started.elapsed();
+        }
+
+        let mut chunk_offset = 0usize;
+        while !bytes.is_empty() {
+            let (take, finished_file) = {
+                let pending = self.pending_file.as_mut().ok_or(OxideError::InvalidFormat(
+                    "directory archive contains file data beyond manifest entries",
+                ))?;
+
+                let take = bytes.len().min(pending.remaining as usize);
+                pending.remaining -= take as u64;
+                let write_slice = &bytes[..take];
+                match &mut pending.state {
+                    PendingFileState::Local { writer, .. } => {
+                        let started = Instant::now();
+                        writer.write_all(write_slice)?;
+                        let write_elapsed = started.elapsed();
+                        self.stats.record_output_data(write_elapsed);
+                        self.stats.record_write_shard_output_data(0, write_elapsed);
+                    }
+                    PendingFileState::Sharded { file_id, shard } => {
+                        let write_shards = self.write_shards.as_mut().ok_or_else(|| {
+                            crate::OxideError::CompressionError(
+                                "directory restore missing write shards during data dispatch"
+                                    .to_string(),
+                            )
+                        })?;
+                        let finish_file = pending.remaining == 0;
+                        if finish_file {
+                            write_shards.register_pending_completion(
+                                *file_id,
+                                *shard,
+                                pending.path.clone(),
+                                pending.entry.clone(),
+                            );
+                        }
+                        let task = if let Some(shared) = shared_chunk {
+                            WriteShardTask::WriteData {
+                                file_id: *file_id,
+                                chunk: shared.clone(),
+                                range: (shared_offset + chunk_offset)
+                                    ..(shared_offset + chunk_offset + take),
+                                finish: finish_file,
+                            }
+                        } else {
+                            WriteShardTask::WriteData {
+                                file_id: *file_id,
+                                chunk: OwnedChunk::Owned(write_slice.to_vec()).into_shared(),
+                                range: 0..take,
+                                finish: finish_file,
+                            }
+                        };
+                        if let Err(error) = write_shards.send_task(
+                            *shard,
+                            task,
+                            &mut self.stats,
+                            &mut self.pending_file_metadata,
+                            &mut self.completed_data_files,
+                        ) {
+                            if finish_file {
+                                write_shards.forget_pending_completion(*file_id);
+                            }
+                            write_shards.release_file(*shard, pending.entry.size);
+                            return Err(error);
+                        }
+                    }
+                }
+                (take, pending.remaining == 0)
+            };
+
+            self.stats.output_bytes_total =
+                self.stats.output_bytes_total.saturating_add(take as u64);
+            bytes = &bytes[take..];
+            chunk_offset = chunk_offset.saturating_add(take);
+
+            if finished_file {
+                self.finalize_pending_file()?;
+                if !bytes.is_empty() {
+                    let decode_started = Instant::now();
+                    if !self.ensure_pending_file_for_write()? {
+                        return Err(OxideError::InvalidFormat(
+                            "directory archive contains file data beyond manifest entries",
+                        ));
+                    }
+                    self.stats.directory_decode += decode_started.elapsed();
+                }
+            }
+        }
+
+        self.stats.ordered_write_time += ordered_write_started.elapsed();
+
         Ok(())
     }
 
@@ -1993,95 +2155,14 @@ impl FilteredDirectoryRestoreWriter {
 }
 
 impl OrderedChunkWriter for DirectoryRestoreWriter {
-    fn write_chunk(&mut self, mut bytes: &[u8]) -> Result<()> {
-        let ordered_write_started = Instant::now();
-        self.try_receive_write_shard_completions()?;
-        if !bytes.is_empty() && self.pending_file.is_none() {
-            let decode_started = Instant::now();
-            if !self.ensure_pending_file_for_write()? {
-                return Err(OxideError::InvalidFormat(
-                    "directory archive contains file data beyond manifest entries",
-                ));
-            }
-            self.stats.directory_decode += decode_started.elapsed();
-        }
+    fn write_chunk(&mut self, bytes: &[u8]) -> Result<()> {
+        self.write_chunk_range(bytes, None, 0)
+    }
 
-        while !bytes.is_empty() {
-            let (take, finished_file) = {
-                let pending = self.pending_file.as_mut().ok_or(OxideError::InvalidFormat(
-                    "directory archive contains file data beyond manifest entries",
-                ))?;
-
-                let take = bytes.len().min(pending.remaining as usize);
-                pending.remaining -= take as u64;
-                match &mut pending.state {
-                    PendingFileState::Local { writer, .. } => {
-                        let started = Instant::now();
-                        writer.write_all(&bytes[..take])?;
-                        let write_elapsed = started.elapsed();
-                        self.stats.record_output_data(write_elapsed);
-                        self.stats.record_write_shard_output_data(0, write_elapsed);
-                    }
-                    PendingFileState::Sharded { file_id, shard } => {
-                        let write_shards = self.write_shards.as_mut().ok_or_else(|| {
-                            crate::OxideError::CompressionError(
-                                "directory restore missing write shards during data dispatch"
-                                    .to_string(),
-                            )
-                        })?;
-                        let payload: std::sync::Arc<[u8]> = std::sync::Arc::from(&bytes[..take]);
-                        let finish_file = pending.remaining == 0;
-                        if finish_file {
-                            write_shards.register_pending_completion(
-                                *file_id,
-                                *shard,
-                                pending.path.clone(),
-                                pending.entry.clone(),
-                            );
-                        }
-                        if let Err(error) = write_shards.send_task(
-                            *shard,
-                            WriteShardTask::WriteData {
-                                file_id: *file_id,
-                                bytes: payload,
-                                finish: finish_file,
-                            },
-                            &mut self.stats,
-                            &mut self.pending_file_metadata,
-                            &mut self.completed_data_files,
-                        ) {
-                            if finish_file {
-                                write_shards.forget_pending_completion(*file_id);
-                            }
-                            write_shards.release_file(*shard, pending.entry.size);
-                            return Err(error);
-                        }
-                    }
-                }
-                (take, pending.remaining == 0)
-            };
-
-            self.stats.output_bytes_total =
-                self.stats.output_bytes_total.saturating_add(take as u64);
-            bytes = &bytes[take..];
-
-            if finished_file {
-                self.finalize_pending_file()?;
-                if !bytes.is_empty() {
-                    let decode_started = Instant::now();
-                    if !self.ensure_pending_file_for_write()? {
-                        return Err(OxideError::InvalidFormat(
-                            "directory archive contains file data beyond manifest entries",
-                        ));
-                    }
-                    self.stats.directory_decode += decode_started.elapsed();
-                }
-            }
-        }
-
-        self.stats.ordered_write_time += ordered_write_started.elapsed();
-
-        Ok(())
+    fn write_owned_chunk(&mut self, chunk: OwnedChunk) -> Result<()> {
+        let shared = chunk.into_shared();
+        let len = shared.len();
+        self.write_shared_chunk(shared, 0..len)
     }
 }
 
@@ -2108,6 +2189,43 @@ impl OrderedChunkWriter for FilteredDirectoryRestoreWriter {
             if write_start < write_end {
                 self.inner
                     .write_chunk(&bytes[write_start as usize..write_end as usize])?;
+            }
+
+            if range.end <= chunk_end {
+                range_index += 1;
+            } else {
+                break;
+            }
+        }
+
+        self.next_range = range_index;
+        self.input_offset = chunk_end;
+        Ok(())
+    }
+
+    fn write_owned_chunk(&mut self, chunk: OwnedChunk) -> Result<()> {
+        let shared = chunk.into_shared();
+        let chunk_start = self.input_offset;
+        let chunk_end = chunk_start.saturating_add(shared.len() as u64);
+
+        while self.next_range < self.selected_ranges.len()
+            && self.selected_ranges[self.next_range].end <= chunk_start
+        {
+            self.next_range += 1;
+        }
+
+        let mut range_index = self.next_range;
+        while range_index < self.selected_ranges.len() {
+            let range = &self.selected_ranges[range_index];
+            if range.start >= chunk_end {
+                break;
+            }
+
+            let write_start = range.start.max(chunk_start) - chunk_start;
+            let write_end = range.end.min(chunk_end) - chunk_start;
+            if write_start < write_end {
+                self.inner
+                    .write_shared_chunk(shared.clone(), write_start as usize..write_end as usize)?;
             }
 
             if range.end <= chunk_end {

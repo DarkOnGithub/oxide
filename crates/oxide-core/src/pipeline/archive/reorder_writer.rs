@@ -1,15 +1,108 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::buffer::PooledBuffer;
 use crate::format::ReorderBuffer;
 use crate::types::Result;
 
+#[derive(Debug, Clone)]
+pub struct SharedChunk {
+    storage: Arc<ChunkStorage>,
+}
+
+#[derive(Debug)]
+enum ChunkStorage {
+    Owned(Vec<u8>),
+    Pooled(PooledBuffer),
+}
+
+impl SharedChunk {
+    pub fn as_slice(&self) -> &[u8] {
+        match self.storage.as_ref() {
+            ChunkStorage::Owned(bytes) => bytes.as_slice(),
+            ChunkStorage::Pooled(bytes) => bytes.as_slice(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+}
+
+impl AsRef<[u8]> for SharedChunk {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+#[derive(Debug)]
+pub enum OwnedChunk {
+    Owned(Vec<u8>),
+    Pooled(PooledBuffer),
+    Shared(SharedChunk),
+}
+
+impl OwnedChunk {
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes.as_slice(),
+            Self::Pooled(bytes) => bytes.as_slice(),
+            Self::Shared(bytes) => bytes.as_slice(),
+        }
+    }
+
+    pub fn into_shared(self) -> SharedChunk {
+        match self {
+            Self::Shared(shared) => shared,
+            Self::Owned(bytes) => SharedChunk {
+                storage: Arc::new(ChunkStorage::Owned(bytes)),
+            },
+            Self::Pooled(bytes) => SharedChunk {
+                storage: Arc::new(ChunkStorage::Pooled(bytes)),
+            },
+        }
+    }
+}
+
+impl AsRef<[u8]> for OwnedChunk {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl From<Vec<u8>> for OwnedChunk {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Owned(value)
+    }
+}
+
+impl From<PooledBuffer> for OwnedChunk {
+    fn from(value: PooledBuffer) -> Self {
+        Self::Pooled(value)
+    }
+}
+
+impl From<SharedChunk> for OwnedChunk {
+    fn from(value: SharedChunk) -> Self {
+        Self::Shared(value)
+    }
+}
+
 pub trait OrderedChunkWriter {
     fn write_chunk(&mut self, bytes: &[u8]) -> Result<()>;
+
+    fn write_owned_chunk(&mut self, chunk: OwnedChunk) -> Result<()> {
+        self.write_chunk(chunk.as_ref())
+    }
 }
 
 impl<T: OrderedChunkWriter + ?Sized> OrderedChunkWriter for &mut T {
     fn write_chunk(&mut self, bytes: &[u8]) -> Result<()> {
         (**self).write_chunk(bytes)
+    }
+
+    fn write_owned_chunk(&mut self, chunk: OwnedChunk) -> Result<()> {
+        (**self).write_owned_chunk(chunk)
     }
 }
 
@@ -41,7 +134,7 @@ pub struct BoundedReorderWriter<W, T = Vec<u8>> {
     stats: ReorderWriterStats,
 }
 
-impl<W: OrderedChunkWriter, T: AsRef<[u8]>> BoundedReorderWriter<W, T> {
+impl<W: OrderedChunkWriter, T: AsRef<[u8]> + Into<OwnedChunk>> BoundedReorderWriter<W, T> {
     pub fn with_limit(writer: W, max_pending: usize) -> Self {
         Self {
             writer,
@@ -80,7 +173,7 @@ impl<W: OrderedChunkWriter, T: AsRef<[u8]>> BoundedReorderWriter<W, T> {
             self.pending_bytes = self.pending_bytes.saturating_sub(len as u64);
 
             let write_started = Instant::now();
-            self.writer.write_chunk(chunk.as_ref())?;
+            self.writer.write_owned_chunk(chunk.into())?;
             let write_elapsed = write_started.elapsed();
 
             push_stats.wrote_blocks = push_stats.wrote_blocks.saturating_add(1);

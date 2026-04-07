@@ -125,6 +125,23 @@ fn extract_command_accepts_telemetry_flag() {
 }
 
 #[test]
+fn extract_command_accepts_extract_write_shards_flag() {
+    let cli = Cli::try_parse_from([
+        "oxide",
+        "extract",
+        "demo/input.oxz",
+        "--extract-write-shards",
+        "3",
+    ])
+    .expect("extract arguments should parse");
+
+    match cli.command {
+        Commands::Extract(args) => assert_eq!(args.extract_write_shards, 3),
+        _ => panic!("expected extract command"),
+    }
+}
+
+#[test]
 fn extract_command_accepts_repeated_only_flags() {
     let cli = Cli::try_parse_from([
         "oxide",
