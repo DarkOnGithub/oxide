@@ -345,37 +345,78 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
             Tone::Accent,
         );
 
+        let write_shard_count =
+            extension_u64(&report.extensions, "pipeline.write_shard_count").unwrap_or(0) as usize;
+        let mut stage_order = vec![
+            ("archive_read".to_string(), "archive read".to_string()),
+            ("decode_submit".to_string(), "decode submit".to_string()),
+            ("decode_wait".to_string(), "decode wait".to_string()),
+            (
+                "writer_enqueue_blocked".to_string(),
+                "writer enqueue blocked".to_string(),
+            ),
+            ("merge".to_string(), "merge".to_string()),
+            (
+                "directory_decode".to_string(),
+                "directory decode".to_string(),
+            ),
+            (
+                "prepared_file_open".to_string(),
+                "prepared file open".to_string(),
+            ),
+            (
+                "prepared_file_permit_wait".to_string(),
+                "prepared file permit wait".to_string(),
+            ),
+            (
+                "prepared_file_wait".to_string(),
+                "prepared file wait".to_string(),
+            ),
+            (
+                "file_transition_wait".to_string(),
+                "file transition wait".to_string(),
+            ),
+            (
+                "output_prepare_directories".to_string(),
+                "prepare output dirs".to_string(),
+            ),
+            ("output_write".to_string(), "output write".to_string()),
+            ("output_create".to_string(), "output create".to_string()),
+            (
+                "output_create_directories".to_string(),
+                "create dirs".to_string(),
+            ),
+            (
+                "output_create_files".to_string(),
+                "create files".to_string(),
+            ),
+            ("output_data".to_string(), "output data".to_string()),
+            ("output_flush".to_string(), "output flush".to_string()),
+            ("output_metadata".to_string(), "output metadata".to_string()),
+            (
+                "output_metadata_files".to_string(),
+                "metadata files".to_string(),
+            ),
+            (
+                "output_metadata_directories".to_string(),
+                "metadata dirs".to_string(),
+            ),
+        ];
+        for shard in 0..write_shard_count {
+            stage_order.push((
+                format!("write_shard_blocked[{shard}]"),
+                format!("write shard {shard} blocked"),
+            ));
+            stage_order.push((
+                format!("write_shard_output_data[{shard}]"),
+                format!("write shard {shard} output data"),
+            ));
+        }
         let mut runtime_rows = vec![("Scheduler".to_string(), scheduler_summary(&report.workers))];
         push_optional_string_row(
             &mut runtime_rows,
             "Stages",
-            thread_stage_summary(
-                &report.main_thread,
-                &[
-                    ("archive_read", "archive read"),
-                    ("decode_submit", "decode submit"),
-                    ("decode_wait", "decode wait"),
-                    ("writer_enqueue_blocked", "writer enqueue blocked"),
-                    ("merge", "merge"),
-                    ("directory_decode", "directory decode"),
-                    ("prepared_file_open", "prepared file open"),
-                    ("prepared_file_permit_wait", "prepared file permit wait"),
-                    ("prepared_file_wait", "prepared file wait"),
-                    ("file_transition_wait", "file transition wait"),
-                    ("output_prepare_directories", "prepare output dirs"),
-                    ("output_write", "output write"),
-                    ("output_create", "output create"),
-                    ("output_create_directories", "create dirs"),
-                    ("output_create_files", "create files"),
-                    ("output_data", "output data"),
-                    ("write_shard_blocked[0]", "write shard 0 blocked"),
-                    ("write_shard_output_data[0]", "write shard 0 output data"),
-                    ("output_flush", "output flush"),
-                    ("output_metadata", "output metadata"),
-                    ("output_metadata_files", "metadata files"),
-                    ("output_metadata_directories", "metadata dirs"),
-                ],
-            ),
+            thread_stage_summary_owned(&report.main_thread, &stage_order),
         );
         push_optional_string_row(
             &mut runtime_rows,
@@ -413,12 +454,17 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
             extension_u64(&report.extensions, "pipeline.write_shard_count")
                 .map(|value| value.to_string()),
         );
-        push_optional_string_row(
-            &mut runtime_rows,
-            "Write shard 0 queue peak",
-            extension_u64(&report.extensions, "pipeline.write_shard_queue_peak[0]")
+        for shard in 0..write_shard_count {
+            push_optional_string_row(
+                &mut runtime_rows,
+                &format!("Write shard {shard} queue peak"),
+                extension_u64(
+                    &report.extensions,
+                    &format!("pipeline.write_shard_queue_peak[{shard}]"),
+                )
                 .map(|value| value.to_string()),
-        );
+            );
+        }
         push_optional_string_row(
             &mut runtime_rows,
             "Ready file frontier",
@@ -861,6 +907,20 @@ fn thread_stage_summary(thread: &ThreadReport, order: &[(&str, &str)]) -> Option
     let mut pieces = Vec::new();
     for (stage_key, label) in order {
         let value_us = thread.stage_us.get(*stage_key).copied().unwrap_or(0);
+        if value_us > 0 {
+            pieces.push(format!(
+                "{label} {}",
+                format_duration_compact(Duration::from_micros(value_us))
+            ));
+        }
+    }
+    (!pieces.is_empty()).then(|| pieces.join(" | "))
+}
+
+fn thread_stage_summary_owned(thread: &ThreadReport, order: &[(String, String)]) -> Option<String> {
+    let mut pieces = Vec::new();
+    for (stage_key, label) in order {
+        let value_us = thread.stage_us.get(stage_key).copied().unwrap_or(0);
         if value_us > 0 {
             pieces.push(format!(
                 "{label} {}",

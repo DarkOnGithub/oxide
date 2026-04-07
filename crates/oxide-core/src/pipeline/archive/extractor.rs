@@ -587,7 +587,11 @@ impl Extractor {
         }
 
         let manifest = archive.manifest().clone();
-        let writer = DirectoryRestoreWriter::create(output_path, manifest)?;
+        let writer = DirectoryRestoreWriter::create_with_performance(
+            output_path,
+            manifest,
+            &self.performance,
+        )?;
         let (decoded, mut writer) = self.decode_archive_to_writer_with_backend(
             SequentialDecodeReadBackend::new(archive),
             archive_read_elapsed,
@@ -611,7 +615,7 @@ impl Extractor {
             mut pipeline_stats,
             ..
         } = decoded;
-        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, restore_stats);
+        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, &restore_stats);
 
         Ok(DirectoryRestoreOutcome {
             decoded: DecodedArchivePayload {
@@ -647,7 +651,11 @@ impl Extractor {
         }
 
         let manifest = archive.manifest().clone();
-        let writer = DirectoryRestoreWriter::create(output_path, manifest)?;
+        let writer = DirectoryRestoreWriter::create_with_performance(
+            output_path,
+            manifest,
+            &self.performance,
+        )?;
         let backend = ParallelFileDecodeReadBackend::new(archive, file)?;
         let (decoded, mut writer) = self.decode_archive_to_writer_with_backend(
             backend,
@@ -672,7 +680,7 @@ impl Extractor {
             mut pipeline_stats,
             ..
         } = decoded;
-        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, restore_stats);
+        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, &restore_stats);
 
         Ok(DirectoryRestoreOutcome {
             decoded: DecodedArchivePayload {
@@ -879,8 +887,12 @@ impl Extractor {
         let projected_ranges =
             decode_plan.project_ranges(archive.block_descriptors(), &selected_ranges);
         let manifest = selection.into_manifest();
-        let writer =
-            FilteredDirectoryRestoreWriter::create(output_path, manifest, projected_ranges)?;
+        let writer = FilteredDirectoryRestoreWriter::create_with_performance(
+            output_path,
+            manifest,
+            projected_ranges,
+            &self.performance,
+        )?;
         let (decoded, mut writer) = self.decode_archive_to_writer_with_backend(
             SequentialDecodeReadBackend::new(archive),
             archive_read_elapsed,
@@ -904,7 +916,7 @@ impl Extractor {
             mut pipeline_stats,
             ..
         } = decoded;
-        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, restore_stats);
+        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, &restore_stats);
 
         Ok(DirectoryRestoreOutcome {
             decoded: DecodedArchivePayload {
@@ -953,8 +965,12 @@ impl Extractor {
         let projected_ranges =
             decode_plan.project_ranges(archive.block_descriptors(), &selected_ranges);
         let manifest = selection.into_manifest();
-        let writer =
-            FilteredDirectoryRestoreWriter::create(output_path, manifest, projected_ranges)?;
+        let writer = FilteredDirectoryRestoreWriter::create_with_performance(
+            output_path,
+            manifest,
+            projected_ranges,
+            &self.performance,
+        )?;
         let backend = ParallelFileDecodeReadBackend::new(archive, file)?;
         let (decoded, mut writer) = self.decode_archive_to_writer_with_backend(
             backend,
@@ -979,7 +995,7 @@ impl Extractor {
             mut pipeline_stats,
             ..
         } = decoded;
-        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, restore_stats);
+        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, &restore_stats);
 
         Ok(DirectoryRestoreOutcome {
             decoded: DecodedArchivePayload {
@@ -1580,7 +1596,7 @@ fn apply_file_restore_stats(stage_timings: &mut ExtractStageTimings, stats: File
 fn apply_directory_restore_stats(
     pipeline_stats: &mut ExtractPipelineStats,
     stage_timings: &mut ExtractStageTimings,
-    restore_stats: super::directory_restore::DirectoryRestoreStats,
+    restore_stats: &super::directory_restore::DirectoryRestoreStats,
 ) {
     stage_timings.ordered_write = stage_timings
         .ordered_write
@@ -1600,8 +1616,22 @@ fn apply_directory_restore_stats(
     stage_timings.output_metadata_files += restore_stats.output_metadata_files;
     stage_timings.output_metadata_directories += restore_stats.output_metadata_directories;
     stage_timings.file_transition_wait += restore_stats.file_transition_wait;
-    pipeline_stats.set_write_shard_count(restore_stats.write_shard_count.max(1));
-    stage_timings.record_write_shard_output_data(0, restore_stats.write_shard_output_data[0]);
+    if restore_stats.write_shard_count > 1 {
+        pipeline_stats.write_shard_count = restore_stats.write_shard_count;
+        pipeline_stats.write_shard_queue_peak = restore_stats.write_shard_queue_peak.clone();
+        stage_timings.write_shard_blocked = restore_stats.write_shard_blocked.clone();
+        stage_timings.write_shard_output_data = restore_stats.write_shard_output_data.clone();
+    } else {
+        pipeline_stats.set_write_shard_count(restore_stats.write_shard_count.max(1));
+        for (shard, elapsed) in restore_stats
+            .write_shard_output_data
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            stage_timings.record_write_shard_output_data(shard, elapsed);
+        }
+    }
     pipeline_stats.record_ready_file_frontier(restore_stats.ready_file_frontier);
     pipeline_stats.record_planner_ready_queue_peak(restore_stats.planner_ready_queue_peak);
     pipeline_stats.record_active_files_peak(restore_stats.active_files_peak);
