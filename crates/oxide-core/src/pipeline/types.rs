@@ -292,7 +292,7 @@ impl Default for PipelinePerformanceOptions {
             writer_result_queue_blocks: 1024,
             raw_chunk_dedup_window_blocks: 131_072,
             block_dedup_window_blocks: 131_072,
-            extract_write_shards: 2,
+            extract_write_shards: 1,
         }
     }
 }

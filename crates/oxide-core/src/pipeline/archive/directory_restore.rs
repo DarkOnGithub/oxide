@@ -31,12 +31,12 @@ const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
 const MAX_METADATA_WORKERS: usize = 8;
 const MAX_PREPARED_ENTRY_WORKERS: usize = 8;
 const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 256;
-const BASE_PREOPENED_FILE_WINDOW_MULTIPLIER: usize = 16;
-const PREOPENED_FILE_WINDOW_BONUS_STEP: usize = 4;
-const MIN_PREOPENED_FILE_WINDOW_CAPACITY: usize = 64;
-const MAX_PREOPENED_FILE_WINDOW_CAPACITY: usize = 512;
+const BASE_PREOPENED_FILE_WINDOW_MULTIPLIER: usize = 8;
+const PREOPENED_FILE_WINDOW_BONUS_STEP: usize = 2;
+const MIN_PREOPENED_FILE_WINDOW_CAPACITY: usize = 32;
+const MAX_PREOPENED_FILE_WINDOW_CAPACITY: usize = 256;
 const MIN_READY_ENTRY_WINDOW_CAPACITY: usize = 32;
-const MAX_READY_ENTRY_WINDOW_CAPACITY: usize = 128;
+const MAX_READY_ENTRY_WINDOW_CAPACITY: usize = 64;
 const WRITE_SHARD_QUEUE_CAPACITY: usize = 64;
 const DIRECT_FILE_WRITE_MAX_BYTES: u64 = 32 * 1024;
 const SMALL_FILE_BUFFER_MAX_BYTES: u64 = 256 * 1024;
@@ -366,6 +366,7 @@ struct PendingFile {
 struct PendingShardCompletion {
     path: PathBuf,
     entry: crate::ArchiveListingEntry,
+    shard: usize,
 }
 
 #[derive(Debug)]
@@ -377,7 +378,7 @@ enum WriteShardTask {
     },
     WriteData {
         file_id: usize,
-        bytes: Vec<u8>,
+        bytes: std::sync::Arc<[u8]>,
         finish: bool,
     },
     Abort,
@@ -406,7 +407,8 @@ struct ShardPendingFile {
 struct WriteShardWorker {
     shard_count: usize,
     next_file_id: usize,
-    next_shard: usize,
+    next_shard_hint: usize,
+    shard_load_bytes: Vec<u64>,
     completion_rx: Receiver<Result<WriteShardCompletion>>,
     task_txs: Vec<Sender<WriteShardTask>>,
     handles: Vec<thread::JoinHandle<Result<WriteShardOutcome>>>,
@@ -523,7 +525,8 @@ impl WriteShardWorker {
         Self {
             shard_count,
             next_file_id: 0,
-            next_shard: 0,
+            next_shard_hint: 0,
+            shard_load_bytes: vec![0; shard_count],
             completion_rx,
             task_txs,
             handles,
@@ -532,12 +535,30 @@ impl WriteShardWorker {
         }
     }
 
-    fn reserve_file(&mut self) -> (usize, usize) {
+    fn reserve_file(&mut self, file_size: u64) -> (usize, usize) {
         let file_id = self.next_file_id;
-        let shard = self.next_shard;
+        let mut shard = 0usize;
+        let mut best = (u64::MAX, usize::MAX, usize::MAX);
+        for offset in 0..self.shard_count.max(1) {
+            let candidate = (self.next_shard_hint + offset) % self.shard_count.max(1);
+            let candidate_load = self.shard_load_bytes[candidate];
+            let candidate_queue = self.task_txs[candidate].len();
+            let candidate_key = (candidate_load, candidate_queue, offset);
+            if candidate_key < best {
+                best = candidate_key;
+                shard = candidate;
+            }
+        }
         self.next_file_id = self.next_file_id.saturating_add(1);
-        self.next_shard = (self.next_shard + 1) % self.shard_count.max(1);
+        self.next_shard_hint = (shard + 1) % self.shard_count.max(1);
+        self.shard_load_bytes[shard] = self.shard_load_bytes[shard].saturating_add(file_size);
         (file_id, shard)
+    }
+
+    fn release_file(&mut self, shard: usize, file_size: u64) {
+        if let Some(load) = self.shard_load_bytes.get_mut(shard) {
+            *load = load.saturating_sub(file_size);
+        }
     }
 
     fn record_queue_peak(&self, stats: &mut DirectoryRestoreStats, shard: usize) {
@@ -586,11 +607,16 @@ impl WriteShardWorker {
     fn register_pending_completion(
         &mut self,
         file_id: usize,
+        shard: usize,
         path: PathBuf,
         entry: crate::ArchiveListingEntry,
     ) {
         self.pending
-            .insert(file_id, PendingShardCompletion { path, entry });
+            .insert(file_id, PendingShardCompletion { path, entry, shard });
+    }
+
+    fn forget_pending_completion(&mut self, file_id: usize) {
+        let _ = self.pending.remove(&file_id);
     }
 
     fn try_receive_completions(
@@ -667,6 +693,8 @@ impl WriteShardWorker {
         let pending = self.pending.remove(&completion.file_id).ok_or_else(|| {
             crate::OxideError::CompressionError("write shard completed unknown file".to_string())
         })?;
+        self.shard_load_bytes[pending.shard] =
+            self.shard_load_bytes[pending.shard].saturating_sub(pending.entry.size);
         stats.record_output_flush(completion.flush_elapsed);
         pending_file_metadata.push(PendingMetadata::new(pending.path, pending.entry));
         *completed_data_files = completed_data_files.saturating_add(1);
@@ -812,7 +840,7 @@ impl DirectoryRestoreWriter {
         manifest: ArchiveManifest,
         performance: &crate::pipeline::types::PipelinePerformanceOptions,
     ) -> Result<Self> {
-        Self::create_with_shards(root, manifest, performance.extract_write_shards.max(2))
+        Self::create_with_shards(root, manifest, performance.extract_write_shards.max(1))
     }
 
     fn create_with_shards(
@@ -998,8 +1026,9 @@ impl DirectoryRestoreWriter {
                 self.stats
                     .record_ready_file_frontier(self.planner_rx.len().saturating_add(1));
                 if let Some(write_shards) = self.write_shards.as_mut() {
-                    let (file_id, shard) = write_shards.reserve_file();
-                    write_shards.send_task(
+                    let file_size = ready_file.entry.size;
+                    let (file_id, shard) = write_shards.reserve_file(file_size);
+                    if let Err(error) = write_shards.send_task(
                         shard,
                         WriteShardTask::OpenFile {
                             file_id,
@@ -1009,7 +1038,10 @@ impl DirectoryRestoreWriter {
                         &mut self.stats,
                         &mut self.pending_file_metadata,
                         &mut self.completed_data_files,
-                    )?;
+                    ) {
+                        write_shards.release_file(shard, file_size);
+                        return Err(error);
+                    }
                     Ok(Some(PendingFile {
                         remaining: ready_file.entry.size,
                         path: ready_file.path,
@@ -1253,14 +1285,15 @@ fn prepared_entry_window_config_for_counts(
     let parallelism = parallelism.max(1);
 
     let ready_entry_window_capacity = parallelism
-        .saturating_mul(8)
+        .saturating_mul(4)
         .clamp(
             MIN_READY_ENTRY_WINDOW_CAPACITY,
             MAX_READY_ENTRY_WINDOW_CAPACITY,
         )
         .min(entry_count);
     let preopened_file_window_capacity =
-        adaptive_preopened_file_window_capacity(entry_count, file_count, parallelism);
+        adaptive_preopened_file_window_capacity(entry_count, file_count, parallelism)
+            .min(ready_entry_window_capacity.saturating_mul(2).max(1));
 
     PreparedEntryWindowConfig {
         preopened_file_window_capacity,
@@ -1996,24 +2029,33 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
                                     .to_string(),
                             )
                         })?;
-                        if pending.remaining == 0 {
+                        let payload: std::sync::Arc<[u8]> = std::sync::Arc::from(&bytes[..take]);
+                        let finish_file = pending.remaining == 0;
+                        if finish_file {
                             write_shards.register_pending_completion(
                                 *file_id,
+                                *shard,
                                 pending.path.clone(),
                                 pending.entry.clone(),
                             );
                         }
-                        write_shards.send_task(
+                        if let Err(error) = write_shards.send_task(
                             *shard,
                             WriteShardTask::WriteData {
                                 file_id: *file_id,
-                                bytes: bytes[..take].to_vec(),
-                                finish: pending.remaining == 0,
+                                bytes: payload,
+                                finish: finish_file,
                             },
                             &mut self.stats,
                             &mut self.pending_file_metadata,
                             &mut self.completed_data_files,
-                        )?;
+                        ) {
+                            if finish_file {
+                                write_shards.forget_pending_completion(*file_id);
+                            }
+                            write_shards.release_file(*shard, pending.entry.size);
+                            return Err(error);
+                        }
                     }
                 }
                 (take, pending.remaining == 0)
@@ -2179,8 +2221,8 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 384,
-                ready_entry_window_capacity: 96,
+                preopened_file_window_capacity: 96,
+                ready_entry_window_capacity: 48,
             }
         );
     }
@@ -2192,8 +2234,8 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 384,
-                ready_entry_window_capacity: 128,
+                preopened_file_window_capacity: 128,
+                ready_entry_window_capacity: 64,
             }
         );
     }
@@ -2205,8 +2247,8 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 256,
-                ready_entry_window_capacity: 128,
+                preopened_file_window_capacity: 128,
+                ready_entry_window_capacity: 64,
             }
         );
     }
@@ -2218,8 +2260,8 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 240,
-                ready_entry_window_capacity: 128,
+                preopened_file_window_capacity: 128,
+                ready_entry_window_capacity: 64,
             }
         );
     }
@@ -2231,7 +2273,7 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: MAX_PREOPENED_FILE_WINDOW_CAPACITY,
+                preopened_file_window_capacity: 128,
                 ready_entry_window_capacity: MAX_READY_ENTRY_WINDOW_CAPACITY,
             }
         );
@@ -2257,7 +2299,7 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: MIN_PREOPENED_FILE_WINDOW_CAPACITY,
+                preopened_file_window_capacity: 32,
                 ready_entry_window_capacity: MIN_READY_ENTRY_WINDOW_CAPACITY,
             }
         );
