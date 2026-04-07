@@ -31,10 +31,10 @@ const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
 const MAX_METADATA_WORKERS: usize = 8;
 const MAX_PREPARED_ENTRY_WORKERS: usize = 8;
 const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 256;
-const BASE_PREOPENED_FILE_WINDOW_MULTIPLIER: usize = 8;
-const PREOPENED_FILE_WINDOW_BONUS_STEP: usize = 2;
+const BASE_PREOPENED_FILE_WINDOW_MULTIPLIER: usize = 12;
+const PREOPENED_FILE_WINDOW_BONUS_STEP: usize = 3;
 const MIN_PREOPENED_FILE_WINDOW_CAPACITY: usize = 32;
-const MAX_PREOPENED_FILE_WINDOW_CAPACITY: usize = 256;
+const MAX_PREOPENED_FILE_WINDOW_CAPACITY: usize = 384;
 const MIN_READY_ENTRY_WINDOW_CAPACITY: usize = 32;
 const MAX_READY_ENTRY_WINDOW_CAPACITY: usize = 96;
 const WRITE_SHARD_QUEUE_CAPACITY: usize = 64;
@@ -1293,7 +1293,7 @@ fn prepared_entry_window_config_for_counts(
         .min(entry_count);
     let preopened_file_window_capacity =
         adaptive_preopened_file_window_capacity(entry_count, file_count, parallelism)
-            .min(ready_entry_window_capacity.saturating_mul(2).max(1));
+            .min(ready_entry_window_capacity.saturating_mul(3).max(1));
 
     PreparedEntryWindowConfig {
         preopened_file_window_capacity,
@@ -2221,7 +2221,7 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 144,
+                preopened_file_window_capacity: 216,
                 ready_entry_window_capacity: 72,
             }
         );
@@ -2234,7 +2234,7 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 192,
+                preopened_file_window_capacity: 288,
                 ready_entry_window_capacity: 96,
             }
         );
@@ -2247,7 +2247,7 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 128,
+                preopened_file_window_capacity: 192,
                 ready_entry_window_capacity: 96,
             }
         );
@@ -2260,7 +2260,7 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 128,
+                preopened_file_window_capacity: 192,
                 ready_entry_window_capacity: 96,
             }
         );
@@ -2273,7 +2273,7 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 192,
+                preopened_file_window_capacity: 288,
                 ready_entry_window_capacity: 96,
             }
         );
