@@ -1,5 +1,4 @@
 pub mod archiver;
-mod directory_restore;
 pub mod extractor;
 pub mod pipeline;
 pub mod reorder_writer;
