@@ -812,7 +812,7 @@ impl DirectoryRestoreWriter {
         manifest: ArchiveManifest,
         performance: &crate::pipeline::types::PipelinePerformanceOptions,
     ) -> Result<Self> {
-        Self::create_with_shards(root, manifest, performance.extract_write_shards.max(1))
+        Self::create_with_shards(root, manifest, performance.extract_write_shards.max(2))
     }
 
     fn create_with_shards(
