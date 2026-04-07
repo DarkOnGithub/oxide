@@ -913,7 +913,35 @@ fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>
         report.extensions.get("pipeline.reorder_pending_limit"),
         Some(ReportValue::U64(value)) if *value > 0
     ));
+    assert!(matches!(
+        report.extensions.get("pipeline.write_shard_count"),
+        Some(ReportValue::U64(1))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.write_shard_queue_peak[0]"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("stage.write_shard_blocked_us[0]"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("stage.write_shard_output_data_us[0]"),
+        Some(ReportValue::U64(value)) if *value > 0
+    ));
     assert!(report.main_thread.stage_us.contains_key("ordered_write"));
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("write_shard_blocked[0]")
+    );
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("write_shard_output_data[0]")
+    );
     assert!(
         report
             .main_thread
@@ -989,6 +1017,12 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
         report
             .main_thread
             .stage_us
+            .contains_key("file_transition_wait")
+    );
+    assert!(
+        report
+            .main_thread
+            .stage_us
             .contains_key("output_prepare_directories")
     );
     assert!(report.main_thread.stage_us.contains_key("output_write"));
@@ -1006,6 +1040,18 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
             .contains_key("output_create_files")
     );
     assert!(report.main_thread.stage_us.contains_key("output_data"));
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("write_shard_blocked[0]")
+    );
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("write_shard_output_data[0]")
+    );
     assert!(report.main_thread.stage_us.contains_key("output_flush"));
     assert!(report.main_thread.stage_us.contains_key("output_metadata"));
     assert!(
@@ -1020,6 +1066,38 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
             .stage_us
             .contains_key("output_metadata_directories")
     );
+    assert!(matches!(
+        report.extensions.get("pipeline.write_shard_count"),
+        Some(ReportValue::U64(1))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.write_shard_queue_peak[0]"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.ready_file_frontier"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.planner_ready_queue_peak"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.file_transition_wait_us"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.active_files_peak"),
+        Some(ReportValue::U64(value)) if *value > 0
+    ));
+    assert!(matches!(
+        report.extensions.get("stage.write_shard_blocked_us[0]"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("stage.write_shard_output_data_us[0]"),
+        Some(ReportValue::U64(value)) if *value > 0
+    ));
     Ok(())
 }
 

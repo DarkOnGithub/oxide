@@ -67,7 +67,7 @@ impl ProcessingThroughputTotals {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExtractStageTimings {
     pub archive_read: Duration,
     pub decode_submit: Duration,
@@ -89,9 +89,22 @@ pub struct ExtractStageTimings {
     pub output_metadata: Duration,
     pub output_metadata_files: Duration,
     pub output_metadata_directories: Duration,
+    pub file_transition_wait: Duration,
+    pub write_shard_blocked: Vec<Duration>,
+    pub write_shard_output_data: Vec<Duration>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+impl ExtractStageTimings {
+    pub fn record_write_shard_blocked(&mut self, shard: usize, elapsed: Duration) {
+        record_duration_by_shard(&mut self.write_shard_blocked, shard, elapsed);
+    }
+
+    pub fn record_write_shard_output_data(&mut self, shard: usize, elapsed: Duration) {
+        record_duration_by_shard(&mut self.write_shard_output_data, shard, elapsed);
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ExtractPipelineStats {
     pub decode_task_queue_capacity: usize,
     pub decode_task_queue_peak: usize,
@@ -102,6 +115,40 @@ pub struct ExtractPipelineStats {
     pub reorder_pending_limit: usize,
     pub reorder_pending_peak: usize,
     pub reorder_pending_bytes_peak: u64,
+    pub write_shard_count: usize,
+    pub write_shard_queue_peak: Vec<usize>,
+    pub ready_file_frontier: usize,
+    pub planner_ready_queue_peak: usize,
+    pub active_files_peak: usize,
+}
+
+impl ExtractPipelineStats {
+    pub fn set_write_shard_count(&mut self, shard_count: usize) {
+        self.write_shard_count = self.write_shard_count.max(shard_count);
+        if self.write_shard_queue_peak.len() < self.write_shard_count {
+            self.write_shard_queue_peak
+                .resize(self.write_shard_count, 0);
+        }
+    }
+
+    pub fn record_write_shard_queue_peak(&mut self, shard: usize, peak: usize) {
+        self.set_write_shard_count(shard.saturating_add(1));
+        if let Some(slot) = self.write_shard_queue_peak.get_mut(shard) {
+            *slot = (*slot).max(peak);
+        }
+    }
+
+    pub fn record_ready_file_frontier(&mut self, frontier: usize) {
+        self.ready_file_frontier = self.ready_file_frontier.max(frontier);
+    }
+
+    pub fn record_planner_ready_queue_peak(&mut self, peak: usize) {
+        self.planner_ready_queue_peak = self.planner_ready_queue_peak.max(peak);
+    }
+
+    pub fn record_active_files_peak(&mut self, peak: usize) {
+        self.active_files_peak = self.active_files_peak.max(peak);
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -302,5 +349,14 @@ pub fn throughput_bps(bytes: u64, elapsed: Duration) -> f64 {
         0.0
     } else {
         bytes as f64 / secs
+    }
+}
+
+fn record_duration_by_shard(slots: &mut Vec<Duration>, shard: usize, elapsed: Duration) {
+    if slots.len() <= shard {
+        slots.resize(shard + 1, Duration::ZERO);
+    }
+    if let Some(slot) = slots.get_mut(shard) {
+        *slot += elapsed;
     }
 }

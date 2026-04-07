@@ -486,6 +486,63 @@ pub fn build_extract_report(
         "pipeline.reorder_pending_bytes_peak".to_string(),
         ReportValue::U64(pipeline_stats.reorder_pending_bytes_peak),
     );
+    extensions.insert(
+        "pipeline.write_shard_count".to_string(),
+        ReportValue::U64(pipeline_stats.write_shard_count as u64),
+    );
+    extensions.insert(
+        "pipeline.ready_file_frontier".to_string(),
+        ReportValue::U64(pipeline_stats.ready_file_frontier as u64),
+    );
+    extensions.insert(
+        "pipeline.planner_ready_queue_peak".to_string(),
+        ReportValue::U64(pipeline_stats.planner_ready_queue_peak as u64),
+    );
+    extensions.insert(
+        "pipeline.active_files_peak".to_string(),
+        ReportValue::U64(pipeline_stats.active_files_peak as u64),
+    );
+    extensions.insert(
+        "pipeline.file_transition_wait_us".to_string(),
+        ReportValue::U64(
+            stage_timings
+                .file_transition_wait
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+        ),
+    );
+    for shard in 0..pipeline_stats
+        .write_shard_count
+        .max(pipeline_stats.write_shard_queue_peak.len())
+    {
+        let peak = pipeline_stats
+            .write_shard_queue_peak
+            .get(shard)
+            .copied()
+            .unwrap_or_default();
+        extensions.insert(
+            format!("pipeline.write_shard_queue_peak[{shard}]"),
+            ReportValue::U64(peak as u64),
+        );
+        let blocked = stage_timings
+            .write_shard_blocked
+            .get(shard)
+            .copied()
+            .unwrap_or(Duration::ZERO);
+        let output_data = stage_timings
+            .write_shard_output_data
+            .get(shard)
+            .copied()
+            .unwrap_or(Duration::ZERO);
+        extensions.insert(
+            format!("stage.write_shard_blocked_us[{shard}]"),
+            ReportValue::U64(blocked.as_micros().min(u64::MAX as u128) as u64),
+        );
+        extensions.insert(
+            format!("stage.write_shard_output_data_us[{shard}]"),
+            ReportValue::U64(output_data.as_micros().min(u64::MAX as u128) as u64),
+        );
+    }
 
     let workers = worker_runtime
         .iter()
@@ -614,6 +671,37 @@ pub fn build_extract_report(
             .as_micros()
             .min(u64::MAX as u128) as u64,
     );
+    main_thread.stage_us.insert(
+        "file_transition_wait".to_string(),
+        stage_timings
+            .file_transition_wait
+            .as_micros()
+            .min(u64::MAX as u128) as u64,
+    );
+    for shard in 0..pipeline_stats
+        .write_shard_count
+        .max(stage_timings.write_shard_blocked.len())
+        .max(stage_timings.write_shard_output_data.len())
+    {
+        let blocked = stage_timings
+            .write_shard_blocked
+            .get(shard)
+            .copied()
+            .unwrap_or(Duration::ZERO);
+        let output_data = stage_timings
+            .write_shard_output_data
+            .get(shard)
+            .copied()
+            .unwrap_or(Duration::ZERO);
+        main_thread.stage_us.insert(
+            format!("write_shard_blocked[{shard}]"),
+            blocked.as_micros().min(u64::MAX as u128) as u64,
+        );
+        main_thread.stage_us.insert(
+            format!("write_shard_output_data[{shard}]"),
+            output_data.as_micros().min(u64::MAX as u128) as u64,
+        );
+    }
 
     ExtractReport::new(
         source_kind,

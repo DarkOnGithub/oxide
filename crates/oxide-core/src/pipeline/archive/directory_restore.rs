@@ -58,6 +58,12 @@ pub(crate) struct DirectoryRestoreStats {
     pub(crate) output_metadata: Duration,
     pub(crate) output_metadata_files: Duration,
     pub(crate) output_metadata_directories: Duration,
+    pub(crate) file_transition_wait: Duration,
+    pub(crate) write_shard_count: usize,
+    pub(crate) write_shard_output_data: [Duration; 1],
+    pub(crate) ready_file_frontier: usize,
+    pub(crate) planner_ready_queue_peak: usize,
+    pub(crate) active_files_peak: usize,
     pub(crate) output_bytes_total: u64,
     pub(crate) entry_count: u64,
 }
@@ -79,10 +85,22 @@ impl DirectoryRestoreStats {
         self.output_metadata += other.output_metadata;
         self.output_metadata_files += other.output_metadata_files;
         self.output_metadata_directories += other.output_metadata_directories;
+        self.file_transition_wait += other.file_transition_wait;
+        self.write_shard_count = self.write_shard_count.max(other.write_shard_count);
+        self.write_shard_output_data[0] += other.write_shard_output_data[0];
+        self.ready_file_frontier = self.ready_file_frontier.max(other.ready_file_frontier);
+        self.planner_ready_queue_peak = self
+            .planner_ready_queue_peak
+            .max(other.planner_ready_queue_peak);
+        self.active_files_peak = self.active_files_peak.max(other.active_files_peak);
         self.output_bytes_total = self
             .output_bytes_total
             .saturating_add(other.output_bytes_total);
         self.entry_count = self.entry_count.saturating_add(other.entry_count);
+    }
+
+    fn initialize_write_shards(&mut self, shard_count: usize) {
+        self.write_shard_count = self.write_shard_count.max(shard_count);
     }
 
     fn record_prepared_file_open(&mut self, elapsed: Duration) {
@@ -95,6 +113,10 @@ impl DirectoryRestoreStats {
 
     fn record_prepared_file_wait(&mut self, elapsed: Duration) {
         self.prepared_file_wait += elapsed;
+    }
+
+    fn record_file_transition_wait(&mut self, elapsed: Duration) {
+        self.file_transition_wait += elapsed;
     }
 
     fn record_output_prepare_directories(&mut self, elapsed: Duration) {
@@ -116,6 +138,24 @@ impl DirectoryRestoreStats {
     fn record_output_data(&mut self, elapsed: Duration) {
         self.output_write += elapsed;
         self.output_data += elapsed;
+    }
+
+    fn record_write_shard_output_data(&mut self, shard: usize, elapsed: Duration) {
+        debug_assert_eq!(shard, 0);
+        self.initialize_write_shards(shard + 1);
+        self.write_shard_output_data[shard] += elapsed;
+    }
+
+    fn record_ready_file_frontier(&mut self, frontier: usize) {
+        self.ready_file_frontier = self.ready_file_frontier.max(frontier);
+    }
+
+    fn record_planner_ready_queue_peak(&mut self, peak: usize) {
+        self.planner_ready_queue_peak = self.planner_ready_queue_peak.max(peak);
+    }
+
+    fn record_active_files_peak(&mut self, peak: usize) {
+        self.active_files_peak = self.active_files_peak.max(peak);
     }
 
     fn record_output_flush(&mut self, elapsed: Duration) {
@@ -148,6 +188,7 @@ struct PreparedRestoreWorkItem {
     restore_entry: RestoreEntry,
     reserved_open_permit: Option<ReservedOpenFilePermit>,
     permit_wait_started: Option<Instant>,
+    active_file_counted: bool,
 }
 
 #[derive(Debug)]
@@ -201,6 +242,11 @@ struct RestorePlannerOutcome {
     pending_file_metadata: Vec<PendingMetadata>,
     pending_directory_metadata: Vec<PendingMetadata>,
     stats: DirectoryRestoreStats,
+}
+
+#[derive(Debug, Default)]
+struct PreparedRestoreWorkerOutcome {
+    active_files_peak: usize,
 }
 
 #[derive(Debug)]
@@ -375,6 +421,7 @@ impl DirectoryRestoreWriter {
             planner_handle: None,
             stats: DirectoryRestoreStats::default(),
         };
+        writer.stats.initialize_write_shards(1);
         writer.ensure_directory_exists(root)?;
         writer.prepare_output_directories(&entries)?;
         let (planner_rx, planner_handle) = spawn_restore_planner(entries, window_config);
@@ -466,14 +513,19 @@ impl DirectoryRestoreWriter {
             return Ok(true);
         }
 
-        self.pending_file = self.next_pending_file()?;
+        self.pending_file = self.next_pending_file(true)?;
         Ok(self.pending_file.is_some())
     }
 
-    fn next_pending_file(&mut self) -> Result<Option<PendingFile>> {
+    fn next_pending_file(
+        &mut self,
+        track_file_transition_wait: bool,
+    ) -> Result<Option<PendingFile>> {
         loop {
             match self.planner_rx.try_recv() {
                 Ok(message) => {
+                    self.stats
+                        .record_planner_ready_queue_peak(self.planner_rx.len());
                     if let Some(pending_file) = self.consume_planner_message(message?)? {
                         return Ok(Some(pending_file));
                     }
@@ -494,14 +546,24 @@ impl DirectoryRestoreWriter {
         loop {
             match self.planner_rx.recv() {
                 Ok(message) => {
-                    self.stats.record_prepared_file_wait(wait_started.elapsed());
+                    let wait_elapsed = wait_started.elapsed();
+                    self.stats.record_prepared_file_wait(wait_elapsed);
+                    if track_file_transition_wait {
+                        self.stats.record_file_transition_wait(wait_elapsed);
+                    }
+                    self.stats
+                        .record_planner_ready_queue_peak(self.planner_rx.len());
                     if let Some(pending_file) = self.consume_planner_message(message?)? {
                         return Ok(Some(pending_file));
                     }
                     return Ok(None);
                 }
                 Err(_) => {
-                    self.stats.record_prepared_file_wait(wait_started.elapsed());
+                    let wait_elapsed = wait_started.elapsed();
+                    self.stats.record_prepared_file_wait(wait_elapsed);
+                    if track_file_transition_wait {
+                        self.stats.record_file_transition_wait(wait_elapsed);
+                    }
                     return self.handle_planner_disconnect();
                 }
             }
@@ -513,13 +575,17 @@ impl DirectoryRestoreWriter {
         message: RestorePlannerMessage,
     ) -> Result<Option<PendingFile>> {
         match message {
-            RestorePlannerMessage::ReadyFile(ready_file) => Ok(Some(PendingFile {
-                remaining: ready_file.entry.size,
-                path: ready_file.path,
-                entry: ready_file.entry,
-                writer: ready_file.writer,
-                permit: ready_file.permit,
-            })),
+            RestorePlannerMessage::ReadyFile(ready_file) => {
+                self.stats
+                    .record_ready_file_frontier(self.planner_rx.len().saturating_add(1));
+                Ok(Some(PendingFile {
+                    remaining: ready_file.entry.size,
+                    path: ready_file.path,
+                    entry: ready_file.entry,
+                    writer: ready_file.writer,
+                    permit: ready_file.permit,
+                }))
+            }
             RestorePlannerMessage::Finished(outcome) => {
                 self.apply_planner_outcome(outcome);
                 Ok(None)
@@ -539,7 +605,7 @@ impl DirectoryRestoreWriter {
 
     fn wait_for_planner_completion(&mut self) -> Result<()> {
         while !self.planner_finished {
-            let Some(ready_file) = self.next_pending_file()? else {
+            let Some(ready_file) = self.next_pending_file(false)? else {
                 continue;
             };
             drop(ready_file);
@@ -842,6 +908,7 @@ fn spawn_restore_planner(
                         {
                             return Ok(false);
                         }
+                        outcome.stats.record_planner_ready_queue_peak(tx.len());
                     }
                     PreparedRestoreEntry::Symlink {
                         path,
@@ -863,11 +930,14 @@ fn spawn_restore_planner(
         match (planner_result, join_result) {
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),
-            (Ok(true), Ok(())) => {
+            (Ok(true), Ok(prepared_entry_outcome)) => {
+                outcome
+                    .stats
+                    .record_active_files_peak(prepared_entry_outcome.active_files_peak);
                 let _ = tx.send(Ok(RestorePlannerMessage::Finished(outcome)));
                 Ok(())
             }
-            (Ok(false), Ok(())) => Ok(()),
+            (Ok(false), Ok(_)) => Ok(()),
         }
     });
 
@@ -879,10 +949,10 @@ fn spawn_prepared_restore_entries(
     window_config: PreparedEntryWindowConfig,
 ) -> (
     Receiver<Result<PreparedRestoreEntry>>,
-    thread::JoinHandle<Result<()>>,
+    thread::JoinHandle<Result<PreparedRestoreWorkerOutcome>>,
 ) {
     let (tx, rx) = bounded::<Result<PreparedRestoreEntry>>(PREPARED_ENTRY_QUEUE_CAPACITY);
-    let handle = thread::spawn(move || -> Result<()> {
+    let handle = thread::spawn(move || -> Result<PreparedRestoreWorkerOutcome> {
         let (open_file_permit_tx, open_file_permit_rx) =
             bounded::<()>(window_config.preopened_file_window_capacity);
         for _ in 0..window_config.preopened_file_window_capacity {
@@ -896,7 +966,11 @@ fn spawn_prepared_restore_entries(
         let total_entries = entries.len();
         let worker_count = available_prepared_entry_workers(total_entries);
         if worker_count <= 1 {
+            let mut outcome = PreparedRestoreWorkerOutcome::default();
             for restore_entry in entries {
+                if matches!(restore_entry.entry.kind, crate::ArchiveEntryKind::File) {
+                    outcome.active_files_peak = outcome.active_files_peak.max(1);
+                }
                 let prepared = prepare_restore_entry_with_open(
                     restore_entry,
                     &open_file_permit_rx,
@@ -904,20 +978,24 @@ fn spawn_prepared_restore_entries(
                 );
                 let stop_after_send = prepared.is_err();
                 if tx.send(prepared).is_err() {
-                    return Ok(());
+                    return Ok(outcome);
                 }
                 if stop_after_send {
-                    return Ok(());
+                    return Ok(outcome);
                 }
             }
 
-            return Ok(());
+            return Ok(outcome);
         }
 
         let cancelled = Arc::new(AtomicBool::new(false));
         let (work_tx, work_rx) = bounded::<PreparedRestoreWorkItem>(PREPARED_ENTRY_QUEUE_CAPACITY);
         let (result_tx, result_rx) =
             bounded::<(usize, Result<PreparedRestoreEntry>)>(PREPARED_ENTRY_QUEUE_CAPACITY);
+        let file_work_items = entries
+            .iter()
+            .map(|restore_entry| matches!(restore_entry.entry.kind, crate::ArchiveEntryKind::File))
+            .collect::<Vec<_>>();
 
         let mut worker_handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
@@ -962,15 +1040,21 @@ fn spawn_prepared_restore_entries(
                 restore_entry,
                 reserved_open_permit: None,
                 permit_wait_started: None,
+                active_file_counted: false,
             })
             .collect::<VecDeque<_>>();
 
         let mut next_index = 0usize;
         let mut pending: BTreeMap<usize, Result<PreparedRestoreEntry>> = BTreeMap::new();
         let mut in_flight = 0usize;
+        let mut active_files = 0usize;
+        let mut active_files_peak = 0usize;
         let mut sent_error = false;
         while next_index < total_entries && !sent_error {
             while let Some(prepared) = pending.remove(&next_index) {
+                if file_work_items.get(next_index).copied().unwrap_or(false) {
+                    active_files = active_files.saturating_sub(1);
+                }
                 sent_error = prepared.is_err();
                 if tx.send(prepared).is_err() {
                     cancelled.store(true, Ordering::Relaxed);
@@ -1003,7 +1087,13 @@ fn spawn_prepared_restore_entries(
                         &open_file_permit_rx,
                         &open_file_permit_tx,
                     ) {
-                        Ok(true) => {}
+                        Ok(true) => {
+                            mark_active_file_counted(
+                                &mut work_item,
+                                &mut active_files,
+                                &mut active_files_peak,
+                            );
+                        }
                         Ok(false) => {
                             if in_flight == 0 {
                                 if let Err(error) = reserve_open_file_permit_for_work_item(
@@ -1014,10 +1104,17 @@ fn spawn_prepared_restore_entries(
                                     cancelled.store(true, Ordering::Relaxed);
                                     sent_error = true;
                                     if tx.send(Err(error)).is_err() {
-                                        return Ok(());
+                                        return Ok(PreparedRestoreWorkerOutcome {
+                                            active_files_peak,
+                                        });
                                     }
                                     break;
                                 }
+                                mark_active_file_counted(
+                                    &mut work_item,
+                                    &mut active_files,
+                                    &mut active_files_peak,
+                                );
                             } else {
                                 pending_work.push_front(work_item);
                                 break;
@@ -1027,7 +1124,7 @@ fn spawn_prepared_restore_entries(
                             cancelled.store(true, Ordering::Relaxed);
                             sent_error = true;
                             if tx.send(Err(error)).is_err() {
-                                return Ok(());
+                                return Ok(PreparedRestoreWorkerOutcome { active_files_peak });
                             }
                             break;
                         }
@@ -1051,6 +1148,9 @@ fn spawn_prepared_restore_entries(
             }
 
             while let Some(prepared) = pending.remove(&next_index) {
+                if file_work_items.get(next_index).copied().unwrap_or(false) {
+                    active_files = active_files.saturating_sub(1);
+                }
                 sent_error = prepared.is_err();
                 if tx.send(prepared).is_err() {
                     cancelled.store(true, Ordering::Relaxed);
@@ -1097,13 +1197,15 @@ fn spawn_prepared_restore_entries(
             })??;
         }
 
-        Ok(())
+        Ok(PreparedRestoreWorkerOutcome { active_files_peak })
     });
 
     (rx, handle)
 }
 
-fn join_prepared_restore_entries_handle(handle: thread::JoinHandle<Result<()>>) -> Result<()> {
+fn join_prepared_restore_entries_handle(
+    handle: thread::JoinHandle<Result<PreparedRestoreWorkerOutcome>>,
+) -> Result<PreparedRestoreWorkerOutcome> {
     handle.join().map_err(|payload| {
         let details = if let Some(message) = payload.downcast_ref::<&str>() {
             (*message).to_string()
@@ -1201,6 +1303,20 @@ fn prepare_prepared_entry_with_open(
         }
         other => Ok(other),
     }
+}
+
+fn mark_active_file_counted(
+    work_item: &mut PreparedRestoreWorkItem,
+    active_files: &mut usize,
+    active_files_peak: &mut usize,
+) {
+    if work_item.active_file_counted {
+        return;
+    }
+
+    work_item.active_file_counted = true;
+    *active_files += 1;
+    *active_files_peak = (*active_files_peak).max(*active_files);
 }
 
 fn try_reserve_open_file_permit_for_work_item(
@@ -1375,7 +1491,9 @@ impl OrderedChunkWriter for DirectoryRestoreWriter {
                 pending.remaining -= take as u64;
                 let started = Instant::now();
                 pending.writer.write_all(&bytes[..take])?;
-                self.stats.record_output_data(started.elapsed());
+                let write_elapsed = started.elapsed();
+                self.stats.record_output_data(write_elapsed);
+                self.stats.record_write_shard_output_data(0, write_elapsed);
                 (take, pending.remaining == 0)
             };
 
@@ -1528,6 +1646,7 @@ mod tests {
             },
             reserved_open_permit: None,
             permit_wait_started: None,
+            active_file_counted: false,
         }
     }
 

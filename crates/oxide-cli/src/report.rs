@@ -361,12 +361,15 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
                     ("prepared_file_open", "prepared file open"),
                     ("prepared_file_permit_wait", "prepared file permit wait"),
                     ("prepared_file_wait", "prepared file wait"),
+                    ("file_transition_wait", "file transition wait"),
                     ("output_prepare_directories", "prepare output dirs"),
                     ("output_write", "output write"),
                     ("output_create", "output create"),
                     ("output_create_directories", "create dirs"),
                     ("output_create_files", "create files"),
                     ("output_data", "output data"),
+                    ("write_shard_blocked[0]", "write shard 0 blocked"),
+                    ("write_shard_output_data[0]", "write shard 0 output data"),
                     ("output_flush", "output flush"),
                     ("output_metadata", "output metadata"),
                     ("output_metadata_files", "metadata files"),
@@ -402,6 +405,36 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
             &mut runtime_rows,
             "Ordered write queue peak",
             extension_u64(&report.extensions, "pipeline.ordered_write_queue_peak")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Write shards",
+            extension_u64(&report.extensions, "pipeline.write_shard_count")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Write shard 0 queue peak",
+            extension_u64(&report.extensions, "pipeline.write_shard_queue_peak[0]")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Ready file frontier",
+            extension_u64(&report.extensions, "pipeline.ready_file_frontier")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Planner ready queue peak",
+            extension_u64(&report.extensions, "pipeline.planner_ready_queue_peak")
+                .map(|value| value.to_string()),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Active files peak",
+            extension_u64(&report.extensions, "pipeline.active_files_peak")
                 .map(|value| value.to_string()),
         );
         push_optional_string_row(
