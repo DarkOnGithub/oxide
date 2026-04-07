@@ -253,7 +253,7 @@ impl ArchivePipeline {
         let source_kind = directory::source_kind_from_flags(decoded.flags);
         let extensions = extract_extensions_from_flags(decoded.flags);
         let decoded_bytes_total = decoded.decoded_bytes_total;
-        let stage_timings = decoded.stage_timings;
+        let stage_timings = decoded.stage_timings.clone();
         let payload = std::mem::take(&mut decoded.payload);
         let elapsed = started_at.elapsed();
         record_extract_run_telemetry(elapsed, stage_timings);
@@ -299,7 +299,7 @@ impl ArchivePipeline {
         let source_kind = directory::source_kind_from_flags(decoded.flags);
         let extensions = extract_extensions_from_flags(decoded.flags);
         let decoded_bytes_total = decoded.decoded_bytes_total;
-        let stage_timings = decoded.stage_timings;
+        let stage_timings = decoded.stage_timings.clone();
         let payload = std::mem::take(&mut decoded.payload);
         let elapsed = started_at.elapsed();
         record_extract_run_telemetry(elapsed, stage_timings);
@@ -355,7 +355,7 @@ impl ArchivePipeline {
         );
         let decoded_bytes_total = decoded.decoded_bytes_total;
         let output_bytes_total = restored.output_bytes_total;
-        let stage_timings = decoded.stage_timings;
+        let stage_timings = decoded.stage_timings.clone();
 
         let elapsed = started_at.elapsed();
         record_extract_run_telemetry(elapsed, stage_timings);
@@ -410,7 +410,7 @@ impl ArchivePipeline {
         );
         let decoded_bytes_total = decoded.decoded_bytes_total;
         let output_bytes_total = restored.output_bytes_total;
-        let stage_timings = decoded.stage_timings;
+        let stage_timings = decoded.stage_timings.clone();
 
         let elapsed = started_at.elapsed();
         record_extract_run_telemetry(elapsed, stage_timings);
@@ -490,7 +490,7 @@ impl ArchivePipeline {
         }
 
         let decoded_bytes_total = decoded.decoded_bytes_total;
-        let stage_timings = decoded.stage_timings;
+        let stage_timings = decoded.stage_timings.clone();
         let elapsed = started_at.elapsed();
         record_extract_run_telemetry(elapsed, stage_timings);
         let report = build_extract_report_helper(
@@ -566,7 +566,7 @@ impl ArchivePipeline {
         }
 
         let decoded_bytes_total = decoded.decoded_bytes_total;
-        let stage_timings = decoded.stage_timings;
+        let stage_timings = decoded.stage_timings.clone();
         let elapsed = started_at.elapsed();
         record_extract_run_telemetry(elapsed, stage_timings);
         let report = build_extract_report_helper(
@@ -675,7 +675,7 @@ impl ArchivePipeline {
         );
         let decoded_bytes_total = decoded.decoded_bytes_total;
         let output_bytes_total = restored.output_bytes_total;
-        let stage_timings = decoded.stage_timings;
+        let stage_timings = decoded.stage_timings.clone();
         let elapsed = started_at.elapsed();
         record_extract_run_telemetry(elapsed, stage_timings);
         let report = build_extract_report_helper(
@@ -766,7 +766,7 @@ impl ArchivePipeline {
         );
         let decoded_bytes_total = decoded.decoded_bytes_total;
         let output_bytes_total = restored.output_bytes_total;
-        let stage_timings = decoded.stage_timings;
+        let stage_timings = decoded.stage_timings.clone();
         let elapsed = started_at.elapsed();
         record_extract_run_telemetry(elapsed, stage_timings);
         let report = build_extract_report_helper(

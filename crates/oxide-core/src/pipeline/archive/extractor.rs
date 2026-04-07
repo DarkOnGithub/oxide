@@ -74,6 +74,7 @@ struct FileRestoreStats {
     output_flush: Duration,
     output_metadata: Duration,
     output_metadata_files: Duration,
+    write_shard_output_data: Duration,
 }
 
 impl FileRestoreStats {
@@ -92,6 +93,7 @@ impl FileRestoreStats {
     fn record_output_data(&mut self, elapsed: Duration) {
         self.output_write += elapsed;
         self.output_data += elapsed;
+        self.write_shard_output_data += elapsed;
     }
 
     fn record_output_flush(&mut self, elapsed: Duration) {
@@ -599,19 +601,28 @@ impl Extractor {
         )?;
 
         let restore_stats = writer.finish()?;
-        let mut stage_timings = decoded.stage_timings;
-        apply_directory_restore_stats(&mut stage_timings, restore_stats);
+        let DecodeStreamOutcome {
+            flags,
+            decoded_bytes_total,
+            archive_bytes_total,
+            blocks_total,
+            workers,
+            mut stage_timings,
+            mut pipeline_stats,
+            ..
+        } = decoded;
+        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, restore_stats);
 
         Ok(DirectoryRestoreOutcome {
             decoded: DecodedArchivePayload {
-                flags: decoded.flags,
+                flags,
                 payload: Vec::new(),
-                decoded_bytes_total: decoded.decoded_bytes_total,
-                archive_bytes_total: decoded.archive_bytes_total,
-                blocks_total: decoded.blocks_total,
-                workers: decoded.workers,
+                decoded_bytes_total,
+                archive_bytes_total,
+                blocks_total,
+                workers,
                 stage_timings,
-                pipeline_stats: decoded.pipeline_stats,
+                pipeline_stats,
             },
             output_bytes_total: restore_stats.output_bytes_total,
             entry_count: restore_stats.entry_count,
@@ -651,19 +662,28 @@ impl Extractor {
         )?;
 
         let restore_stats = writer.finish()?;
-        let mut stage_timings = decoded.stage_timings;
-        apply_directory_restore_stats(&mut stage_timings, restore_stats);
+        let DecodeStreamOutcome {
+            flags,
+            decoded_bytes_total,
+            archive_bytes_total,
+            blocks_total,
+            workers,
+            mut stage_timings,
+            mut pipeline_stats,
+            ..
+        } = decoded;
+        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, restore_stats);
 
         Ok(DirectoryRestoreOutcome {
             decoded: DecodedArchivePayload {
-                flags: decoded.flags,
+                flags,
                 payload: Vec::new(),
-                decoded_bytes_total: decoded.decoded_bytes_total,
-                archive_bytes_total: decoded.archive_bytes_total,
-                blocks_total: decoded.blocks_total,
-                workers: decoded.workers,
+                decoded_bytes_total,
+                archive_bytes_total,
+                blocks_total,
+                workers,
                 stage_timings,
-                pipeline_stats: decoded.pipeline_stats,
+                pipeline_stats,
             },
             output_bytes_total: restore_stats.output_bytes_total,
             entry_count: restore_stats.entry_count,
@@ -874,19 +894,28 @@ impl Extractor {
         )?;
 
         let restore_stats = writer.finish()?;
-        let mut stage_timings = decoded.stage_timings;
-        apply_directory_restore_stats(&mut stage_timings, restore_stats);
+        let DecodeStreamOutcome {
+            flags,
+            decoded_bytes_total,
+            archive_bytes_total,
+            blocks_total,
+            workers,
+            mut stage_timings,
+            mut pipeline_stats,
+            ..
+        } = decoded;
+        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, restore_stats);
 
         Ok(DirectoryRestoreOutcome {
             decoded: DecodedArchivePayload {
-                flags: decoded.flags,
+                flags,
                 payload: Vec::new(),
-                decoded_bytes_total: decoded.decoded_bytes_total,
-                archive_bytes_total: decoded.archive_bytes_total,
-                blocks_total: decoded.blocks_total,
-                workers: decoded.workers,
+                decoded_bytes_total,
+                archive_bytes_total,
+                blocks_total,
+                workers,
                 stage_timings,
-                pipeline_stats: decoded.pipeline_stats,
+                pipeline_stats,
             },
             output_bytes_total: restore_stats.output_bytes_total,
             entry_count: restore_stats.entry_count,
@@ -940,19 +969,28 @@ impl Extractor {
         )?;
 
         let restore_stats = writer.finish()?;
-        let mut stage_timings = decoded.stage_timings;
-        apply_directory_restore_stats(&mut stage_timings, restore_stats);
+        let DecodeStreamOutcome {
+            flags,
+            decoded_bytes_total,
+            archive_bytes_total,
+            blocks_total,
+            workers,
+            mut stage_timings,
+            mut pipeline_stats,
+            ..
+        } = decoded;
+        apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, restore_stats);
 
         Ok(DirectoryRestoreOutcome {
             decoded: DecodedArchivePayload {
-                flags: decoded.flags,
+                flags,
                 payload: Vec::new(),
-                decoded_bytes_total: decoded.decoded_bytes_total,
-                archive_bytes_total: decoded.archive_bytes_total,
-                blocks_total: decoded.blocks_total,
-                workers: decoded.workers,
+                decoded_bytes_total,
+                archive_bytes_total,
+                blocks_total,
+                workers,
                 stage_timings,
-                pipeline_stats: decoded.pipeline_stats,
+                pipeline_stats,
             },
             output_bytes_total: restore_stats.output_bytes_total,
             entry_count: restore_stats.entry_count,
@@ -1319,6 +1357,20 @@ impl Extractor {
             }
         }
 
+        let mut pipeline_stats = ExtractPipelineStats {
+            decode_task_queue_capacity: queue_capacity,
+            decode_task_queue_peak,
+            decode_result_queue_capacity: queue_capacity,
+            decode_result_queue_peak,
+            ordered_write_queue_capacity,
+            ordered_write_queue_peak,
+            reorder_pending_limit,
+            reorder_pending_peak: reorder_stats.pending_blocks_peak,
+            reorder_pending_bytes_peak: reorder_stats.pending_bytes_peak,
+            ..ExtractPipelineStats::default()
+        };
+        pipeline_stats.record_write_shard_queue_peak(0, ordered_write_queue_peak);
+
         Ok((
             DecodeStreamOutcome {
                 flags,
@@ -1327,17 +1379,7 @@ impl Extractor {
                 blocks_total: submitted as u32,
                 workers,
                 stage_timings,
-                pipeline_stats: ExtractPipelineStats {
-                    decode_task_queue_capacity: queue_capacity,
-                    decode_task_queue_peak,
-                    decode_result_queue_capacity: queue_capacity,
-                    decode_result_queue_peak,
-                    ordered_write_queue_capacity,
-                    ordered_write_queue_peak,
-                    reorder_pending_limit,
-                    reorder_pending_peak: reorder_stats.pending_blocks_peak,
-                    reorder_pending_bytes_peak: reorder_stats.pending_bytes_peak,
-                },
+                pipeline_stats,
             },
             writer,
         ))
@@ -1532,9 +1574,11 @@ fn apply_file_restore_stats(stage_timings: &mut ExtractStageTimings, stats: File
     stage_timings.output_flush += stats.output_flush;
     stage_timings.output_metadata += stats.output_metadata;
     stage_timings.output_metadata_files += stats.output_metadata_files;
+    stage_timings.record_write_shard_output_data(0, stats.write_shard_output_data);
 }
 
 fn apply_directory_restore_stats(
+    pipeline_stats: &mut ExtractPipelineStats,
     stage_timings: &mut ExtractStageTimings,
     restore_stats: super::directory_restore::DirectoryRestoreStats,
 ) {
@@ -1555,6 +1599,12 @@ fn apply_directory_restore_stats(
     stage_timings.output_metadata += restore_stats.output_metadata;
     stage_timings.output_metadata_files += restore_stats.output_metadata_files;
     stage_timings.output_metadata_directories += restore_stats.output_metadata_directories;
+    stage_timings.file_transition_wait += restore_stats.file_transition_wait;
+    pipeline_stats.set_write_shard_count(restore_stats.write_shard_count.max(1));
+    stage_timings.record_write_shard_output_data(0, restore_stats.write_shard_output_data[0]);
+    pipeline_stats.record_ready_file_frontier(restore_stats.ready_file_frontier);
+    pipeline_stats.record_planner_ready_queue_peak(restore_stats.planner_ready_queue_peak);
+    pipeline_stats.record_active_files_peak(restore_stats.active_files_peak);
 }
 
 fn spawn_io_reader<R>(
@@ -1744,7 +1794,9 @@ fn forward_processed_decode_result(
                     Err(TrySendError::Full(task)) => {
                         let enqueue_started = Instant::now();
                         let send_result = tx.send(task);
-                        stage_timings.writer_enqueue_blocked += enqueue_started.elapsed();
+                        let blocked_elapsed = enqueue_started.elapsed();
+                        stage_timings.writer_enqueue_blocked += blocked_elapsed;
+                        stage_timings.record_write_shard_blocked(0, blocked_elapsed);
                         if send_result.is_ok() {
                             *ordered_write_queue_peak = (*ordered_write_queue_peak).max(tx.len());
                             return Ok(());
