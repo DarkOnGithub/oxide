@@ -36,7 +36,7 @@ const PREOPENED_FILE_WINDOW_BONUS_STEP: usize = 2;
 const MIN_PREOPENED_FILE_WINDOW_CAPACITY: usize = 32;
 const MAX_PREOPENED_FILE_WINDOW_CAPACITY: usize = 256;
 const MIN_READY_ENTRY_WINDOW_CAPACITY: usize = 32;
-const MAX_READY_ENTRY_WINDOW_CAPACITY: usize = 64;
+const MAX_READY_ENTRY_WINDOW_CAPACITY: usize = 96;
 const WRITE_SHARD_QUEUE_CAPACITY: usize = 64;
 const DIRECT_FILE_WRITE_MAX_BYTES: u64 = 32 * 1024;
 const SMALL_FILE_BUFFER_MAX_BYTES: u64 = 256 * 1024;
@@ -1285,7 +1285,7 @@ fn prepared_entry_window_config_for_counts(
     let parallelism = parallelism.max(1);
 
     let ready_entry_window_capacity = parallelism
-        .saturating_mul(4)
+        .saturating_mul(6)
         .clamp(
             MIN_READY_ENTRY_WINDOW_CAPACITY,
             MAX_READY_ENTRY_WINDOW_CAPACITY,
@@ -2221,8 +2221,8 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 96,
-                ready_entry_window_capacity: 48,
+                preopened_file_window_capacity: 144,
+                ready_entry_window_capacity: 72,
             }
         );
     }
@@ -2234,8 +2234,8 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 128,
-                ready_entry_window_capacity: 64,
+                preopened_file_window_capacity: 192,
+                ready_entry_window_capacity: 96,
             }
         );
     }
@@ -2248,7 +2248,7 @@ mod tests {
             config,
             PreparedEntryWindowConfig {
                 preopened_file_window_capacity: 128,
-                ready_entry_window_capacity: 64,
+                ready_entry_window_capacity: 96,
             }
         );
     }
@@ -2261,7 +2261,7 @@ mod tests {
             config,
             PreparedEntryWindowConfig {
                 preopened_file_window_capacity: 128,
-                ready_entry_window_capacity: 64,
+                ready_entry_window_capacity: 96,
             }
         );
     }
@@ -2273,8 +2273,8 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 128,
-                ready_entry_window_capacity: MAX_READY_ENTRY_WINDOW_CAPACITY,
+                preopened_file_window_capacity: 192,
+                ready_entry_window_capacity: 96,
             }
         );
     }
