@@ -74,6 +74,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
             directory_mmap_threshold,
             writer_queue_blocks,
             result_wait_ms,
+            raw_chunk_dedup_window_blocks: None,
         },
     )?;
 
@@ -240,6 +241,7 @@ fn build_archive_pipeline(
         directory_mmap_threshold_bytes: settings.directory_mmap_threshold.max(1),
         writer_result_queue_blocks: settings.writer_queue_blocks.max(1),
         result_wait_timeout: Duration::from_millis(settings.result_wait_ms.max(1)),
+        raw_chunk_dedup_window_blocks: settings.raw_chunk_dedup_window_blocks,
         block_dedup_window_blocks: settings.block_dedup_window_blocks,
         ..Default::default()
     };

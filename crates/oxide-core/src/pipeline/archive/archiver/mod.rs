@@ -32,11 +32,7 @@ const AUTO_DICTIONARY_MIN_BATCHES: usize = 8;
 const AUTO_DICTIONARY_MAX_AVG_BATCH_BYTES: usize = 128 * 1024;
 
 fn writer_dedupe_window_blocks(config: &ArchivePipelineConfig) -> usize {
-    if config.performance.raw_chunk_dedup_window_blocks > 0 {
-        0
-    } else {
-        config.performance.block_dedup_window_blocks
-    }
+    config.performance.block_dedup_window_blocks
 }
 
 pub struct Archiver<'a> {

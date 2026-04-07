@@ -1293,7 +1293,7 @@ fn prepared_entry_window_config_for_counts(
         .min(entry_count);
     let preopened_file_window_capacity =
         adaptive_preopened_file_window_capacity(entry_count, file_count, parallelism)
-            .min(ready_entry_window_capacity.saturating_mul(3).max(1));
+            .min(ready_entry_window_capacity.saturating_mul(4).max(1));
 
     PreparedEntryWindowConfig {
         preopened_file_window_capacity,
@@ -2221,7 +2221,7 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 216,
+                preopened_file_window_capacity: 288,
                 ready_entry_window_capacity: 72,
             }
         );
@@ -2273,7 +2273,7 @@ mod tests {
         assert_eq!(
             config,
             PreparedEntryWindowConfig {
-                preopened_file_window_capacity: 288,
+                preopened_file_window_capacity: 384,
                 ready_entry_window_capacity: 96,
             }
         );
