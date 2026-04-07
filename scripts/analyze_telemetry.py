@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +76,25 @@ def parse_optional_float(value: object) -> float | None:
     if value in {None, ""}:
         return None
     return float(value)
+
+
+def parse_numeric_scalar(value: object) -> int | float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip().replace(",", "")
+    if not text:
+        return None
+    if re.fullmatch(r"[+-]?\d+", text):
+        return int(text)
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def format_float(value: int | float | None, digits: int = 3) -> str:
@@ -496,6 +516,18 @@ def summarize_oxide_telemetry(
     rows: list[StepRow], run_dir: Path
 ) -> list[dict[str, object]]:
     grouped: dict[tuple[str, str, str, str], dict[str, list[int | float]]] = {}
+    runtime_metric_aliases = {
+        "pipeline.write_shard_queue_peak[0]": "queue:write_shard_0_queue_peak",
+        "write_shard_0_queue_peak": "queue:write_shard_0_queue_peak",
+        "pipeline.ready_file_frontier": "queue:ready_file_frontier",
+        "ready_file_frontier": "queue:ready_file_frontier",
+        "pipeline.planner_ready_queue_peak": "queue:planner_ready_queue_peak",
+        "planner_ready_queue_peak": "queue:planner_ready_queue_peak",
+        "pipeline.active_files_peak": "queue:active_files_peak",
+        "active_files_peak": "queue:active_files_peak",
+        "pipeline.file_transition_wait_us": "stage:file_transition_wait",
+        "file_transition_wait_us": "stage:file_transition_wait",
+    }
 
     for row in rows:
         if row.tool != "oxide":
@@ -511,29 +543,50 @@ def summarize_oxide_telemetry(
             continue
 
         runtime = oxide.get("runtime") or {}
+        runtime_fields = runtime.get("fields") if isinstance(runtime, dict) else {}
         stage_timings = oxide.get("stage_timings") or {}
         queue_peaks = oxide.get("queue_peaks") or {}
         if (
             not isinstance(runtime, dict)
+            or (
+                runtime_fields not in ({}, None)
+                and not isinstance(runtime_fields, dict)
+            )
             or not isinstance(stage_timings, dict)
             or not isinstance(queue_peaks, dict)
         ):
             continue
+        if not isinstance(runtime_fields, dict):
+            runtime_fields = {}
 
         key = (row.tool, row.phase, row.mode, row.workers)
         bucket = grouped.setdefault(key, {})
+        row_metrics: dict[str, int | float] = {}
 
-        effective_cores = runtime.get("effective_cores")
+        effective_cores = parse_numeric_scalar(runtime.get("effective_cores"))
         if isinstance(effective_cores, (int, float)):
             bucket.setdefault("effective_cores", []).append(effective_cores)
 
         for stage_key, value in stage_timings.items():
-            if isinstance(value, int):
-                bucket.setdefault(f"stage:{stage_key}", []).append(value)
+            numeric_value = parse_numeric_scalar(value)
+            if isinstance(numeric_value, (int, float)):
+                row_metrics[f"stage:{stage_key}"] = numeric_value
 
         for queue_key, value in queue_peaks.items():
-            if isinstance(value, int):
-                bucket.setdefault(f"queue:{queue_key}", []).append(value)
+            numeric_value = parse_numeric_scalar(value)
+            if isinstance(numeric_value, (int, float)):
+                row_metrics[f"queue:{queue_key}"] = numeric_value
+
+        for container in (runtime, runtime_fields):
+            for source_key, bucket_key in runtime_metric_aliases.items():
+                if bucket_key in row_metrics:
+                    continue
+                numeric_value = parse_numeric_scalar(container.get(source_key))
+                if isinstance(numeric_value, (int, float)):
+                    row_metrics[bucket_key] = numeric_value
+
+        for metric_key, numeric_value in row_metrics.items():
+            bucket.setdefault(metric_key, []).append(numeric_value)
 
     summaries: list[dict[str, object]] = []
     for (tool, phase, mode, workers), values in sorted(grouped.items()):
