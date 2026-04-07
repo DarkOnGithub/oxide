@@ -17,6 +17,7 @@
       "directory_mmap_threshold": "8M",
       "writer_queue_blocks": 1024,
       "result_wait_ms": 1,
+      "raw_chunk_dedup_window_blocks": 131072,
       "block_dedup_window_blocks": 131072,
       "dictionary_mode": "auto",
       "chunking": {
@@ -42,6 +43,7 @@
         "result_wait_ms": 1,
         "directory_mmap_threshold": "8M",
         "writer_queue_blocks": 768,
+        "raw_chunk_dedup_window_blocks": 131072,
         "block_dedup_window_blocks": 0,
         "dictionary_mode": "off"
       },
@@ -64,6 +66,8 @@
         "inflight_bytes": "2G",
         "inflight_blocks_per_worker": 48,
         "producer_threads": 3,
+        "raw_chunk_dedup_window_blocks": 131072,
+        "block_dedup_window_blocks": 131072,
         "writer_queue_blocks": 384,
         "result_wait_ms": 1,
         "dictionary_mode": "off"
@@ -91,6 +95,8 @@
         "directory_mmap_threshold": "16M",
         "writer_queue_blocks": 128,
         "result_wait_ms": 4,
+        "raw_chunk_dedup_window_blocks": 131072,
+        "block_dedup_window_blocks": 131072,
         "dictionary_mode": "auto"
       },
       "extreme": {
@@ -116,6 +122,8 @@
         "directory_mmap_threshold": "16M",
         "writer_queue_blocks": 96,
         "result_wait_ms": 6,
+        "raw_chunk_dedup_window_blocks": 131072,
+        "block_dedup_window_blocks": 131072,
         "dictionary_mode": "auto"
       }
     }

@@ -265,9 +265,11 @@ pub struct PipelinePerformanceOptions {
     /// Capacity of the writer result queue (in blocks).
     pub writer_result_queue_blocks: usize,
     /// Maximum number of recently seen raw chunks tracked for pre-compression deduplication.
+    /// This is configured independently from writer-side block deduplication.
     /// Set to 0 to disable raw-chunk deduplication.
     pub raw_chunk_dedup_window_blocks: usize,
     /// Maximum number of recently written blocks tracked for block-level deduplication.
+    /// This is configured independently from raw-chunk deduplication.
     /// Set to 0 to disable writer-side deduplication.
     pub block_dedup_window_blocks: usize,
     /// Initial extract write shard count for directory restores.

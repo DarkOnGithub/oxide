@@ -12,6 +12,7 @@ use crate::AppResult;
 use crate::cli::{ChunkingArg, CompressionArg, parse_size};
 
 const DEFAULT_PRESETS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/presets.json");
+const MAX_RAW_CHUNK_DEDUP_WINDOW_BLOCKS: usize = 1 << 20;
 const MAX_BLOCK_DEDUP_WINDOW_BLOCKS: usize = 1 << 20;
 
 #[derive(Debug, Clone)]
@@ -38,6 +39,7 @@ pub struct ResolvedArchiveSettings {
     pub directory_mmap_threshold: usize,
     pub writer_queue_blocks: usize,
     pub result_wait_ms: u64,
+    pub raw_chunk_dedup_window_blocks: usize,
     pub block_dedup_window_blocks: usize,
 }
 
@@ -63,6 +65,7 @@ pub struct ArchiveOverrides {
     pub directory_mmap_threshold: Option<usize>,
     pub writer_queue_blocks: Option<usize>,
     pub result_wait_ms: Option<u64>,
+    pub raw_chunk_dedup_window_blocks: Option<usize>,
 }
 
 pub fn resolve_archive_settings(
@@ -135,6 +138,7 @@ struct ArchivePresetConfig {
     directory_mmap_threshold: Option<SizeValue>,
     writer_queue_blocks: Option<usize>,
     result_wait_ms: Option<u64>,
+    raw_chunk_dedup_window_blocks: Option<usize>,
     block_dedup_window_blocks: Option<usize>,
 }
 
@@ -195,6 +199,10 @@ impl ArchivePresetConfig {
         merge_option(&mut self.writer_queue_blocks, other.writer_queue_blocks);
         merge_option(&mut self.result_wait_ms, other.result_wait_ms);
         merge_option(
+            &mut self.raw_chunk_dedup_window_blocks,
+            other.raw_chunk_dedup_window_blocks,
+        );
+        merge_option(
             &mut self.block_dedup_window_blocks,
             other.block_dedup_window_blocks,
         );
@@ -217,6 +225,12 @@ impl ArchivePresetConfig {
             .and_then(|chunking| chunking.mode.as_deref())
             .map(parse_chunking_mode)
             .transpose()?;
+
+        let raw_chunk_dedup_window_blocks = overrides
+            .raw_chunk_dedup_window_blocks
+            .or(self.raw_chunk_dedup_window_blocks)
+            .unwrap_or(DEFAULT_DEDUP_WINDOW_BLOCKS);
+        validate_raw_chunk_dedup_window_blocks(raw_chunk_dedup_window_blocks)?;
 
         let block_dedup_window_blocks = self
             .block_dedup_window_blocks
@@ -300,9 +314,20 @@ impl ArchivePresetConfig {
                 self.result_wait_ms,
                 "result_wait_ms",
             )?,
+            raw_chunk_dedup_window_blocks,
             block_dedup_window_blocks,
         })
     }
+}
+
+fn validate_raw_chunk_dedup_window_blocks(value: usize) -> Result<(), io::Error> {
+    if value > MAX_RAW_CHUNK_DEDUP_WINDOW_BLOCKS {
+        return Err(invalid_input(format!(
+            "invalid raw_chunk_dedup_window_blocks '{value}': expected a value between 0 and {MAX_RAW_CHUNK_DEDUP_WINDOW_BLOCKS}"
+        )));
+    }
+
+    Ok(())
 }
 
 fn validate_block_dedup_window_blocks(value: usize) -> Result<(), io::Error> {
