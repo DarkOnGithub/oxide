@@ -174,11 +174,12 @@ pub fn extract(args: ExtractArgs) -> AppResult {
         only_regex,
         stats_interval_ms,
         workers,
+        extract_write_shards,
         telemetry_details,
     } = args;
 
     let output_path = output.unwrap_or_else(|| default_extract_output_path(&input));
-    let pipeline = build_extract_pipeline(workers);
+    let pipeline = build_extract_pipeline(workers, extract_write_shards);
     let telemetry_options = RunTelemetryOptions {
         progress_interval: Duration::from_millis(stats_interval_ms.max(50)),
         emit_final_progress: true,
@@ -268,7 +269,7 @@ fn import_dictionary_bank(path: &std::path::Path) -> AppResult<oxide_core::Archi
     Ok(reader.manifest().dictionary_bank().clone())
 }
 
-fn build_extract_pipeline(workers: usize) -> ArchivePipeline {
+fn build_extract_pipeline(workers: usize, extract_write_shards: usize) -> ArchivePipeline {
     let decode_workers = workers.max(1);
     let buffer_pool = Arc::new(BufferPool::new(
         1024 * 1024,
@@ -280,7 +281,9 @@ fn build_extract_pipeline(workers: usize) -> ArchivePipeline {
         buffer_pool,
         CompressionAlgo::Lz4,
     );
-    config.performance = PipelinePerformanceOptions::default();
+    let mut performance = PipelinePerformanceOptions::default();
+    performance.extract_write_shards = extract_write_shards.max(1);
+    config.performance = performance;
     ArchivePipeline::new(config)
 }
 

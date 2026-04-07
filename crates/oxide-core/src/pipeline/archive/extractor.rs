@@ -24,7 +24,9 @@ use super::directory_restore::{
     DirectoryExtractSelection, DirectoryRestoreWriter, FilteredDirectoryRestoreWriter,
     OUTPUT_BUFFER_CAPACITY, apply_entry_metadata,
 };
-use super::reorder_writer::{BoundedReorderWriter, OrderedChunkWriter, ReorderWriterStats};
+use super::reorder_writer::{
+    BoundedReorderWriter, OrderedChunkWriter, OwnedChunk, ReorderWriterStats,
+};
 use super::telemetry::*;
 use super::types::*;
 
@@ -188,9 +190,24 @@ impl AsRef<[u8]> for DecodedBlock {
     }
 }
 
+impl From<DecodedBlock> for OwnedChunk {
+    fn from(value: DecodedBlock) -> Self {
+        match value {
+            DecodedBlock::Owned(bytes) => Self::Owned(bytes),
+            DecodedBlock::Pooled(bytes) => Self::Pooled(bytes),
+        }
+    }
+}
+
 enum OrderedWriteTask {
     Block { index: usize, bytes: DecodedBlock },
     Abort,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct OrderedWriteForwardStats {
+    ordered_write_queue_peak: usize,
+    blocked_elapsed: Duration,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1068,6 +1085,8 @@ impl Extractor {
             bounded::<(usize, Duration, Result<DecodedBlock>)>(queue_capacity);
         let (ordered_write_tx, ordered_write_rx) =
             bounded::<OrderedWriteTask>(ordered_write_queue_capacity);
+        let (ordered_write_forward_tx, ordered_write_forward_rx) =
+            bounded::<OrderedWriteTask>(queue_capacity);
         let runtime_state = Arc::new(DecodeRuntimeState::new(worker_count, ctx.started_at));
         let mut worker_handles = Vec::with_capacity(worker_count);
         let ordered_writer_handle = spawn_ordered_writer(
@@ -1076,6 +1095,8 @@ impl Extractor {
             reorder_pending_limit,
             block_capacity,
         );
+        let ordered_write_forwarder_handle =
+            spawn_ordered_write_forwarder(ordered_write_forward_rx, ordered_write_tx);
         let dictionary_bank = Arc::new(backend.dictionary_bank());
         let reader_handles = backend.spawn(
             read_request_rx,
@@ -1148,9 +1169,7 @@ impl Extractor {
             .max(Duration::from_millis(100));
         let mut decode_task_queue_peak = 0usize;
         let mut decode_result_queue_peak = 0usize;
-        let mut ordered_write_queue_peak = 0usize;
-        let mut ordered_writer_disconnected = false;
-        let mut ordered_write_tx = Some(ordered_write_tx);
+        let mut ordered_write_tx = Some(ordered_write_forward_tx);
 
         let run_result = (|| -> Result<()> {
             for (block_index, header) in block_descriptors.iter().copied().enumerate() {
@@ -1188,13 +1207,7 @@ impl Extractor {
                         first_error: &mut first_error,
                     };
                     receive_decode_result(&result_rx, &mut decode_ctx).and_then(|outcome| {
-                        forward_processed_decode_result(
-                            outcome,
-                            &mut ordered_write_tx,
-                            &mut ordered_write_queue_peak,
-                            &mut ordered_writer_disconnected,
-                            &mut stage_timings,
-                        )
+                        forward_processed_decode_result(outcome, &mut ordered_write_tx)
                     })?;
                     decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
                     let force = false;
@@ -1248,13 +1261,7 @@ impl Extractor {
                         &mut received,
                         &mut first_error,
                     )?;
-                    forward_processed_decode_result(
-                        outcome,
-                        &mut ordered_write_tx,
-                        &mut ordered_write_queue_peak,
-                        &mut ordered_writer_disconnected,
-                        &mut stage_timings,
-                    )?;
+                    forward_processed_decode_result(outcome, &mut ordered_write_tx)?;
                     drained += 1;
                 }
 
@@ -1294,13 +1301,7 @@ impl Extractor {
                     first_error: &mut first_error,
                 };
                 receive_decode_result(&result_rx, &mut decode_ctx).and_then(|outcome| {
-                    forward_processed_decode_result(
-                        outcome,
-                        &mut ordered_write_tx,
-                        &mut ordered_write_queue_peak,
-                        &mut ordered_writer_disconnected,
-                        &mut stage_timings,
-                    )
+                    forward_processed_decode_result(outcome, &mut ordered_write_tx)
                 })?;
                 decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
                 let force = false;
@@ -1334,6 +1335,8 @@ impl Extractor {
 
         let io_reader_result = join_io_readers(reader_handles);
         let workers_result = join_decode_workers(worker_handles);
+        let ordered_write_forwarder_result =
+            join_ordered_write_forwarder(ordered_write_forwarder_handle);
         let ordered_writer_result = join_ordered_writer(ordered_writer_handle);
 
         if let Some(error) = first_error {
@@ -1341,18 +1344,24 @@ impl Extractor {
         }
         io_reader_result?;
         if let Err(error) = run_result {
-            if ordered_writer_disconnected && let Err(writer_error) = ordered_writer_result {
+            if let Err(writer_error) = ordered_write_forwarder_result {
+                return Err(writer_error);
+            }
+            if let Err(writer_error) = ordered_writer_result {
                 return Err(writer_error);
             }
             return Err(error);
         }
         let workers = workers_result?;
+        let ordered_write_forwarder_stats = ordered_write_forwarder_result?;
 
         let OrderedWriterOutcome {
             writer,
             stats: reorder_stats,
         } = ordered_writer_result?;
 
+        stage_timings.writer_enqueue_blocked += ordered_write_forwarder_stats.blocked_elapsed;
+        stage_timings.record_write_shard_blocked(0, ordered_write_forwarder_stats.blocked_elapsed);
         stage_timings.ordered_write += reorder_stats.write_elapsed;
         stage_timings.merge += reorder_stats
             .push_elapsed
@@ -1379,13 +1388,16 @@ impl Extractor {
             decode_result_queue_capacity: queue_capacity,
             decode_result_queue_peak,
             ordered_write_queue_capacity,
-            ordered_write_queue_peak,
+            ordered_write_queue_peak: ordered_write_forwarder_stats.ordered_write_queue_peak,
             reorder_pending_limit,
             reorder_pending_peak: reorder_stats.pending_blocks_peak,
             reorder_pending_bytes_peak: reorder_stats.pending_bytes_peak,
             ..ExtractPipelineStats::default()
         };
-        pipeline_stats.record_write_shard_queue_peak(0, ordered_write_queue_peak);
+        pipeline_stats.record_write_shard_queue_peak(
+            0,
+            ordered_write_forwarder_stats.ordered_write_queue_peak,
+        );
 
         Ok((
             DecodeStreamOutcome {
@@ -1810,38 +1822,25 @@ fn process_decode_result(
 fn forward_processed_decode_result(
     outcome: ProcessedDecodeResult,
     ordered_write_tx: &mut Option<crossbeam_channel::Sender<OrderedWriteTask>>,
-    ordered_write_queue_peak: &mut usize,
-    ordered_writer_disconnected: &mut bool,
-    stage_timings: &mut ExtractStageTimings,
 ) -> Result<()> {
     match outcome {
         ProcessedDecodeResult::Block { index, bytes } => {
             if let Some(tx) = ordered_write_tx.as_ref() {
-                match tx.try_send(OrderedWriteTask::Block { index, bytes }) {
-                    Ok(()) => {
-                        *ordered_write_queue_peak = (*ordered_write_queue_peak).max(tx.len());
-                    }
+                let task = OrderedWriteTask::Block { index, bytes };
+                match tx.try_send(task) {
+                    Ok(()) => {}
                     Err(TrySendError::Full(task)) => {
-                        let enqueue_started = Instant::now();
-                        let send_result = tx.send(task);
-                        let blocked_elapsed = enqueue_started.elapsed();
-                        stage_timings.writer_enqueue_blocked += blocked_elapsed;
-                        stage_timings.record_write_shard_blocked(0, blocked_elapsed);
-                        if send_result.is_ok() {
-                            *ordered_write_queue_peak = (*ordered_write_queue_peak).max(tx.len());
-                            return Ok(());
-                        }
-                        *ordered_writer_disconnected = true;
-                        *ordered_write_tx = None;
-                        return Err(crate::OxideError::CompressionError(
-                            "ordered write queue closed before completion".to_string(),
-                        ));
+                        tx.send(task).map_err(|_| {
+                            *ordered_write_tx = None;
+                            crate::OxideError::CompressionError(
+                                "ordered write forward queue closed before completion".to_string(),
+                            )
+                        })?;
                     }
                     Err(TrySendError::Disconnected(_)) => {
-                        *ordered_writer_disconnected = true;
                         *ordered_write_tx = None;
                         return Err(crate::OxideError::CompressionError(
-                            "ordered write queue closed before completion".to_string(),
+                            "ordered write forward queue closed before completion".to_string(),
                         ));
                     }
                 }
@@ -1853,6 +1852,51 @@ fn forward_processed_decode_result(
         ProcessedDecodeResult::IgnoredAfterError => {}
     }
     Ok(())
+}
+
+fn spawn_ordered_write_forwarder(
+    ordered_write_forward_rx: Receiver<OrderedWriteTask>,
+    ordered_write_tx: Sender<OrderedWriteTask>,
+) -> thread::JoinHandle<Result<OrderedWriteForwardStats>> {
+    thread::spawn(move || -> Result<OrderedWriteForwardStats> {
+        let mut stats = OrderedWriteForwardStats::default();
+
+        while let Ok(task) = ordered_write_forward_rx.recv() {
+            match task {
+                OrderedWriteTask::Block { index, bytes } => {
+                    let task = OrderedWriteTask::Block { index, bytes };
+                    match ordered_write_tx.try_send(task) {
+                        Ok(()) => {
+                            stats.ordered_write_queue_peak =
+                                stats.ordered_write_queue_peak.max(ordered_write_tx.len());
+                        }
+                        Err(TrySendError::Full(task)) => {
+                            let blocked_started = Instant::now();
+                            ordered_write_tx.send(task).map_err(|_| {
+                                crate::OxideError::CompressionError(
+                                    "ordered write queue closed before completion".to_string(),
+                                )
+                            })?;
+                            stats.blocked_elapsed += blocked_started.elapsed();
+                            stats.ordered_write_queue_peak =
+                                stats.ordered_write_queue_peak.max(ordered_write_tx.len());
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            return Err(crate::OxideError::CompressionError(
+                                "ordered write queue closed before completion".to_string(),
+                            ));
+                        }
+                    }
+                }
+                OrderedWriteTask::Abort => {
+                    let _ = ordered_write_tx.send(OrderedWriteTask::Abort);
+                    return Ok(stats);
+                }
+            }
+        }
+
+        Ok(stats)
+    })
 }
 
 fn abort_ordered_writer(
@@ -2002,6 +2046,23 @@ fn join_ordered_writer<W>(
             "unknown panic payload".to_string()
         };
         crate::OxideError::CompressionError(format!("ordered writer thread panicked: {details}"))
+    })?
+}
+
+fn join_ordered_write_forwarder(
+    handle: thread::JoinHandle<Result<OrderedWriteForwardStats>>,
+) -> Result<OrderedWriteForwardStats> {
+    handle.join().map_err(|payload| {
+        let details = if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        crate::OxideError::CompressionError(format!(
+            "ordered write forwarder thread panicked: {details}"
+        ))
     })?
 }
 
