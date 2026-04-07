@@ -270,6 +270,9 @@ pub struct PipelinePerformanceOptions {
     /// Maximum number of recently written blocks tracked for block-level deduplication.
     /// Set to 0 to disable writer-side deduplication.
     pub block_dedup_window_blocks: usize,
+    /// Initial extract write shard count for directory restores.
+    /// Values below 1 disable sharding.
+    pub extract_write_shards: usize,
 }
 
 impl Default for PipelinePerformanceOptions {
@@ -289,6 +292,7 @@ impl Default for PipelinePerformanceOptions {
             writer_result_queue_blocks: 1024,
             raw_chunk_dedup_window_blocks: 131_072,
             block_dedup_window_blocks: 131_072,
+            extract_write_shards: 1,
         }
     }
 }

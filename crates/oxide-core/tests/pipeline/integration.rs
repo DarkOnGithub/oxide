@@ -91,6 +91,18 @@ fn build_pipeline(
     ArchivePipeline::new(config)
 }
 
+fn build_pipeline_with_performance(
+    block_size: usize,
+    workers: usize,
+    pool: Arc<BufferPool>,
+    compression: CompressionAlgo,
+    configure: impl FnOnce(&mut oxide_core::PipelinePerformanceOptions),
+) -> ArchivePipeline {
+    let mut config = ArchivePipelineConfig::new(block_size, workers, pool, compression);
+    configure(&mut config.performance);
+    ArchivePipeline::new(config)
+}
+
 fn build_dictionary_pipeline(
     block_size: usize,
     workers: usize,
@@ -1098,6 +1110,83 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
         report.extensions.get("stage.write_shard_output_data_us[0]"),
         Some(ReportValue::U64(value)) if *value > 0
     ));
+    Ok(())
+}
+
+#[test]
+fn extract_path_restores_directory_payload_with_write_shards()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    let alpha = build_incompressible_fixture(96 * 1024);
+    let beta = build_incompressible_fixture(112 * 1024);
+    let gamma = build_text_fixture(80 * 1024);
+    write_directory_file(&source, "nested/alpha.bin", &alpha)?;
+    write_directory_file(&source, "nested/beta.bin", &beta)?;
+    write_directory_file(&source, "nested/gamma.txt", &gamma)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 128));
+    let pipeline = build_pipeline_with_performance(
+        8 * 1024,
+        2,
+        buffer_pool,
+        CompressionAlgo::Lz4,
+        |performance| {
+            performance.extract_write_shards = 2;
+        },
+    );
+
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let out_root = tempfile::tempdir()?;
+    let out_dir = out_root.path().join("restored-tree");
+    let report = pipeline.extract_path(
+        Cursor::new(archive),
+        &out_dir,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert_eq!(std::fs::read(out_dir.join("nested/alpha.bin"))?, alpha);
+    assert_eq!(std::fs::read(out_dir.join("nested/beta.bin"))?, beta);
+    assert_eq!(std::fs::read(out_dir.join("nested/gamma.txt"))?, gamma);
+    assert!(matches!(
+        report.extensions.get("pipeline.write_shard_count"),
+        Some(ReportValue::U64(2))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.write_shard_queue_peak[0]"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.write_shard_queue_peak[1]"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
+        report.extensions.get("stage.write_shard_output_data_us[0]"),
+        Some(ReportValue::U64(value)) if *value > 0
+    ));
+    assert!(matches!(
+        report.extensions.get("stage.write_shard_output_data_us[1]"),
+        Some(ReportValue::U64(value)) if *value > 0
+    ));
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("write_shard_output_data[0]")
+    );
+    assert!(
+        report
+            .main_thread
+            .stage_us
+            .contains_key("write_shard_output_data[1]")
+    );
     Ok(())
 }
 
