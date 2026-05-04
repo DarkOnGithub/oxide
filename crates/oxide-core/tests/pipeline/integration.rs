@@ -260,7 +260,6 @@ fn pipeline_marks_raw_passthrough_blocks_when_compression_is_not_smaller()
         Arc::new(BufferPool::new(16 * 1024, 64)),
         CompressionAlgo::Lz4,
     );
-    config.performance.raw_fallback_enabled = true;
     let pipeline = ArchivePipeline::new(config);
 
     let run = pipeline.archive_path(

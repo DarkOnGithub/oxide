@@ -225,9 +225,8 @@ impl ArchivePipeline {
     pub fn select_stored_payload<'a>(
         source: &'a [u8],
         compressed: &'a [u8],
-        raw_fallback_enabled: bool,
     ) -> (&'a [u8], bool) {
-        super::archiver::select_stored_payload(source, compressed, raw_fallback_enabled)
+        super::archiver::select_stored_payload(source, compressed)
     }
 
     /// Extracts all block payload bytes from an OXZ archive in block order and

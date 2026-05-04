@@ -362,8 +362,8 @@ impl ReportExport for ExtractReport {
     }
 }
 
-impl ReportExport for RunReport {
-    fn to_flat_map(&self) -> BTreeMap<String, ReportValue> {
+impl RunReport {
+    pub fn to_flat_map(&self) -> BTreeMap<String, ReportValue> {
         match self {
             RunReport::Archive(report) => report.to_flat_map(),
             RunReport::Extract(report) => report.to_flat_map(),

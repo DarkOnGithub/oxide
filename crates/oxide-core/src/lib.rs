@@ -50,7 +50,7 @@ pub use pipeline::{
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use telemetry::{
     ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent, ExtractReport,
-    GlobalTelemetrySink, ProfileEvent, ReportExport, ReportValue, RunReport, RunTelemetryOptions,
+    ProfileEvent, ReportValue, RunReport, RunTelemetryOptions,
     TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
 };
 pub use types::{

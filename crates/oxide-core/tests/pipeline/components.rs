@@ -43,23 +43,6 @@ mod archive_tests {
 
         assert_eq!(inflight, 2048);
     }
-
-    #[test]
-    fn select_stored_payload_uses_raw_when_compression_is_not_smaller() {
-        let source = [1u8, 2, 3, 4];
-        let compressed_equal = [9u8, 9, 9, 9];
-        let compressed_larger = [9u8, 9, 9, 9, 9];
-
-        let (stored_equal, raw_equal) =
-            ArchivePipeline::select_stored_payload(&source, &compressed_equal, true);
-        assert!(raw_equal);
-        assert_eq!(stored_equal, source.as_slice());
-
-        let (stored_larger, raw_larger) =
-            ArchivePipeline::select_stored_payload(&source, &compressed_larger, true);
-        assert!(raw_larger);
-        assert_eq!(stored_larger, source.as_slice());
-    }
 }
 
 mod directory_tests {
