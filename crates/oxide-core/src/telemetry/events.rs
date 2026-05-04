@@ -115,4 +115,3 @@ pub trait TelemetrySink {
     /// Called when a telemetry event is emitted.
     fn on_event(&mut self, event: TelemetryEvent);
 }
-

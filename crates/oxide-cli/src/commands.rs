@@ -283,6 +283,7 @@ fn build_extract_pipeline(workers: usize, extract_write_shards: usize) -> Archiv
     );
     let mut performance = PipelinePerformanceOptions::default();
     performance.extract_write_shards = extract_write_shards.max(1);
+    performance.extract_preserve_metadata = false;
     config.performance = performance;
     ArchivePipeline::new(config)
 }

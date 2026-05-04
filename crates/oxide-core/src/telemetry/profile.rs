@@ -207,4 +207,3 @@ pub fn event(
     _message: &'static str,
 ) {
 }
-

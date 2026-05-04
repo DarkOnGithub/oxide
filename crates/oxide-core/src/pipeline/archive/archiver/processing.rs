@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use blake3::Hash as Blake3Hash;
@@ -47,6 +47,7 @@ pub(crate) struct RawChunkDeduper {
     max_entries: usize,
     entries: HashMap<RawChunkDedupeKey, usize>,
     insertion_order: VecDeque<(RawChunkDedupeKey, usize)>,
+    next_block_id: usize,
 }
 
 impl RawChunkDeduper {
@@ -55,6 +56,7 @@ impl RawChunkDeduper {
             max_entries,
             entries: HashMap::new(),
             insertion_order: VecDeque::new(),
+            next_block_id: 0,
         }
     }
 
@@ -90,10 +92,34 @@ impl RawChunkDeduper {
     }
 }
 
-pub(crate) type SharedRawChunkDeduper = Arc<Mutex<RawChunkDeduper>>;
+pub(crate) type SharedRawChunkDeduper = Arc<(Mutex<RawChunkDeduper>, Condvar)>;
 
 pub(crate) fn shared_raw_chunk_deduper(max_entries: usize) -> SharedRawChunkDeduper {
-    Arc::new(Mutex::new(RawChunkDeduper::new(max_entries)))
+    Arc::new((
+        Mutex::new(RawChunkDeduper::new(max_entries)),
+        Condvar::new(),
+    ))
+}
+
+fn find_ordered_raw_chunk_reference(
+    raw_chunk_deduper: &SharedRawChunkDeduper,
+    block_id: usize,
+    key: RawChunkDedupeKey,
+) -> Result<Option<u32>> {
+    let (lock, ready) = &**raw_chunk_deduper;
+    let mut deduper = lock.lock().map_err(|_| {
+        crate::OxideError::CompressionError("raw chunk dedupe state poisoned".to_string())
+    })?;
+    while block_id != deduper.next_block_id {
+        deduper = ready.wait(deduper).map_err(|_| {
+            crate::OxideError::CompressionError("raw chunk dedupe state poisoned".to_string())
+        })?;
+    }
+
+    let reference = deduper.find_reference(block_id, key);
+    deduper.next_block_id = deduper.next_block_id.saturating_add(1);
+    ready.notify_all();
+    reference
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -129,7 +155,8 @@ fn should_skip_full_compression_probe(
     source_len: usize,
     plan: crate::types::ChunkEncodingPlan,
 ) -> bool {
-    source_len >= compression_probe_config(plan).min_source_len
+    plan.algo == CompressionAlgo::Lzma
+        && source_len >= compression_probe_config(plan).min_source_len
 }
 
 /// Fast entropy estimation using byte-frequency counting.
@@ -282,12 +309,8 @@ pub(crate) fn process_batch(
 
     if let Some(raw_chunk_deduper) = config.raw_chunk_deduper {
         let raw_chunk_key = RawChunkDedupeKey::from_source(source);
-        let reference_target = raw_chunk_deduper
-            .lock()
-            .map_err(|_| {
-                crate::OxideError::CompressionError("raw chunk dedupe state poisoned".to_string())
-            })?
-            .find_reference(id, raw_chunk_key)?;
+        let reference_target =
+            find_ordered_raw_chunk_reference(raw_chunk_deduper, id, raw_chunk_key)?;
         if let Some(reference_target) = reference_target {
             config
                 .processing_totals
@@ -481,5 +504,4 @@ mod tests {
         );
     }
 }
-
 
