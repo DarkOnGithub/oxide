@@ -6,13 +6,19 @@ impl DirectoryRestoreWriter {
         manifest: ArchiveManifest,
         performance: &crate::pipeline::types::PipelinePerformanceOptions,
     ) -> Result<Self> {
-        Self::create_with_shards(root, manifest, performance.extract_write_shards.max(1))
+        Self::create_with_shards(
+            root,
+            manifest,
+            performance.extract_write_shards.max(1),
+            performance.extract_preserve_metadata,
+        )
     }
 
     fn create_with_shards(
         root: &Path,
         manifest: ArchiveManifest,
         write_shards: usize,
+        preserve_metadata: bool,
     ) -> Result<Self> {
         let entries = build_restore_entries(root, manifest)?;
         let window_config = prepared_entry_window_config(&entries);
@@ -27,6 +33,7 @@ impl DirectoryRestoreWriter {
             created_directories: HashSet::new(),
             pending_file_metadata: Vec::new(),
             pending_directory_metadata: Vec::new(),
+            preserve_metadata,
             ready_files: VecDeque::new(),
             planner_finished: false,
             planner_rx: never(),
@@ -486,7 +493,7 @@ impl DirectoryRestoreWriter {
 
     fn finalize_file_metadata(&mut self) -> Result<()> {
         let pending = self.pending_file_metadata.drain(..).collect::<Vec<_>>();
-        if pending.is_empty() {
+        if pending.is_empty() || !self.preserve_metadata {
             return Ok(());
         }
 
@@ -497,7 +504,7 @@ impl DirectoryRestoreWriter {
     }
 
     fn finalize_directories(&mut self) -> Result<()> {
-        if self.pending_directory_metadata.is_empty() {
+        if self.pending_directory_metadata.is_empty() || !self.preserve_metadata {
             return Ok(());
         }
 

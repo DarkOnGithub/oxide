@@ -273,6 +273,8 @@ pub struct PipelinePerformanceOptions {
     /// Initial extract write shard count for directory restores.
     /// Values below 1 disable sharding.
     pub extract_write_shards: usize,
+    /// Restore stored ownership, mode, and timestamps during directory extraction.
+    pub extract_preserve_metadata: bool,
 }
 
 impl Default for PipelinePerformanceOptions {
@@ -292,6 +294,7 @@ impl Default for PipelinePerformanceOptions {
             raw_chunk_dedup_window_blocks: 131_072,
             block_dedup_window_blocks: 131_072,
             extract_write_shards: 1,
+            extract_preserve_metadata: true,
         }
     }
 }

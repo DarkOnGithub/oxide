@@ -156,7 +156,7 @@ pub struct ExtractArgs {
     pub workers: usize,
 
     /// Number of directory extract write shards.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = num_cpus::get().max(1))]
     pub extract_write_shards: usize,
 
     /// Print full telemetry tables in the final report.

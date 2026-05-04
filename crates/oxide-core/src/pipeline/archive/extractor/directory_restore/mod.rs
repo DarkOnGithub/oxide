@@ -33,8 +33,6 @@ mod writer;
 pub(super) use self::metadata::apply_entry_metadata;
 use self::metadata::{PendingMetadata, apply_pending_metadata_in_parallel};
 use self::planner::spawn_restore_planner;
-#[cfg(test)]
-use self::planner::{prepare_restore_entry_with_open, try_reserve_open_file_permit_for_work_item};
 pub(super) use self::selection::DirectoryExtractSelection;
 
 pub(super) const OUTPUT_BUFFER_CAPACITY: usize = 1024 * 1024;
@@ -50,7 +48,7 @@ const MIN_PREOPENED_FILE_WINDOW_CAPACITY: usize = 32;
 const MAX_PREOPENED_FILE_WINDOW_CAPACITY: usize = 384;
 const MIN_READY_ENTRY_WINDOW_CAPACITY: usize = 32;
 const MAX_READY_ENTRY_WINDOW_CAPACITY: usize = 96;
-const WRITE_SHARD_QUEUE_CAPACITY: usize = 64;
+const WRITE_SHARD_QUEUE_CAPACITY: usize = 128;
 const DIRECT_FILE_WRITE_MAX_BYTES: u64 = 32 * 1024;
 const SMALL_FILE_BUFFER_MAX_BYTES: u64 = 256 * 1024;
 const MEDIUM_FILE_BUFFER_MAX_BYTES: u64 = 1024 * 1024;
@@ -430,6 +428,7 @@ pub(crate) struct DirectoryRestoreWriter {
     created_directories: HashSet<PathBuf>,
     pending_file_metadata: Vec<PendingMetadata>,
     pending_directory_metadata: Vec<PendingMetadata>,
+    preserve_metadata: bool,
     ready_files: VecDeque<ReadyFileWrite>,
     planner_finished: bool,
     planner_rx: Receiver<Result<RestorePlannerMessage>>,

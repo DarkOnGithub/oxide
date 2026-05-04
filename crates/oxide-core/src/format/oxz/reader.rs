@@ -435,12 +435,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
                         "reference chunk descriptors must target earlier blocks",
                     ));
                 }
-                let target = descriptors[reference_target];
-                if target.is_reference() {
-                    return Err(OxideError::InvalidFormat(
-                        "reference chunk descriptors must target canonical data blocks",
-                    ));
-                }
+                let target = resolve_reference_chain(descriptors, reference_target)?;
                 if descriptor.raw_len != target.raw_len {
                     return Err(OxideError::InvalidFormat(
                         "reference chunk descriptors must preserve raw length",
@@ -483,24 +478,39 @@ impl<R: Read + Seek> ArchiveReader<R> {
             ));
         }
 
-        let target = self
-            .chunk_descriptors
-            .get(reference_target)
-            .copied()
-            .ok_or(OxideError::InvalidFormat(
-                "reference chunk target out of range",
-            ))?;
-        if target.is_reference() {
-            return Err(OxideError::InvalidFormat(
-                "reference chunk descriptors must target canonical data blocks",
-            ));
-        }
+        let target = resolve_reference_chain(&self.chunk_descriptors, reference_target)?;
         if descriptor.raw_len != target.raw_len {
             return Err(OxideError::InvalidFormat(
                 "reference chunk descriptors must preserve raw length",
             ));
         }
         Ok(target)
+    }
+}
+
+fn resolve_reference_chain(
+    descriptors: &[ChunkDescriptor],
+    mut reference_target: usize,
+) -> Result<ChunkDescriptor> {
+    loop {
+        let target =
+            descriptors
+                .get(reference_target)
+                .copied()
+                .ok_or(OxideError::InvalidFormat(
+                    "reference chunk target out of range",
+                ))?;
+        let Some(next_target) = target.reference_target else {
+            return Ok(target);
+        };
+        let next_target = usize::try_from(next_target)
+            .map_err(|_| OxideError::InvalidFormat("reference chunk target exceeds usize range"))?;
+        if next_target >= reference_target {
+            return Err(OxideError::InvalidFormat(
+                "reference chunk descriptors must target earlier blocks",
+            ));
+        }
+        reference_target = next_target;
     }
 }
 

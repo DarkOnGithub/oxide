@@ -57,17 +57,17 @@ where
     let dictionary_bank = Arc::new(manifest.dictionary_bank().clone());
     let processing_totals = Arc::new(ProcessingThroughputTotals::default());
     let skip_compression = config.skip_compression;
-    let raw_chunk_deduper =
-        shared_raw_chunk_deduper(config.performance.raw_chunk_dedup_window_blocks);
+    let raw_chunk_deduper = (config.performance.raw_chunk_dedup_window_blocks > 0)
+        .then(|| shared_raw_chunk_deduper(config.performance.raw_chunk_dedup_window_blocks));
     let worker_processing_totals = Arc::clone(&processing_totals);
     let worker_dictionary_bank = Arc::clone(&dictionary_bank);
-    let worker_raw_chunk_deduper = Arc::clone(&raw_chunk_deduper);
+    let worker_raw_chunk_deduper = raw_chunk_deduper.clone();
     let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
         let config = ProcessBatchConfig {
             skip_compression,
             dictionary_bank: worker_dictionary_bank.as_ref(),
             processing_totals: worker_processing_totals.as_ref(),
-            raw_chunk_deduper: Some(&worker_raw_chunk_deduper),
+            raw_chunk_deduper: worker_raw_chunk_deduper.as_ref(),
         };
         process_batch(batch, pool, compression, &config, scratch)
     });

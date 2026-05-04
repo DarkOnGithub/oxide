@@ -43,14 +43,14 @@
         "result_wait_ms": 1,
         "directory_mmap_threshold": "8M",
         "writer_queue_blocks": 768,
-        "raw_chunk_dedup_window_blocks": 131072,
+        "raw_chunk_dedup_window_blocks": 0,
         "block_dedup_window_blocks": 0,
         "dictionary_mode": "off"
       },
       "balanced": {
         "compression": {
           "compressor": "zstd",
-          "level": 6
+          "level": 2
         },
         "chunking": {
           "mode": "fixed",
@@ -66,9 +66,9 @@
         "inflight_bytes": "2G",
         "inflight_blocks_per_worker": 48,
         "producer_threads": 3,
-        "raw_chunk_dedup_window_blocks": 131072,
+        "raw_chunk_dedup_window_blocks": 0,
         "block_dedup_window_blocks": 131072,
-        "writer_queue_blocks": 384,
+        "writer_queue_blocks": 768,
         "result_wait_ms": 1,
         "dictionary_mode": "off"
       },
@@ -80,7 +80,7 @@
           "dictionary_size": "8M"
         },
         "chunking": {
-          "mode": "cdc",
+          "mode": "fixed",
           "min_block_size": "768K",
           "max_block_size": "6M"
         },
@@ -95,9 +95,9 @@
         "directory_mmap_threshold": "16M",
         "writer_queue_blocks": 128,
         "result_wait_ms": 4,
-        "raw_chunk_dedup_window_blocks": 131072,
+        "raw_chunk_dedup_window_blocks": 0,
         "block_dedup_window_blocks": 131072,
-        "dictionary_mode": "auto"
+        "dictionary_mode": "off"
       },
       "extreme": {
         "compression": {
@@ -107,7 +107,7 @@
           "dictionary_size": "8M"
         },
         "chunking": {
-          "mode": "cdc",
+          "mode": "fixed",
           "min_block_size": "1M",
           "max_block_size": "8M"
         },
@@ -122,9 +122,9 @@
         "directory_mmap_threshold": "16M",
         "writer_queue_blocks": 96,
         "result_wait_ms": 6,
-        "raw_chunk_dedup_window_blocks": 131072,
+        "raw_chunk_dedup_window_blocks": 0,
         "block_dedup_window_blocks": 131072,
-        "dictionary_mode": "auto"
+        "dictionary_mode": "off"
       }
     }
   }
