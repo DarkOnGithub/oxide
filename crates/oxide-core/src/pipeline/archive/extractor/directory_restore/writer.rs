@@ -1,11 +1,6 @@
 use super::*;
 
 impl DirectoryRestoreWriter {
-    #[allow(dead_code)]
-    pub(crate) fn create(root: &Path, manifest: ArchiveManifest) -> Result<Self> {
-        Self::create_with_shards(root, manifest, 1)
-    }
-
     pub(crate) fn create_with_performance(
         root: &Path,
         manifest: ArchiveManifest,

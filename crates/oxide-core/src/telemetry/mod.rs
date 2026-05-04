@@ -10,12 +10,12 @@ pub mod tags;
 pub mod worker;
 
 pub use events::{
-    ArchivePlanningCompleteEvent, ArchiveProgressEvent, ExtractProgressEvent, GlobalTelemetrySink,
+    ArchivePlanningCompleteEvent, ArchiveProgressEvent, ExtractProgressEvent,
     ProfileEvent, TelemetryEvent, TelemetrySink,
 };
 pub use memory::ProcessMemorySample;
 pub use report::{
-    ArchiveReport, ArchiveRun, ExtractReport, ReportExport, ReportValue, RunReport,
+    ArchiveReport, ArchiveRun, ExtractReport, ReportValue, RunReport,
     RunTelemetryOptions, ThreadReport, WorkerReport,
 };
 

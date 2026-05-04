@@ -1,4 +1,3 @@
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::core::PoolRuntimeSnapshot;
@@ -117,33 +116,3 @@ pub trait TelemetrySink {
     fn on_event(&mut self, event: TelemetryEvent);
 }
 
-/// Thread-safe version of [`TelemetrySink`] for global registration.
-pub trait GlobalTelemetrySink: Send {
-    /// Called when a telemetry event is emitted.
-    fn on_event(&mut self, event: TelemetryEvent);
-}
-
-fn global_sink() -> &'static Mutex<Option<Box<dyn GlobalTelemetrySink>>> {
-    static GLOBAL_SINK: OnceLock<Mutex<Option<Box<dyn GlobalTelemetrySink>>>> = OnceLock::new();
-    GLOBAL_SINK.get_or_init(|| Mutex::new(None))
-}
-
-/// Registers a process-wide telemetry event sink used by subsystem-level emitters.
-pub fn set_global_sink(sink: Option<Box<dyn GlobalTelemetrySink>>) {
-    let mut guard = match global_sink().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    *guard = sink;
-}
-
-/// Emits an event to the process-wide sink when configured.
-pub fn emit_global(event: TelemetryEvent) {
-    let mut guard = match global_sink().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if let Some(sink) = guard.as_mut() {
-        sink.on_event(event);
-    }
-}

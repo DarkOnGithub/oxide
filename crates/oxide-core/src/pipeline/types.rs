@@ -240,8 +240,6 @@ pub enum StatValue {
 /// These options allow fine-tuning the performance of the pipeline.
 #[derive(Debug, Clone)]
 pub struct PipelinePerformanceOptions {
-    /// Enables per-block raw passthrough when compression does not reduce size.
-    pub raw_fallback_enabled: bool,
     /// Optional archive-level dictionary training and selection mode.
     pub dictionary_mode: ArchiveDictionaryMode,
     /// Optional explicit codec-specific compression level used only during encoding.
@@ -280,7 +278,6 @@ pub struct PipelinePerformanceOptions {
 impl Default for PipelinePerformanceOptions {
     fn default() -> Self {
         Self {
-            raw_fallback_enabled: true,
             dictionary_mode: ArchiveDictionaryMode::Off,
             compression_level: None,
             lzma_extreme: false,

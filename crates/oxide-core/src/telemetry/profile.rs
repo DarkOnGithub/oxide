@@ -167,15 +167,6 @@ pub fn event(
         return;
     }
 
-    emit_global(TelemetryEvent::Profile(ProfileEvent {
-        target,
-        op,
-        result,
-        elapsed_us,
-        tags: tag_stack.iter().map(|tag| (*tag).to_string()).collect(),
-        message,
-    }));
-
     match target {
         tags::PROFILE_MMAP => {
             tracing::debug!(target: tags::PROFILE_MMAP, op, result, elapsed_us, tags = ?tag_stack, "{message}");
@@ -216,3 +207,4 @@ pub fn event(
     _message: &'static str,
 ) {
 }
+

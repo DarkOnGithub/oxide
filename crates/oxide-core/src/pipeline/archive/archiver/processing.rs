@@ -256,7 +256,6 @@ fn is_likely_incompressible_sample(
 
 pub(crate) struct ProcessBatchConfig<'a> {
     pub skip_compression: bool,
-    pub raw_fallback_enabled: bool,
     pub dictionary_bank: &'a ArchiveDictionaryBank,
     pub processing_totals: &'a ProcessingThroughputTotals,
     pub raw_chunk_deduper: Option<&'a SharedRawChunkDeduper>,
@@ -330,8 +329,7 @@ pub(crate) fn process_batch(
         ));
     }
 
-    if config.raw_fallback_enabled
-        && should_skip_full_compression_probe(source_len, plan)
+    if should_skip_full_compression_probe(source_len, plan)
         && is_likely_incompressible_sample(
             source,
             &source_path,
@@ -384,7 +382,7 @@ pub(crate) fn process_batch(
             .processing_totals
             .record(source_len as u64, compression_elapsed);
 
-        let raw_passthrough = config.raw_fallback_enabled && compressed.len() >= source_len;
+        let raw_passthrough = compressed.len() >= source_len;
         let data = if raw_passthrough {
             CompressedPayload::from_batch_data(data)
         } else {
@@ -409,7 +407,7 @@ pub(crate) fn process_batch(
         .processing_totals
         .record(source_len as u64, compression_elapsed);
 
-    let raw_passthrough = config.raw_fallback_enabled && compressed.len() >= source_len;
+    let raw_passthrough = compressed.len() >= source_len;
     let data = if raw_passthrough {
         CompressedPayload::from_batch_data(data)
     } else {
@@ -431,9 +429,8 @@ pub(crate) fn process_batch(
 pub fn select_stored_payload<'a>(
     source: &'a [u8],
     compressed: &'a [u8],
-    raw_fallback_enabled: bool,
 ) -> (&'a [u8], bool) {
-    let raw_passthrough = raw_fallback_enabled && compressed.len() >= source.len();
+    let raw_passthrough = compressed.len() >= source.len();
     let payload = if raw_passthrough { source } else { compressed };
     (payload, raw_passthrough)
 }
@@ -484,3 +481,5 @@ mod tests {
         );
     }
 }
+
+

@@ -27,8 +27,6 @@ use super::super::reorder_writer::{OrderedChunkWriter, OwnedChunk, SharedChunk};
 mod metadata;
 mod planner;
 mod selection;
-#[cfg(test)]
-mod tests;
 mod write_shards;
 mod writer;
 

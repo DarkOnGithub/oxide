@@ -56,7 +56,6 @@ where
     );
     let dictionary_bank = Arc::new(manifest.dictionary_bank().clone());
     let processing_totals = Arc::new(ProcessingThroughputTotals::default());
-    let raw_fallback_enabled = config.performance.raw_fallback_enabled;
     let skip_compression = config.skip_compression;
     let raw_chunk_deduper =
         shared_raw_chunk_deduper(config.performance.raw_chunk_dedup_window_blocks);
@@ -66,7 +65,6 @@ where
     let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
         let config = ProcessBatchConfig {
             skip_compression,
-            raw_fallback_enabled,
             dictionary_bank: worker_dictionary_bank.as_ref(),
             processing_totals: worker_processing_totals.as_ref(),
             raw_chunk_deduper: Some(&worker_raw_chunk_deduper),
