@@ -9,7 +9,9 @@ use crate::pipeline::types::PipelinePerformanceOptions;
 use crate::types::Result;
 
 pub const SUBMISSION_DRAIN_BUDGET: usize = 128;
-pub const DIRECTORY_PREFETCH_WINDOW: usize = 8;
+/// How far ahead of the sequential producer each prefetch helper may read.
+/// Larger values improve I/O overlap when `producer_threads` > 1 (bounded memory per small file).
+pub const DIRECTORY_PREFETCH_WINDOW: usize = 16;
 pub const MIN_INFLIGHT_BLOCKS: usize = 64;
 pub const MAX_INFLIGHT_BLOCKS: usize = 4096;
 
