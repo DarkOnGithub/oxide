@@ -25,11 +25,13 @@ use super::super::super::directory;
 use super::super::reorder_writer::{OrderedChunkWriter, OwnedChunk, SharedChunk};
 
 mod metadata;
+mod direct;
 mod planner;
 mod selection;
 mod write_shards;
 mod writer;
 
+pub(super) use self::direct::DirectDirectoryRestoreWriter;
 pub(super) use self::metadata::apply_entry_metadata;
 use self::metadata::{PendingMetadata, apply_pending_metadata_in_parallel};
 use self::planner::spawn_restore_planner;

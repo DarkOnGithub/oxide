@@ -38,13 +38,13 @@ mod tuning;
 use self::decode_plan::DecodePlan;
 use self::decode_support::{
     DecodeResultContext, DecodeStreamOutcome, DecodedBlock, OrderedWriteTask, OrderedWriterOutcome,
-    abort_ordered_writer, decode_block_payload_with_scratch, forward_processed_decode_result,
+    ProcessedDecodeResult, abort_ordered_writer, decode_block_payload_with_scratch, forward_processed_decode_result,
     join_decode_workers, join_io_readers, join_ordered_write_forwarder, join_ordered_writer,
     process_decode_result, read_exact_file_at, receive_decode_result,
     spawn_ordered_write_forwarder, spawn_ordered_writer,
 };
 use self::directory_restore::{
-    DirectoryExtractSelection, DirectoryRestoreStats, DirectoryRestoreWriter,
+    DirectDirectoryRestoreWriter, DirectoryExtractSelection, DirectoryRestoreStats, DirectoryRestoreWriter,
     FilteredDirectoryRestoreWriter, OUTPUT_BUFFER_CAPACITY, apply_entry_metadata,
 };
 use self::file_writer::{FileChunkWriter, VecChunkWriter, apply_file_restore_stats};
@@ -392,13 +392,68 @@ impl Extractor {
         }
 
         let manifest = archive.manifest().clone();
-        let writer = DirectoryRestoreWriter::create_with_performance(
+        let file_count = manifest
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.kind, crate::ArchiveEntryKind::File))
+            .count();
+        if file_count < 1024 {
+            let writer = DirectoryRestoreWriter::create_with_performance(
+                output_path,
+                manifest,
+                &self.performance,
+            )?;
+            let backend = ParallelFileDecodeReadBackend::new(archive, file)?;
+            let (decoded, mut writer) = self.decode_archive_to_writer_with_backend(
+                backend,
+                archive_read_elapsed,
+                ExtractContext {
+                    started_at,
+                    options,
+                    sink,
+                },
+                None,
+                writer,
+            )?;
+
+            let restore_stats = writer.finish()?;
+            let DecodeStreamOutcome {
+                flags,
+                decoded_bytes_total,
+                archive_bytes_total,
+                blocks_total,
+                workers,
+                mut stage_timings,
+                mut pipeline_stats,
+                ..
+            } = decoded;
+            apply_directory_restore_stats(&mut pipeline_stats, &mut stage_timings, &restore_stats);
+
+            return Ok(DirectoryRestoreOutcome {
+                decoded: DecodedArchivePayload {
+                    flags,
+                    payload: Vec::new(),
+                    decoded_bytes_total,
+                    archive_bytes_total,
+                    blocks_total,
+                    workers,
+                    stage_timings,
+                    pipeline_stats,
+                },
+                output_bytes_total: restore_stats.output_bytes_total,
+                entry_count: restore_stats.entry_count,
+            });
+        }
+        let block_descriptors = archive.block_descriptors().to_vec();
+        let writer = DirectDirectoryRestoreWriter::create(
             output_path,
             manifest,
-            &self.performance,
+            &block_descriptors,
+            self.performance.extract_write_shards.max(1),
+            self.performance.extract_preserve_metadata,
         )?;
         let backend = ParallelFileDecodeReadBackend::new(archive, file)?;
-        let (decoded, mut writer) = self.decode_archive_to_writer_with_backend(
+        let (decoded, writer) = self.decode_archive_to_direct_directory_with_backend(
             backend,
             archive_read_elapsed,
             ExtractContext {
@@ -406,7 +461,6 @@ impl Extractor {
                 options,
                 sink,
             },
-            None,
             writer,
         )?;
 
@@ -603,6 +657,271 @@ impl Extractor {
             output_bytes_total: restore_stats.output_bytes_total,
             entry_count: restore_stats.entry_count,
         })
+    }
+
+    fn decode_archive_to_direct_directory_with_backend<B>(
+        &self,
+        backend: B,
+        archive_read_elapsed: Duration,
+        ctx: ExtractContext<'_>,
+        mut writer: DirectDirectoryRestoreWriter,
+    ) -> Result<(DecodeStreamOutcome, DirectDirectoryRestoreWriter)>
+    where
+        B: DecodeReadBackend,
+    {
+        let mut stage_timings = ExtractStageTimings::default();
+        stage_timings.archive_read += archive_read_elapsed;
+        let source_kind = backend.source_kind();
+        let flags = directory::source_kind_flags(source_kind);
+        let block_descriptors = backend.block_descriptors().to_vec();
+        let archive_header = backend.global_header();
+        let decode_plan = DecodePlan::all(block_descriptors.len());
+        let block_capacity = decode_plan.block_count();
+        let block_profile = ExtractBlockProfile::from_plan(&block_descriptors, &decode_plan);
+        let worker_count = self.num_workers.max(1);
+        let inflight_block_limit = extract_inflight_block_limit(
+            block_capacity,
+            block_profile.budgeted_queue_block_bytes(),
+            &self.performance,
+        );
+        let queue_capacity =
+            decode_queue_capacity(worker_count, block_capacity, inflight_block_limit);
+        let reader_buffer_pool =
+            select_extract_buffer_pool(&self.buffer_pool, block_profile.max_encoded_len);
+        let decode_buffer_pool =
+            select_extract_buffer_pool(&self.buffer_pool, block_profile.max_raw_len);
+
+        let (read_request_tx, read_request_rx) = bounded::<ReadRequest>(queue_capacity);
+        let (task_tx, task_rx) = bounded::<DecodeTask>(queue_capacity);
+        let (result_tx, result_rx) =
+            bounded::<(usize, Duration, Result<DecodedBlock>)>(queue_capacity);
+        let runtime_state = Arc::new(DecodeRuntimeState::new(worker_count, ctx.started_at));
+        let dictionary_bank = Arc::new(backend.dictionary_bank());
+        let reader_handles = backend.spawn(
+            read_request_rx,
+            task_tx.clone(),
+            result_tx.clone(),
+            reader_buffer_pool,
+            worker_count,
+        );
+        let mut worker_handles = Vec::with_capacity(worker_count);
+
+        for worker_id in 0..worker_count {
+            let local_task_rx = task_rx.clone();
+            let local_result_tx = result_tx.clone();
+            let local_runtime = Arc::clone(&runtime_state);
+            let local_buffer_pool = Arc::clone(&decode_buffer_pool);
+            let local_dictionary_bank = Arc::clone(&dictionary_bank);
+            let handle = thread::spawn(move || -> DecodeWorkerOutcome {
+                let started = Instant::now();
+                let mut tasks_completed = 0usize;
+                let mut busy = Duration::ZERO;
+                let mut scratch = CompressionScratchArena::new();
+                local_runtime.mark_worker_started(worker_id);
+
+                while let Ok(task) = local_task_rx.recv() {
+                    let decode_started = Instant::now();
+                    let decoded = decode_block_payload_with_scratch(
+                        task.header,
+                        task.block_data,
+                        &mut scratch,
+                        &local_buffer_pool,
+                        local_dictionary_bank.as_ref(),
+                    );
+                    let busy_elapsed = decode_started.elapsed();
+                    busy += busy_elapsed;
+                    local_runtime.record_worker_task(worker_id, busy_elapsed);
+                    tasks_completed += 1;
+                    if local_result_tx
+                        .send((task.index, task.read_elapsed, decoded))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                local_runtime.mark_worker_stopped(worker_id);
+
+                DecodeWorkerOutcome {
+                    worker_id,
+                    tasks_completed,
+                    busy,
+                    uptime: started.elapsed(),
+                }
+            });
+            worker_handles.push(handle);
+        }
+        drop(result_tx);
+
+        let archive_bytes_total = archive_header.footer_offset + crate::FOOTER_SIZE as u64;
+        let mut archive_bytes_completed = archive_header.payload_offset
+            + u64::from(archive_header.entry_table_len)
+            + u64::from(archive_header.chunk_table_len)
+            + crate::FOOTER_SIZE as u64;
+        let mut submitted = 0usize;
+        let mut received = 0usize;
+        let mut first_error: Option<crate::OxideError> = None;
+        let mut decoded_bytes_completed = 0u64;
+        let mut received_indices = vec![false; block_capacity];
+        let mut last_emit_at = Instant::now();
+        let emit_every = ctx
+            .options
+            .progress_interval
+            .max(Duration::from_millis(100));
+        let mut decode_task_queue_peak = 0usize;
+        let mut decode_result_queue_peak = 0usize;
+
+        let run_result = (|| -> Result<()> {
+            for (block_index, header) in block_descriptors.iter().copied().enumerate() {
+                archive_bytes_completed =
+                    archive_bytes_completed.saturating_add(header.encoded_len as u64);
+
+                while submitted.saturating_sub(received) >= queue_capacity {
+                    let mut decode_ctx = DecodeResultContext {
+                        stage_timings: &mut stage_timings,
+                        total_blocks: block_capacity,
+                        received_indices: &mut received_indices,
+                        runtime_state: &runtime_state,
+                        decoded_bytes_completed: &mut decoded_bytes_completed,
+                        received: &mut received,
+                        first_error: &mut first_error,
+                    };
+                    let outcome = receive_decode_result(&result_rx, &mut decode_ctx)?;
+                    dispatch_direct_decode_result(outcome, &mut writer)?;
+                    decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
+                }
+
+                let submit_started = Instant::now();
+                read_request_tx
+                    .send(ReadRequest {
+                        index: submitted,
+                        block_index: block_index as u32,
+                        encoded_len: header.encoded_len as usize,
+                    })
+                    .map_err(|_| {
+                        crate::OxideError::CompressionError(
+                            "decode read queue closed before submission completed".to_string(),
+                        )
+                    })?;
+                stage_timings.decode_submit += submit_started.elapsed();
+                submitted += 1;
+                runtime_state.record_submission();
+                decode_task_queue_peak = decode_task_queue_peak.max(task_tx.len());
+
+                let mut drained = 0usize;
+                while drained < RESULT_DRAIN_BUDGET {
+                    let result = match result_rx.try_recv() {
+                        Ok(result) => result,
+                        Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+                    };
+                    stage_timings.archive_read += result.1;
+                    let outcome = process_decode_result(
+                        result,
+                        block_capacity,
+                        &mut received_indices,
+                        &runtime_state,
+                        &mut decoded_bytes_completed,
+                        &mut received,
+                        &mut first_error,
+                    )?;
+                    dispatch_direct_decode_result(outcome, &mut writer)?;
+                    drained += 1;
+                }
+                decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
+
+                let force = false;
+                if progress_emit_due(&last_emit_at, emit_every, force) {
+                    emit_extract_progress_if_due(ExtractProgressIfDueCtx {
+                        source_kind,
+                        started_at: ctx.started_at,
+                        archive_bytes_completed,
+                        decoded_bytes_completed,
+                        blocks_total: block_capacity as u32,
+                        blocks_completed: received as u32,
+                        runtime: runtime_state.snapshot(),
+                        emit_every,
+                        last_emit_at: &mut last_emit_at,
+                        force,
+                        sink: ctx.sink,
+                    });
+                }
+            }
+
+            if submitted != block_capacity && first_error.is_none() {
+                return Err(crate::OxideError::InvalidFormat(
+                    "archive block count mismatch during decode",
+                ));
+            }
+
+            while received < submitted {
+                let mut decode_ctx = DecodeResultContext {
+                    stage_timings: &mut stage_timings,
+                    total_blocks: block_capacity,
+                    received_indices: &mut received_indices,
+                    runtime_state: &runtime_state,
+                    decoded_bytes_completed: &mut decoded_bytes_completed,
+                    received: &mut received,
+                    first_error: &mut first_error,
+                };
+                let outcome = receive_decode_result(&result_rx, &mut decode_ctx)?;
+                dispatch_direct_decode_result(outcome, &mut writer)?;
+                decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
+            }
+
+            Ok(())
+        })();
+
+        drop(read_request_tx);
+        drop(task_tx);
+        drop(result_rx);
+
+        let io_reader_result = join_io_readers(reader_handles);
+        let workers_result = join_decode_workers(worker_handles);
+
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        io_reader_result?;
+        if let Err(error) = run_result {
+            return Err(error);
+        }
+        let workers = workers_result?;
+
+        if ctx.options.emit_final_progress {
+            let force = true;
+            if progress_emit_due(&last_emit_at, emit_every, force) {
+                emit_extract_progress(
+                    source_kind,
+                    ctx.started_at,
+                    archive_bytes_completed,
+                    decoded_bytes_completed,
+                    block_capacity as u32,
+                    received as u32,
+                    runtime_state.snapshot(),
+                    ctx.sink,
+                );
+            }
+        }
+
+        let pipeline_stats = ExtractPipelineStats {
+            decode_task_queue_capacity: queue_capacity,
+            decode_task_queue_peak,
+            decode_result_queue_capacity: queue_capacity,
+            decode_result_queue_peak,
+            ..ExtractPipelineStats::default()
+        };
+
+        Ok((
+            DecodeStreamOutcome {
+                flags,
+                decoded_bytes_total: decoded_bytes_completed,
+                archive_bytes_total,
+                blocks_total: submitted as u32,
+                workers,
+                stage_timings,
+                pipeline_stats,
+            },
+            writer,
+        ))
     }
 
     fn decode_archive_to_writer_with_backend<W, B>(
@@ -1025,3 +1344,15 @@ impl Extractor {
 }
 
 pub use self::decode_support::decode_block_payload;
+
+fn dispatch_direct_decode_result(
+    outcome: ProcessedDecodeResult,
+    writer: &mut DirectDirectoryRestoreWriter,
+) -> Result<()> {
+    match outcome {
+        ProcessedDecodeResult::Block { index, bytes } => {
+            writer.write_decoded_block(index, OwnedChunk::from(bytes))
+        }
+        ProcessedDecodeResult::NewError | ProcessedDecodeResult::IgnoredAfterError => Ok(()),
+    }
+}

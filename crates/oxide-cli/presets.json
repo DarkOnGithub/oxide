@@ -18,7 +18,7 @@
       "writer_queue_blocks": 1024,
       "result_wait_ms": 1,
       "raw_chunk_dedup_window_blocks": 131072,
-      "block_dedup_window_blocks": 131072,
+      "block_dedup_window_blocks": 0,
       "dictionary_mode": "auto",
       "chunking": {
         "mode": "fixed"
@@ -67,7 +67,7 @@
         "inflight_blocks_per_worker": 48,
         "producer_threads": 3,
         "raw_chunk_dedup_window_blocks": 0,
-        "block_dedup_window_blocks": 131072,
+        "block_dedup_window_blocks": 0,
         "writer_queue_blocks": 768,
         "result_wait_ms": 1,
         "dictionary_mode": "off"
@@ -96,34 +96,7 @@
         "writer_queue_blocks": 128,
         "result_wait_ms": 4,
         "raw_chunk_dedup_window_blocks": 0,
-        "block_dedup_window_blocks": 131072,
-        "dictionary_mode": "off"
-      },
-      "extreme": {
-        "compression": {
-          "compressor": "lzma",
-          "level": 9,
-          "extreme": false,
-          "dictionary_size": "8M"
-        },
-        "chunking": {
-          "mode": "fixed",
-          "min_block_size": "1M",
-          "max_block_size": "8M"
-        },
-        "block_size": "4M",
-        "workers": 0,
-        "pool_capacity": "4M",
-        "pool_buffers": 96,
-        "stream_read_buffer": "32M",
-        "inflight_bytes": "1G",
-        "inflight_blocks_per_worker": 6,
-        "producer_threads": 3,
-        "directory_mmap_threshold": "16M",
-        "writer_queue_blocks": 96,
-        "result_wait_ms": 6,
-        "raw_chunk_dedup_window_blocks": 0,
-        "block_dedup_window_blocks": 131072,
+        "block_dedup_window_blocks": 0,
         "dictionary_mode": "off"
       }
     }
