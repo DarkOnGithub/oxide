@@ -264,6 +264,14 @@ MODE_BASELINES: dict[str, str] = {
 }
 
 
+def baseline_extract_tool(mode: str) -> str:
+    """Extract step tool for baseline (unsquashfs pairs mksquashfs archives)."""
+    archive_tool = MODE_BASELINES[mode]
+    if archive_tool == "mksquashfs":
+        return "unsquashfs"
+    return archive_tool
+
+
 def resolve_tool(*candidates: str) -> str:
     for candidate in candidates:
         resolved = shutil.which(candidate)
@@ -366,7 +374,11 @@ def parse_args() -> Settings:
         "--skip-baseline",
         action="store_true",
         default=env_value("BENCHMARK_SKIP_BASELINE", "0") == "1",
-        help="Do not run the baseline tool (mksquashfs/unsquashfs or 7zz).",
+        help=(
+            "Do not run the baseline tool (mksquashfs/unsquashfs or 7zz). "
+            "Comparisons average baseline steps from prior runs with the same "
+            "--source (resolved path) and same --skip-extract setting in run.json."
+        ),
     )
     parser.add_argument(
         "--no-drop-caches",
@@ -1195,6 +1207,160 @@ def result_to_stats(rows: Sequence[ResultRow], source_bytes: int) -> list[ModeSt
     return stats_rows
 
 
+def _read_run_json(run_dir: Path) -> dict[str, object] | None:
+    path = run_dir / "run.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _donor_run_matches_current_benchmark(
+    payload: dict[str, object], settings: Settings
+) -> bool:
+    """Pool baseline only from runs that used the same source path and extract flag."""
+    if bool(payload.get("skip_baseline")):
+        return False
+    if bool(payload.get("skip_extract")) != settings.skip_extract:
+        return False
+    p_src = payload.get("source")
+    if p_src is None:
+        return False
+    try:
+        return Path(str(p_src)).resolve() == settings.source.resolve()
+    except OSError:
+        return str(p_src) == str(settings.source)
+
+
+def _record_is_baseline_step(rec: dict[str, object]) -> bool:
+    mode = str(rec.get("mode") or "")
+    if mode not in MODE_BASELINES:
+        return False
+    tool = str(rec.get("tool") or "")
+    phase = str(rec.get("phase") or "")
+    if phase == "archive":
+        return tool == MODE_BASELINES[mode]
+    if phase == "extract":
+        return tool == baseline_extract_tool(mode)
+    return False
+
+
+def load_baseline_result_rows_from_telemetry_run(
+    run_dir: Path, settings: Settings, source_bytes: int
+) -> list[ResultRow]:
+    """Rebuild ResultRow list for baseline tools from a prior run's steps.jsonl."""
+    path = run_dir / "steps.jsonl"
+    if not path.is_file():
+        return []
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    mode_set = frozenset(settings.modes)
+    workers_set = frozenset(settings.worker_modes)
+    rows: list[ResultRow] = []
+
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec: dict[str, object] = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("tool") == "oxide":
+            continue
+        ev = rec.get("event")
+        if ev is not None and ev != "step":
+            continue
+        mode = str(rec.get("mode") or "")
+        workers = str(rec.get("workers") or "")
+        if mode not in mode_set or workers not in workers_set:
+            continue
+        if not _record_is_baseline_step(rec):
+            continue
+        phase = str(rec.get("phase") or "")
+        if settings.skip_extract and phase == "extract":
+            continue
+        tp = rec.get("telemetry_path")
+        rows.append(
+            ResultRow(
+                tool=str(rec.get("tool") or ""),
+                phase=phase,
+                mode=mode,
+                workers=workers,
+                pass_num=int(rec.get("pass_num") or 0),
+                elapsed_ns=int(rec.get("elapsed_ns") or 0),
+                throughput_mib_s=float(rec.get("throughput_mib_s") or 0.0),
+                output_bytes=int(rec.get("output_bytes") or 0),
+                input_bytes=int(rec.get("input_bytes") or source_bytes),
+                command=str(rec.get("command") or ""),
+                output_path=str(rec.get("output_path") or ""),
+                stdout_path=str(rec.get("stdout_path") or ""),
+                stderr_path=str(rec.get("stderr_path") or ""),
+                telemetry_path=str(tp) if tp else None,
+            )
+        )
+    return rows
+
+
+def load_baseline_rows_from_prior_telemetry_runs(
+    settings: Settings,
+    current_run_dir: Path,
+    source_bytes: int,
+) -> tuple[list[ResultRow], list[Path], int]:
+    """
+    Load baseline steps from prior telemetry runs whose ``run.json`` reports the
+    same ``--source`` (resolved path) and the same ``--skip-extract`` flag as
+    this run. Returned rows are merged into ``results``; ``result_to_stats``
+    averages every sample per tool/phase/mode/workers.
+
+    Returns ``(rows, contributor_run_dirs, skipped_incompatible_run_count)``.
+    """
+    base = settings.telemetry_dir
+    if not base.is_dir():
+        return [], [], 0
+    try:
+        current_resolved = current_run_dir.resolve()
+    except OSError:
+        current_resolved = current_run_dir
+
+    candidates = sorted(
+        (p for p in base.iterdir() if p.is_dir()),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    all_rows: list[ResultRow] = []
+    contributors: list[Path] = []
+    skipped_incompatible = 0
+    for run_dir in candidates:
+        try:
+            if run_dir.resolve() == current_resolved:
+                continue
+        except OSError:
+            if run_dir == current_run_dir:
+                continue
+        payload = _read_run_json(run_dir)
+        if payload is None:
+            continue
+        if bool(payload.get("skip_baseline")):
+            continue
+        if not _donor_run_matches_current_benchmark(payload, settings):
+            skipped_incompatible += 1
+            continue
+        loaded = load_baseline_result_rows_from_telemetry_run(
+            run_dir, settings, source_bytes
+        )
+        if loaded:
+            all_rows.extend(loaded)
+            contributors.append(run_dir)
+    return all_rows, contributors, skipped_incompatible
+
+
 def format_quiet_step(row: ResultRow) -> str:
     return (
         f"{row.tool} {row.phase} ({row.mode}, workers={row.workers}) "
@@ -1292,7 +1458,9 @@ def mode_comparisons(
             if oxide_archive is None or baseline_archive is None:
                 continue
             oxide_extract = lookup.get(("oxide", "extract", mode, workers))
-            baseline_extract = lookup.get((baseline_tool, "extract", mode, workers))
+            baseline_extract = lookup.get(
+                (baseline_extract_tool(mode), "extract", mode, workers)
+            )
 
             archive_fastest_tool = (
                 "oxide"
@@ -1379,7 +1547,7 @@ def print_run_header(
             f"modes: [cyan]{', '.join(settings.modes)}[/cyan]\n"
             f"worker modes: [cyan]{worker_modes}[/cyan]\n"
             f"passes: [cyan]{settings.passes}[/cyan]  explicit threads: [cyan]{settings.threads}[/cyan]  auto threads: [cyan]{settings.logical_threads}[/cyan]\n"
-            f"baseline: [cyan]{'skipped' if settings.skip_baseline else 'enabled'}[/cyan]\n"
+            f"baseline: [cyan]{'skipped (reuse baseline, same source)' if settings.skip_baseline else 'enabled'}[/cyan]\n"
             f"oxide preset mode: [cyan]{oxide_preset_mode}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
             f"oxide presets: [cyan]{OXIDE_PRESETS_PATH}[/cyan]\n"
@@ -1493,7 +1661,12 @@ def print_analysis(
             ("oxide", "extract", comparison.mode, comparison.workers)
         )
         extract_base = lookup.get(
-            (baseline_tool, "extract", comparison.mode, comparison.workers)
+            (
+                baseline_extract_tool(comparison.mode),
+                "extract",
+                comparison.mode,
+                comparison.workers,
+            )
         )
 
         if archive_oxide is not None and archive_base is not None:
@@ -2253,6 +2426,60 @@ def main() -> int:
         print(f"\nBenchmark aborted: {exc}", file=sys.stderr)
     finally:
         if results:
+            if settings.skip_baseline:
+                baseline_rows, contributor_runs, skipped_runs = (
+                    load_baseline_rows_from_prior_telemetry_runs(
+                        settings, telemetry_run_dir, source_bytes
+                    )
+                )
+                if baseline_rows:
+                    results.extend(baseline_rows)
+                    if not settings.quiet:
+                        names = sorted(p.name for p in contributor_runs)
+                        preview = ", ".join(names[:3])
+                        extra = (
+                            f" (+{len(names) - 3} more)"
+                            if len(names) > 3
+                            else ""
+                        )
+                        console.print(
+                            f"[dim]Baseline averaged across {len(contributor_runs)} prior "
+                            f"run(s) with same source & skip-extract ({len(baseline_rows)} samples): "
+                            f"{preview}{extra}[/dim]"
+                        )
+                        if skipped_runs:
+                            console.print(
+                                f"[dim]Skipped {skipped_runs} prior run(s) "
+                                "(different --source or --skip-extract).[/dim]\n"
+                            )
+                        else:
+                            console.print()
+                elif not settings.quiet:
+                    parts = [
+                        "[yellow]Warning:[/yellow] --skip-baseline but no compatible "
+                        f"prior baseline under {settings.telemetry_dir}."
+                    ]
+                    if skipped_runs:
+                        parts.append(
+                            f"({skipped_runs} run(s) ignored: not same source path or skip-extract.)"
+                        )
+                    else:
+                        parts.append(
+                            "(Record at least one baseline run without --skip-baseline.)"
+                        )
+                    console.print(" ".join(parts) + "\n")
+                else:
+                    print(
+                        "Warning: --skip-baseline but no compatible prior baseline telemetry "
+                        f"under {settings.telemetry_dir}"
+                        + (
+                            f" ({skipped_runs} run(s): wrong source or skip-extract)"
+                            if skipped_runs
+                            else ""
+                        ),
+                        file=sys.stderr,
+                    )
+
             print_results_table(results, source_bytes, settings.quiet)
 
             if telemetry_run_dir.exists():
