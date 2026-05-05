@@ -292,7 +292,7 @@ impl Default for PipelinePerformanceOptions {
             directory_mmap_threshold_bytes: 8 * 1024 * 1024,
             writer_result_queue_blocks: 1024,
             raw_chunk_dedup_window_blocks: 131_072,
-            block_dedup_window_blocks: 131_072,
+            block_dedup_window_blocks: 0,
             extract_write_shards: 1,
             extract_preserve_metadata: true,
         }
