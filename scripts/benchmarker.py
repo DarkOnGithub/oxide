@@ -55,7 +55,6 @@ BENCHMARK_BLOCK_SIZE_OVERRIDES: dict[str, str] = {
     "fast": "1M",
     "balanced": "1M",
     "ultra": "4M",
-    "extreme": "8M",
 }
 
 
@@ -214,7 +213,7 @@ def load_mode_configs_from_oxide_presets(
         )
 
     mode_configs: dict[str, ModeConfig] = {}
-    for mode in ("fast", "balanced", "ultra", "extreme"):
+    for mode in ("fast", "balanced", "ultra"):
         preset = presets.get(mode)
         if not isinstance(preset, dict):
             raise SystemExit(
@@ -262,7 +261,6 @@ MODE_BASELINES: dict[str, str] = {
     "fast": "mksquashfs",
     "balanced": "mksquashfs",
     "ultra": "7zz",
-    "extreme": "7zz",
 }
 
 
@@ -386,7 +384,7 @@ def parse_args() -> Settings:
     parser.add_argument(
         "--modes",
         nargs="+",
-        default=["fast", "balanced", "ultra", "extreme"],
+        default=["fast", "balanced", "ultra"],
     )
     parser.add_argument(
         "--squashfs-block-size",

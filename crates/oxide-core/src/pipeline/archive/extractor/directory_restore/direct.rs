@@ -11,9 +11,14 @@ use super::*;
 use crate::format::{ArchiveManifest, ChunkDescriptor};
 use crate::pipeline::archive::reorder_writer::{OwnedChunk, SharedChunk};
 
-const DIRECT_WRITE_QUEUE_CAPACITY: usize = 256;
+/// Per-shard task queue. Larger values reduce main-thread blocking when shards
+/// briefly fall behind (telemetry often pegged smaller queues at full capacity).
+const DIRECT_WRITE_QUEUE_CAPACITY: usize = 1024;
 /// Upper bound on concurrently open output files per direct-write shard.
 const DIRECT_FILE_CACHE_MAX_PER_SHARD: usize = 96;
+/// Bounded parent-directory fd cache per shard (`openat`); must stay small for `ulimit`.
+#[cfg(unix)]
+const PARENT_DIR_LRU_CAP: usize = 8;
 
 #[derive(Debug)]
 pub(crate) struct DirectDirectoryRestoreWriter {
@@ -424,7 +429,11 @@ fn build_block_extents(
 /// within typical `RLIMIT_NOFILE` soft limits (each shard keeps an LRU of open outputs).
 fn direct_write_file_cache_max_open(write_shard_count: usize) -> usize {
     let shards = write_shard_count.max(1);
-    let budget = fd_budget_for_direct_write_file_cache();
+    #[cfg(unix)]
+    let reserve = shards.saturating_mul(PARENT_DIR_LRU_CAP);
+    #[cfg(not(unix))]
+    let reserve = 0usize;
+    let budget = fd_budget_for_direct_write_file_cache().saturating_sub(reserve);
     let per = budget / shards;
     per.clamp(1, DIRECT_FILE_CACHE_MAX_PER_SHARD)
 }
@@ -486,6 +495,8 @@ struct DirectFileCache {
     max_open: usize,
     files: HashMap<usize, fs::File>,
     order: VecDeque<usize>,
+    #[cfg(unix)]
+    parent_dirs: ParentDirLru,
 }
 
 impl DirectFileCache {
@@ -494,6 +505,8 @@ impl DirectFileCache {
             max_open: max_open.max(1),
             files: HashMap::new(),
             order: VecDeque::new(),
+            #[cfg(unix)]
+            parent_dirs: ParentDirLru::new(PARENT_DIR_LRU_CAP),
         }
     }
 
@@ -512,6 +525,9 @@ impl DirectFileCache {
             self.files.remove(&evicted);
         }
 
+        #[cfg(unix)]
+        let file = open_direct_file(path, &mut self.parent_dirs)?;
+        #[cfg(not(unix))]
         let file = open_direct_file(path)?;
         self.files.insert(file_id, file);
         self.order.push_back(file_id);
@@ -528,39 +544,83 @@ impl DirectFileCache {
     }
 }
 
+/// Small LRU of directory fds for `openat` (evicted entries are closed on drop).
 #[cfg(unix)]
-fn open_direct_file(path: &Path) -> Result<fs::File> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
+#[derive(Debug)]
+struct ParentDirLru {
+    cap: usize,
+    entries: VecDeque<(PathBuf, fs::File)>,
+}
 
-    let parent = path.parent().ok_or(crate::OxideError::InvalidFormat(
-        "direct restore file path has no parent",
-    ))?;
-    let file_name = path.file_name().ok_or(crate::OxideError::InvalidFormat(
-        "direct restore file path has no file name",
-    ))?;
-    // Open the parent only for the `openat` syscall. Caching parent directory fds
-    // without eviction grows without bound on large trees (many unique parents per
-    // shard) and exhausts the process file descriptor limit.
-    let parent_file = fs::File::open(parent)?;
-
-    let file_name = CString::new(file_name.as_bytes()).map_err(|_| {
-        crate::OxideError::InvalidFormat("direct restore file name contains nul byte")
-    })?;
-    let fd = unsafe {
-        libc::openat(
-            parent_file.as_raw_fd(),
-            file_name.as_ptr(),
-            libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC,
-            0o666,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error().into());
+#[cfg(unix)]
+impl ParentDirLru {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            entries: VecDeque::new(),
+        }
     }
 
-    Ok(unsafe { fs::File::from_raw_fd(fd) })
+    fn open_child_file(&mut self, path: &Path) -> Result<fs::File> {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        let parent = path.parent().ok_or(crate::OxideError::InvalidFormat(
+            "direct restore file path has no parent",
+        ))?;
+        let file_name = path.file_name().ok_or(crate::OxideError::InvalidFormat(
+            "direct restore file path has no file name",
+        ))?;
+        let parent_buf = parent.to_path_buf();
+        let file_name = CString::new(file_name.as_bytes()).map_err(|_| {
+            crate::OxideError::InvalidFormat("direct restore file name contains nul byte")
+        })?;
+
+        if let Some(i) = self.entries.iter().position(|(p, _)| p == &parent_buf) {
+            if i != self.entries.len().saturating_sub(1) {
+                let entry = self.entries.remove(i).expect("index valid");
+                self.entries.push_back(entry);
+            }
+            let parent_file = &self.entries.back().expect("non-empty").1;
+            let fd = unsafe {
+                libc::openat(
+                    parent_file.as_raw_fd(),
+                    file_name.as_ptr(),
+                    libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC,
+                    0o666,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            return Ok(unsafe { fs::File::from_raw_fd(fd) });
+        }
+
+        while self.entries.len() >= self.cap {
+            self.entries.pop_front();
+        }
+
+        let parent_file = fs::File::open(parent)?;
+        let fd = unsafe {
+            libc::openat(
+                parent_file.as_raw_fd(),
+                file_name.as_ptr(),
+                libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC,
+                0o666,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        self.entries.push_back((parent_buf, parent_file));
+        Ok(unsafe { fs::File::from_raw_fd(fd) })
+    }
+}
+
+#[cfg(unix)]
+fn open_direct_file(path: &Path, parents: &mut ParentDirLru) -> Result<fs::File> {
+    parents.open_child_file(path)
 }
 
 #[cfg(not(unix))]
