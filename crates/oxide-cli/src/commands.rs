@@ -173,18 +173,49 @@ pub fn extract(args: ExtractArgs) -> AppResult {
         only,
         only_regex,
         stats_interval_ms,
+        preset,
+        preset_file,
         workers,
         extract_write_shards,
         telemetry_details,
     } = args;
 
     let output_path = output.unwrap_or_else(|| default_extract_output_path(&input));
-    let pipeline = build_extract_pipeline(workers, extract_write_shards);
+    let workers_explicitly_requested = workers.is_some();
+    let settings = resolve_archive_settings(
+        preset_file.as_deref(),
+        preset.as_deref(),
+        ArchiveOverrides {
+            workers,
+            ..Default::default()
+        },
+    )?;
+    let pipeline = build_extract_pipeline(
+        &settings,
+        extract_write_shards,
+        workers_explicitly_requested,
+    );
     let telemetry_options = RunTelemetryOptions {
         progress_interval: Duration::from_millis(stats_interval_ms.max(50)),
         emit_final_progress: true,
         include_telemetry_snapshot: true,
     };
+
+    let interactive_progress = io::stderr().is_terminal();
+    if interactive_progress {
+        eprintln!(
+            "{}",
+            tagged_message(
+                StreamTarget::Stderr,
+                Tone::Info,
+                "preset",
+                &format!(
+                    "extract using {} from {}",
+                    settings.profile_name, settings.profile_source
+                ),
+            )
+        );
+    }
 
     let mut sink = ExtractCliSink::new();
     let report = if only.is_empty() && only_regex.is_empty() {
@@ -224,13 +255,11 @@ pub fn tree(args: TreeArgs) -> AppResult {
     Ok(())
 }
 
-fn build_archive_pipeline(
+fn pipeline_performance_from_resolved_settings(
     settings: &ResolvedArchiveSettings,
-    workers: usize,
     producer_threads: usize,
-    buffer_pool: Arc<BufferPool>,
-) -> AppResult<ArchivePipeline> {
-    let performance = PipelinePerformanceOptions {
+) -> PipelinePerformanceOptions {
+    PipelinePerformanceOptions {
         compression_level: settings.compression_level,
         lzma_extreme: settings.compression_extreme,
         lzma_dictionary_size: settings.lzma_dictionary_size,
@@ -245,7 +274,16 @@ fn build_archive_pipeline(
         raw_chunk_dedup_window_blocks: settings.raw_chunk_dedup_window_blocks,
         block_dedup_window_blocks: settings.block_dedup_window_blocks,
         ..Default::default()
-    };
+    }
+}
+
+fn build_archive_pipeline(
+    settings: &ResolvedArchiveSettings,
+    workers: usize,
+    producer_threads: usize,
+    buffer_pool: Arc<BufferPool>,
+) -> AppResult<ArchivePipeline> {
+    let performance = pipeline_performance_from_resolved_settings(settings, producer_threads);
 
     let mut config = ArchivePipelineConfig::new(
         settings.block_size.max(1),
@@ -269,21 +307,35 @@ fn import_dictionary_bank(path: &std::path::Path) -> AppResult<oxide_core::Archi
     Ok(reader.manifest().dictionary_bank().clone())
 }
 
-fn build_extract_pipeline(workers: usize, extract_write_shards: usize) -> ArchivePipeline {
-    let decode_workers = workers.max(1);
-    let buffer_pool = Arc::new(BufferPool::new(
-        1024 * 1024,
-        decode_workers.saturating_mul(8),
-    ));
-    let mut config = ArchivePipelineConfig::new(
-        1024 * 1024,
+fn build_extract_pipeline(
+    settings: &ResolvedArchiveSettings,
+    extract_write_shards: usize,
+    workers_explicitly_requested: bool,
+) -> ArchivePipeline {
+    let decode_workers = resolve_archive_workers(settings.workers);
+    let producer_threads = resolve_archive_producer_threads(
+        settings.producer_threads,
         decode_workers,
-        buffer_pool,
-        CompressionAlgo::Lz4,
+        workers_explicitly_requested,
+        false,
     );
-    let mut performance = PipelinePerformanceOptions::default();
+    let buffer_pool = Arc::new(BufferPool::new(
+        settings.pool_capacity.max(1),
+        settings.pool_buffers.max(1),
+    ));
+    let mut performance =
+        pipeline_performance_from_resolved_settings(settings, producer_threads);
     performance.extract_write_shards = extract_write_shards.max(1);
     performance.extract_preserve_metadata = false;
+
+    let mut config = ArchivePipelineConfig::new(
+        settings.block_size.max(1),
+        decode_workers,
+        buffer_pool,
+        settings.compression,
+    );
+    config.chunking_policy = settings.chunking_policy;
+    config.skip_compression = settings.skip_compression;
     config.performance = performance;
     ArchivePipeline::new(config)
 }

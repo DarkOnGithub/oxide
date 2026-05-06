@@ -1838,7 +1838,7 @@ def oxide_archive_command(
 
 
 def oxide_extract_command(
-    settings: Settings, _: str, __: ModeConfig, workers: str
+    settings: Settings, mode: str, __: ModeConfig, workers: str
 ) -> list[str]:
     command = [
         str(settings.oxide_bin),
@@ -1846,6 +1846,8 @@ def oxide_extract_command(
         str(settings.oxide_output),
         "--output",
         str(settings.oxide_extract_dir),
+        "--preset",
+        mode,
     ]
     if workers != "auto":
         command.extend(["--workers", workers])
