@@ -1288,10 +1288,9 @@ impl Extractor {
             reorder_pending_bytes_peak: reorder_stats.pending_bytes_peak,
             ..ExtractPipelineStats::default()
         };
-        pipeline_stats.record_write_shard_queue_peak(
-            0,
-            ordered_write_forwarder_stats.ordered_write_queue_peak,
-        );
+        // Single logical output sink (file writer or shard-0 metrics); do not copy
+        // `ordered_write_queue_peak` here — that belongs in `ordered_write_queue_peak` only.
+        pipeline_stats.set_write_shard_count(1);
 
         Ok((
             DecodeStreamOutcome {

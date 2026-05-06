@@ -929,6 +929,10 @@ fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>
         Some(ReportValue::U64(1))
     ));
     assert!(matches!(
+        report.extensions.get("pipeline.ordered_write_queue_peak"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
         report.extensions.get("pipeline.write_shard_queue_peak[0]"),
         Some(ReportValue::U64(_))
     ));
@@ -1080,6 +1084,10 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
     assert!(matches!(
         report.extensions.get("pipeline.write_shard_count"),
         Some(ReportValue::U64(1))
+    ));
+    assert!(matches!(
+        report.extensions.get("pipeline.ordered_write_queue_peak"),
+        Some(ReportValue::U64(_))
     ));
     assert!(matches!(
         report.extensions.get("pipeline.write_shard_queue_peak[0]"),
