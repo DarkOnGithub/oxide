@@ -438,6 +438,34 @@ pub fn build_extract_report(
     let elapsed_us = elapsed.as_micros().max(1).min(u64::MAX as u128) as u64;
     let effective_cores = decode_busy_us as f64 / elapsed_us as f64;
 
+    let shard_payload_sum_us = stage_timings
+        .write_shard_output_data
+        .iter()
+        .map(|duration| duration.as_micros())
+        .sum::<u128>()
+        .min(u64::MAX as u128) as u64;
+    let shard_payload_max_us = stage_timings
+        .write_shard_output_data
+        .iter()
+        .map(|duration| duration.as_micros())
+        .max()
+        .unwrap_or(0)
+        .min(u64::MAX as u128) as u64;
+    let (payload_sum_us, payload_max_us) = if shard_payload_sum_us > 0 {
+        (shard_payload_sum_us, shard_payload_max_us)
+    } else {
+        let fallback = stage_timings
+            .output_data
+            .as_micros()
+            .min(u64::MAX as u128) as u64;
+        (fallback, fallback)
+    };
+    let write_payload_wall_ratio = if payload_sum_us > 0 {
+        payload_sum_us as f64 / elapsed_us as f64
+    } else {
+        0.0
+    };
+
     extensions.insert(
         "runtime.decode_busy_us".to_string(),
         ReportValue::U64(decode_busy_us),
@@ -445,6 +473,18 @@ pub fn build_extract_report(
     extensions.insert(
         "runtime.effective_cores".to_string(),
         ReportValue::F64(effective_cores),
+    );
+    extensions.insert(
+        "runtime.write_shard_payload_sum_us".to_string(),
+        ReportValue::U64(payload_sum_us),
+    );
+    extensions.insert(
+        "runtime.write_shard_payload_max_us".to_string(),
+        ReportValue::U64(payload_max_us),
+    );
+    extensions.insert(
+        "runtime.write_payload_wall_ratio".to_string(),
+        ReportValue::F64(write_payload_wall_ratio),
     );
     extensions.insert(
         "runtime.worker_count".to_string(),

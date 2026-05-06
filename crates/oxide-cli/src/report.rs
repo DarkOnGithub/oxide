@@ -432,6 +432,24 @@ pub fn print_extract_report_summary(summary: ExtractReportSummary<'_>) {
         );
         push_optional_string_row(
             &mut runtime_rows,
+            "Write shard payload (sum)",
+            extension_u64(&report.extensions, "runtime.write_shard_payload_sum_us")
+                .map(|value| format_duration(Duration::from_micros(value))),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Write shard payload (max)",
+            extension_u64(&report.extensions, "runtime.write_shard_payload_max_us")
+                .map(|value| format_duration(Duration::from_micros(value))),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
+            "Write shard payload wall ratio",
+            extension_f64(&report.extensions, "runtime.write_payload_wall_ratio")
+                .map(|value| format!("{value:.2}x")),
+        );
+        push_optional_string_row(
+            &mut runtime_rows,
             "Decode queue peak",
             extension_u64(&report.extensions, "pipeline.decode_task_queue_peak")
                 .map(|value| value.to_string()),

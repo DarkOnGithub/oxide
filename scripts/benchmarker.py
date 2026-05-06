@@ -659,10 +659,18 @@ def parse_scalar_value(label: str, value: str) -> int | float | str | None:
             return float(raw)
         except ValueError:
             return raw
+    if normalized == "write_shard_payload_wall_ratio":
+        raw_ratio = raw.lower().rstrip("x").strip()
+        try:
+            return float(raw_ratio)
+        except ValueError:
+            return raw
     if normalized in {
         "compress_busy",
         "compression_busy",
         "decode_busy",
+        "write_shard_payload_sum",
+        "write_shard_payload_max",
     }:
         return parse_duration_to_us(raw)
     if normalized in {
