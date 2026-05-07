@@ -222,10 +222,7 @@ impl ArchivePipeline {
     }
 
     #[inline]
-    pub fn select_stored_payload<'a>(
-        source: &'a [u8],
-        compressed: &'a [u8],
-    ) -> (&'a [u8], bool) {
+    pub fn select_stored_payload<'a>(source: &'a [u8], compressed: &'a [u8]) -> (&'a [u8], bool) {
         super::archiver::select_stored_payload(source, compressed)
     }
 

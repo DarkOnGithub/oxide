@@ -38,14 +38,15 @@ mod tuning;
 use self::decode_plan::DecodePlan;
 use self::decode_support::{
     DecodeResultContext, DecodeStreamOutcome, DecodedBlock, OrderedWriteTask, OrderedWriterOutcome,
-    ProcessedDecodeResult, abort_ordered_writer, decode_block_payload_with_scratch, forward_processed_decode_result,
-    join_decode_workers, join_io_readers, join_ordered_write_forwarder, join_ordered_writer,
-    process_decode_result, read_exact_file_at, receive_decode_result,
-    spawn_ordered_write_forwarder, spawn_ordered_writer,
+    ProcessedDecodeResult, abort_ordered_writer, decode_block_payload_with_scratch,
+    forward_processed_decode_result, join_decode_workers, join_io_readers,
+    join_ordered_write_forwarder, join_ordered_writer, process_decode_result, read_exact_file_at,
+    receive_decode_result, spawn_ordered_write_forwarder, spawn_ordered_writer,
 };
 use self::directory_restore::{
-    DirectDirectoryRestoreWriter, DirectoryExtractSelection, DirectoryRestoreStats, DirectoryRestoreWriter,
-    FilteredDirectoryRestoreWriter, OUTPUT_BUFFER_CAPACITY, apply_entry_metadata,
+    DirectDirectoryRestoreWriter, DirectoryExtractSelection, DirectoryRestoreStats,
+    DirectoryRestoreWriter, FilteredDirectoryRestoreWriter, OUTPUT_BUFFER_CAPACITY,
+    apply_entry_metadata,
 };
 use self::file_writer::{FileChunkWriter, VecChunkWriter, apply_file_restore_stats};
 use self::read_backend::{
@@ -449,7 +450,7 @@ impl Extractor {
             output_path,
             manifest,
             &block_descriptors,
-            self.performance.extract_write_shards.max(1),
+            self.performance.extract_write_shards,
             self.performance.extract_preserve_metadata,
         )?;
         let backend = ParallelFileDecodeReadBackend::new(archive, file)?;

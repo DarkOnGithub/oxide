@@ -50,8 +50,8 @@ pub use pipeline::{
 pub use telemetry::worker::{DefaultWorkerTelemetry, WorkerTelemetry};
 pub use telemetry::{
     ArchiveProgressEvent, ArchiveReport, ArchiveRun, ExtractProgressEvent, ExtractReport,
-    ProfileEvent, ReportValue, RunReport, RunTelemetryOptions,
-    TelemetryEvent, TelemetrySink, ThreadReport, WorkerReport,
+    ProfileEvent, ReportValue, RunReport, RunTelemetryOptions, TelemetryEvent, TelemetrySink,
+    ThreadReport, WorkerReport,
 };
 pub use types::{
     Batch, BatchData, ChunkEncodingPlan, CompressedBlock, CompressedPayload, CompressionAlgo,

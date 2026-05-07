@@ -454,10 +454,7 @@ pub fn build_extract_report(
     let (payload_sum_us, payload_max_us) = if shard_payload_sum_us > 0 {
         (shard_payload_sum_us, shard_payload_max_us)
     } else {
-        let fallback = stage_timings
-            .output_data
-            .as_micros()
-            .min(u64::MAX as u128) as u64;
+        let fallback = stage_timings.output_data.as_micros().min(u64::MAX as u128) as u64;
         (fallback, fallback)
     };
     let write_payload_wall_ratio = if payload_sum_us > 0 {

@@ -323,9 +323,8 @@ fn build_extract_pipeline(
         settings.pool_capacity.max(1),
         settings.pool_buffers.max(1),
     ));
-    let mut performance =
-        pipeline_performance_from_resolved_settings(settings, producer_threads);
-    performance.extract_write_shards = extract_write_shards.max(1);
+    let mut performance = pipeline_performance_from_resolved_settings(settings, producer_threads);
+    performance.extract_write_shards = extract_write_shards;
     performance.extract_preserve_metadata = false;
 
     let mut config = ArchivePipelineConfig::new(
