@@ -1856,6 +1856,8 @@ def oxide_extract_command(
         str(settings.oxide_extract_dir),
         "--preset",
         mode,
+        "--extract-write-shards",
+        "1b"
     ]
     if workers != "auto":
         command.extend(["--workers", workers])

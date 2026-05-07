@@ -87,7 +87,7 @@ impl DirectDirectoryRestoreWriter {
         )?;
         stats.record_output_prepare_directories(started.elapsed());
 
-        let shard_count = write_shards.max(1);
+        let shard_count = resolve_extract_write_shards(&entries, write_shards);
         stats.ensure_write_shards(shard_count);
         let block_extents = build_block_extents(block_descriptors, &files, shard_count)?;
         let mut task_txs = Vec::with_capacity(shard_count);
@@ -115,14 +115,18 @@ impl DirectDirectoryRestoreWriter {
         })
     }
 
-    pub(crate) fn write_decoded_block(&mut self, block_index: usize, block: OwnedChunk) -> Result<()> {
+    pub(crate) fn write_decoded_block(
+        &mut self,
+        block_index: usize,
+        block: OwnedChunk,
+    ) -> Result<()> {
         let shared = block.into_shared();
-        let extents = self
-            .block_extents
-            .get(block_index)
-            .ok_or(crate::OxideError::InvalidFormat(
-                "decoded directory block index out of range",
-            ))?;
+        let extents =
+            self.block_extents
+                .get(block_index)
+                .ok_or(crate::OxideError::InvalidFormat(
+                    "decoded directory block index out of range",
+                ))?;
         for extent in extents {
             let tx = self.task_txs.get(extent.shard).ok_or_else(|| {
                 crate::OxideError::CompressionError("direct write shard unavailable".to_string())
@@ -244,9 +248,16 @@ fn prepare_direct_entries(
     for restore_entry in entries {
         match restore_entry.entry.kind {
             crate::ArchiveEntryKind::Directory => {
-                ensure_direct_directory(root, &restore_entry.path, &mut created_directories, stats)?;
-                pending_directory_metadata
-                    .push(PendingMetadata::new(restore_entry.path.clone(), restore_entry.entry.clone()));
+                ensure_direct_directory(
+                    root,
+                    &restore_entry.path,
+                    &mut created_directories,
+                    stats,
+                )?;
+                pending_directory_metadata.push(PendingMetadata::new(
+                    restore_entry.path.clone(),
+                    restore_entry.entry.clone(),
+                ));
             }
             crate::ArchiveEntryKind::File | crate::ArchiveEntryKind::Symlink => {
                 if let Some(parent) = restore_entry
@@ -270,8 +281,10 @@ fn prepare_direct_entries(
                     drop(file);
                     stats.record_output_create_file(create_started.elapsed());
                 }
-                pending_file_metadata
-                    .push(PendingMetadata::new(restore_entry.path.clone(), restore_entry.entry.clone()));
+                pending_file_metadata.push(PendingMetadata::new(
+                    restore_entry.path.clone(),
+                    restore_entry.entry.clone(),
+                ));
                 files.push(DirectFileEntry {
                     id: files.len(),
                     path: Arc::new(restore_entry.path.clone()),
@@ -353,9 +366,12 @@ fn build_block_extents(
     let mut block_start = 0u64;
     for descriptor in block_descriptors {
         let block_len = descriptor.raw_len as u64;
-        let block_end = block_start
-            .checked_add(block_len)
-            .ok_or(crate::OxideError::InvalidFormat("decoded block range overflow"))?;
+        let block_end =
+            block_start
+                .checked_add(block_len)
+                .ok_or(crate::OxideError::InvalidFormat(
+                    "decoded block range overflow",
+                ))?;
         let mut extents = Vec::new();
 
         while file_index < by_offset.len()
@@ -372,9 +388,12 @@ fn build_block_extents(
         while scan < by_offset.len() {
             let file = by_offset[scan];
             let file_start = file.entry.content_offset;
-            let file_end = file_start
-                .checked_add(file.entry.size)
-                .ok_or(crate::OxideError::InvalidFormat("file content range overflow"))?;
+            let file_end =
+                file_start
+                    .checked_add(file.entry.size)
+                    .ok_or(crate::OxideError::InvalidFormat(
+                        "file content range overflow",
+                    ))?;
             if file_start >= block_end {
                 break;
             }
@@ -383,10 +402,14 @@ fn build_block_extents(
             let overlap_end = block_end.min(file_end);
             if overlap_start < overlap_end {
                 let len = usize::try_from(overlap_end - overlap_start).map_err(|_| {
-                    crate::OxideError::InvalidFormat("direct write extent length exceeds usize range")
+                    crate::OxideError::InvalidFormat(
+                        "direct write extent length exceeds usize range",
+                    )
                 })?;
                 let block_offset = usize::try_from(overlap_start - block_start).map_err(|_| {
-                    crate::OxideError::InvalidFormat("direct write block offset exceeds usize range")
+                    crate::OxideError::InvalidFormat(
+                        "direct write block offset exceeds usize range",
+                    )
                 })?;
                 extents.push(DirectBlockExtent {
                     file_id: file.id,
@@ -409,13 +432,16 @@ fn build_block_extents(
         block_start = block_end;
     }
 
-    let expected_total = by_offset
-        .iter()
-        .map(|file| file.entry.size)
-        .try_fold(0u64, |acc, size| {
-            acc.checked_add(size)
-                .ok_or(crate::OxideError::InvalidFormat("directory content size overflow"))
-        })?;
+    let expected_total =
+        by_offset
+            .iter()
+            .map(|file| file.entry.size)
+            .try_fold(0u64, |acc, size| {
+                acc.checked_add(size)
+                    .ok_or(crate::OxideError::InvalidFormat(
+                        "directory content size overflow",
+                    ))
+            })?;
     if block_start != expected_total {
         return Err(crate::OxideError::InvalidFormat(
             "directory block payload size does not match manifest file sizes",
