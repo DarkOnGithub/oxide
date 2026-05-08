@@ -83,6 +83,7 @@ class Settings:
     skip_extract: bool
     skip_baseline: bool
     drop_caches: bool
+    sync_after_extract: bool
     rebuild_oxide: bool
     modes: tuple[str, ...]
     squashfs_block_size: str | None
@@ -390,6 +391,21 @@ def parse_args() -> Settings:
     )
     parser.set_defaults(drop_caches=True)
     parser.add_argument(
+        "--sync-after-extract",
+        dest="sync_after_extract",
+        action="store_true",
+        help="Include a filesystem sync after extract before recording elapsed time.",
+    )
+    parser.add_argument(
+        "--no-sync-after-extract",
+        dest="sync_after_extract",
+        action="store_false",
+        help="Do not sync filesystem buffers after extract.",
+    )
+    parser.set_defaults(
+        sync_after_extract=env_value("BENCHMARK_SYNC_AFTER_EXTRACT", "0") == "1"
+    )
+    parser.add_argument(
         "--rebuild-oxide",
         action="store_true",
         default=True,
@@ -455,6 +471,7 @@ def parse_args() -> Settings:
         skip_extract=args.skip_extract,
         skip_baseline=args.skip_baseline,
         drop_caches=args.drop_caches,
+        sync_after_extract=args.sync_after_extract,
         rebuild_oxide=args.rebuild_oxide,
         modes=tuple(args.modes),
         squashfs_block_size=squashfs_block_size,
@@ -1791,6 +1808,7 @@ def print_run_header(
             f"baseline: [cyan]{'skipped (reuse baseline, same source)' if settings.skip_baseline else 'enabled'}[/cyan]\n"
             f"oxide preset mode: [cyan]{oxide_preset_mode}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
+            f"sync after extract: [cyan]{'yes' if settings.sync_after_extract else 'no'}[/cyan]\n"
             f"oxide presets: [cyan]{OXIDE_PRESETS_PATH}[/cyan]\n"
             f"7z solid mode: [cyan]{'on' if SEVENZIP_EQUIVALENT_SOLID else 'off'}[/cyan]\n"
             f"drop caches: [cyan]{'yes' if settings.drop_caches else 'no'}[/cyan]\n"
@@ -2434,6 +2452,8 @@ def record_step(
     completed, host = run_command_with_host_telemetry(command, step.output_path)
     stdout = completed.stdout or ""
     stderr = completed.stderr or ""
+    if step.phase == "extract" and settings.sync_after_extract:
+        subprocess.run(["sync"], check=True)
     elapsed_ns = time.perf_counter_ns() - start_ns
 
     host_payload = host_telemetry_payload(host, elapsed_ns)
@@ -2648,6 +2668,7 @@ def run_bench_with_telemetry(
             "skip_extract": settings.skip_extract,
             "skip_baseline": settings.skip_baseline,
             "rebuild_oxide": settings.rebuild_oxide,
+            "sync_after_extract": settings.sync_after_extract,
             "modes": list(settings.modes),
             "workers": settings.threads,
             "shuffle_seed": settings.shuffle_seed,
@@ -2856,6 +2877,7 @@ def main() -> int:
                         "worker_modes": list(settings.worker_modes),
                         "raw_oxide_presets": settings.raw_oxide_presets,
                         "skip_baseline": settings.skip_baseline,
+                        "sync_after_extract": settings.sync_after_extract,
                         "host_telemetry": True,
                         "extract_validation": "path tree compare against source (names/types/bytes/symlink targets)",
                     }
