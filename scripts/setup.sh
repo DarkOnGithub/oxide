@@ -64,7 +64,6 @@ sudo apt install -y \
     libarchive-tools \
     xz-utils \
     lzip \
-    lzlib \
     liblz-dev \
     libarchive-dev \
     asciidoc
