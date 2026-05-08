@@ -45,7 +45,8 @@ COMMON_ARGS: tuple[str, ...] = (
     "16",
     "--raw-oxide-presets",
     "--sync-after-extract",
-    "--competitors mode-defaults",
+    "--competitors",
+    "mode-defaults",
     "--quiet",
 )
 
