@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import shutil
 import shlex
 import random
 import re
+import stat as statmod
 import statistics
 import subprocess
 import time
@@ -512,6 +514,210 @@ def cleanup_path(path: Path) -> None:
         shutil.rmtree(path)
     elif path.exists():
         path.unlink()
+
+
+class ExtractionValidationError(RuntimeError):
+    pass
+
+
+def _compare_file_contents(expected: Path, actual: Path) -> int:
+    bytes_compared = 0
+    with expected.open("rb") as expected_fp, actual.open("rb") as actual_fp:
+        while True:
+            expected_chunk = expected_fp.read(1024 * 1024)
+            actual_chunk = actual_fp.read(1024 * 1024)
+            if expected_chunk != actual_chunk:
+                expected_digest = hashlib.sha256(expected_chunk).hexdigest()[:12]
+                actual_digest = hashlib.sha256(actual_chunk).hexdigest()[:12]
+                raise ExtractionValidationError(
+                    "file content mismatch "
+                    f"({expected} != {actual}, sha256 chunk {expected_digest} != {actual_digest})"
+                )
+            if not expected_chunk:
+                break
+            bytes_compared += len(expected_chunk)
+    return bytes_compared
+
+
+def _compare_extracted_tree(
+    expected: Path,
+    actual: Path,
+    relative_path: Path,
+    stats: dict[str, int],
+) -> None:
+    try:
+        expected_stat = expected.lstat()
+    except FileNotFoundError as exc:
+        raise ExtractionValidationError(f"missing source path during validation: {expected}") from exc
+    try:
+        actual_stat = actual.lstat()
+    except FileNotFoundError as exc:
+        location = "." if relative_path == Path(".") else str(relative_path)
+        raise ExtractionValidationError(
+            f"missing extracted path for {location}: expected {actual}"
+        ) from exc
+
+    expected_mode = expected_stat.st_mode
+    actual_mode = actual_stat.st_mode
+    location = "." if relative_path == Path(".") else str(relative_path)
+
+    if statmod.S_ISLNK(expected_mode):
+        if not statmod.S_ISLNK(actual_mode):
+            raise ExtractionValidationError(
+                f"type mismatch at {location}: expected symlink, got non-symlink"
+            )
+        stats["checked_symlinks"] += 1
+        expected_target = os.readlink(expected)
+        actual_target = os.readlink(actual)
+        if expected_target != actual_target:
+            raise ExtractionValidationError(
+                f"symlink target mismatch at {location}: {expected_target!r} != {actual_target!r}"
+            )
+        return
+
+    if statmod.S_ISDIR(expected_mode):
+        if not statmod.S_ISDIR(actual_mode) or statmod.S_ISLNK(actual_mode):
+            raise ExtractionValidationError(
+                f"type mismatch at {location}: expected directory, got non-directory"
+            )
+        stats["checked_directories"] += 1
+        expected_entries = sorted(entry.name for entry in expected.iterdir())
+        actual_entries = sorted(entry.name for entry in actual.iterdir())
+        if expected_entries != actual_entries:
+            missing = sorted(set(expected_entries) - set(actual_entries))
+            extra = sorted(set(actual_entries) - set(expected_entries))
+            details: list[str] = []
+            if missing:
+                details.append(f"missing={missing[:5]}")
+            if extra:
+                details.append(f"extra={extra[:5]}")
+            suffix = f" ({'; '.join(details)})" if details else ""
+            raise ExtractionValidationError(
+                f"directory entries mismatch at {location}{suffix}"
+            )
+        for entry_name in expected_entries:
+            next_relative = (
+                Path(entry_name)
+                if relative_path == Path(".")
+                else relative_path / entry_name
+            )
+            _compare_extracted_tree(
+                expected / entry_name,
+                actual / entry_name,
+                next_relative,
+                stats,
+            )
+        return
+
+    if statmod.S_ISREG(expected_mode):
+        if not statmod.S_ISREG(actual_mode) or statmod.S_ISLNK(actual_mode):
+            raise ExtractionValidationError(
+                f"type mismatch at {location}: expected file, got non-file"
+            )
+        if expected_stat.st_size != actual_stat.st_size:
+            raise ExtractionValidationError(
+                f"file size mismatch at {location}: {expected_stat.st_size} != {actual_stat.st_size}"
+            )
+        stats["checked_files"] += 1
+        stats["checked_bytes"] += _compare_file_contents(expected, actual)
+        return
+
+    raise ExtractionValidationError(
+        f"unsupported file type at {location}: source mode {oct(expected_mode)}"
+    )
+
+
+def extraction_root_candidates(source: Path, output_path: Path) -> list[Path]:
+    candidates: list[Path] = [output_path]
+    seen: set[str] = {str(output_path)}
+
+    variants = [source]
+    try:
+        resolved_source = source.resolve()
+    except OSError:
+        resolved_source = None
+    if resolved_source is not None and resolved_source != source:
+        variants.append(resolved_source)
+
+    for variant in variants:
+        if variant.name:
+            candidate = output_path / variant.name
+            if str(candidate) not in seen:
+                seen.add(str(candidate))
+                candidates.append(candidate)
+
+        parts = list(variant.parts)
+        if variant.is_absolute() and parts:
+            parts = parts[1:]
+        if parts:
+            candidate = output_path.joinpath(*parts)
+            if str(candidate) not in seen:
+                seen.add(str(candidate))
+                candidates.append(candidate)
+
+    if output_path.is_dir():
+        children = sorted(output_path.iterdir(), key=lambda path: path.name)
+        if len(children) == 1:
+            only_child = children[0]
+            if str(only_child) not in seen:
+                candidates.append(only_child)
+
+    return candidates
+
+
+def validate_extracted_output(source: Path, output_path: Path) -> dict[str, object]:
+    started_ns = time.perf_counter_ns()
+    attempts: list[str] = []
+
+    for candidate in extraction_root_candidates(source, output_path):
+        if not candidate.exists() and not candidate.is_symlink():
+            attempts.append(f"{candidate} (missing)")
+            continue
+
+        stats = {
+            "checked_files": 0,
+            "checked_directories": 0,
+            "checked_symlinks": 0,
+            "checked_bytes": 0,
+        }
+        try:
+            _compare_extracted_tree(source, candidate, Path("."), stats)
+        except ExtractionValidationError as exc:
+            attempts.append(f"{candidate}: {exc}")
+            continue
+
+        return {
+            "status": "ok",
+            "expected_root": str(source),
+            "actual_root": str(candidate),
+            "elapsed_ns": time.perf_counter_ns() - started_ns,
+            **stats,
+            "message": None,
+        }
+
+    detail = "; ".join(attempts[:3]) if attempts else f"no extracted output found under {output_path}"
+    raise ExtractionValidationError(
+        f"extracted output does not match source {source}: {detail}"
+    )
+
+
+def failed_validation_payload(
+    source: Path,
+    output_path: Path,
+    started_ns: int,
+    exc: Exception,
+) -> dict[str, object]:
+    return {
+        "status": "failed",
+        "expected_root": str(source),
+        "actual_root": str(output_path),
+        "elapsed_ns": time.perf_counter_ns() - started_ns,
+        "checked_files": 0,
+        "checked_directories": 0,
+        "checked_symlinks": 0,
+        "checked_bytes": 0,
+        "message": str(exc),
+    }
 
 
 def apparent_size(path: Path) -> int:
@@ -1059,6 +1265,15 @@ class TelemetryWriter:
             "host_disk_total_after_bytes",
             "host_disk_used_after_bytes",
             "host_disk_free_after_bytes",
+            "validation_status",
+            "validation_expected_root",
+            "validation_actual_root",
+            "validation_elapsed_ns",
+            "validation_checked_files",
+            "validation_checked_directories",
+            "validation_checked_symlinks",
+            "validation_checked_bytes",
+            "validation_message",
         ]
 
     def write_json(self, path: Path, payload: dict[str, object]) -> None:
@@ -1082,6 +1297,7 @@ class TelemetryWriter:
         stderr: str,
         host_payload: dict[str, object] | None,
         telemetry_payload: dict[str, object] | None,
+        validation_payload: dict[str, object] | None,
     ) -> tuple[Path, Path, Path | None]:
         step_dir = self.steps_dir / self.step_prefix(row)
         step_dir.mkdir(parents=True, exist_ok=True)
@@ -1100,6 +1316,8 @@ class TelemetryWriter:
             if telemetry_payload is not None:
                 payload["oxide"] = telemetry_payload
                 payload.update(telemetry_payload)
+            if validation_payload is not None:
+                payload["validation"] = validation_payload
             self.write_json(telemetry_path, payload)
 
         return stdout_path, stderr_path, telemetry_path
@@ -1111,8 +1329,10 @@ class TelemetryWriter:
         stderr_path: Path,
         host_payload: dict[str, object] | None,
         telemetry_path: Path | None,
+        validation_payload: dict[str, object] | None,
     ) -> None:
         host_payload = host_payload or {}
+        validation_payload = validation_payload or {}
         record = {
             "event": "step",
             "timestamp": utc_now(),
@@ -1177,6 +1397,19 @@ class TelemetryWriter:
             ).get("free")
             if isinstance(host_payload.get("disk_usage_after"), dict)
             else None,
+            "validation_status": validation_payload.get("status"),
+            "validation_expected_root": validation_payload.get("expected_root"),
+            "validation_actual_root": validation_payload.get("actual_root"),
+            "validation_elapsed_ns": validation_payload.get("elapsed_ns"),
+            "validation_checked_files": validation_payload.get("checked_files"),
+            "validation_checked_directories": validation_payload.get(
+                "checked_directories"
+            ),
+            "validation_checked_symlinks": validation_payload.get(
+                "checked_symlinks"
+            ),
+            "validation_checked_bytes": validation_payload.get("checked_bytes"),
+            "validation_message": validation_payload.get("message"),
         }
         assert self._jsonl_fp is not None and self._csv_writer is not None
         self._jsonl_fp.write(json.dumps(record, sort_keys=True) + "\n")
@@ -2211,6 +2444,7 @@ def record_step(
             stderr,
             host_payload,
             parse_oxide_telemetry(stdout) if step.tool == "oxide" else None,
+            None,
         )
         for target in step.cleanup_targets:
             cleanup_path(target)
@@ -2225,9 +2459,77 @@ def record_step(
     throughput_mib_s = (
         0.0 if elapsed_s <= 0 else (source_bytes / 1024 / 1024) / elapsed_s
     )
-    output_bytes = apparent_size(step.output_path)
-
     parsed_telemetry = parse_oxide_telemetry(stdout) if step.tool == "oxide" else None
+    validation_payload: dict[str, object] | None = None
+    output_measure_path = step.output_path
+    if step.phase == "extract":
+        validation_started_ns = time.perf_counter_ns()
+        try:
+            validation_payload = validate_extracted_output(settings.source, step.output_path)
+            actual_root = validation_payload.get("actual_root")
+            if isinstance(actual_root, str) and actual_root:
+                output_measure_path = Path(actual_root)
+        except Exception as exc:
+            validation_payload = failed_validation_payload(
+                settings.source,
+                step.output_path,
+                validation_started_ns,
+                exc,
+            )
+            output_bytes = apparent_size(step.output_path)
+            row = ResultRow(
+                tool=step.tool,
+                phase=step.phase,
+                mode=mode,
+                workers=step.workers,
+                pass_num=pass_num,
+                elapsed_ns=elapsed_ns,
+                throughput_mib_s=throughput_mib_s,
+                output_bytes=output_bytes,
+                input_bytes=source_bytes,
+                command=row_command(command),
+                output_path=str(step.output_path),
+                stdout_path="",
+                stderr_path="",
+                telemetry_path=None,
+            )
+            stdout_path, stderr_path, telemetry_path = telemetry.write_step_artifacts(
+                row,
+                stdout,
+                stderr,
+                host_payload,
+                parsed_telemetry,
+                validation_payload,
+            )
+            row = ResultRow(
+                tool=row.tool,
+                phase=row.phase,
+                mode=row.mode,
+                workers=row.workers,
+                pass_num=row.pass_num,
+                elapsed_ns=row.elapsed_ns,
+                throughput_mib_s=row.throughput_mib_s,
+                output_bytes=row.output_bytes,
+                input_bytes=row.input_bytes,
+                command=row.command,
+                output_path=row.output_path,
+                stdout_path=str(stdout_path),
+                stderr_path=str(stderr_path),
+                telemetry_path=str(telemetry_path) if telemetry_path else None,
+            )
+            telemetry.write_step(
+                row,
+                stdout_path,
+                stderr_path,
+                host_payload,
+                telemetry_path,
+                validation_payload,
+            )
+            for target in step.cleanup_targets:
+                cleanup_path(target)
+            raise
+
+    output_bytes = apparent_size(output_measure_path)
     row = ResultRow(
         tool=step.tool,
         phase=step.phase,
@@ -2251,6 +2553,7 @@ def record_step(
         stderr,
         host_payload,
         parsed_telemetry,
+        validation_payload,
     )
 
     row = ResultRow(
@@ -2270,7 +2573,14 @@ def record_step(
         telemetry_path=str(telemetry_path) if telemetry_path else None,
     )
 
-    telemetry.write_step(row, stdout_path, stderr_path, host_payload, telemetry_path)
+    telemetry.write_step(
+        row,
+        stdout_path,
+        stderr_path,
+        host_payload,
+        telemetry_path,
+        validation_payload,
+    )
 
     results.append(row)
 
@@ -2338,6 +2648,7 @@ def run_bench_with_telemetry(
             },
             "host_telemetry": True,
             "host_telemetry_sample_interval_s": 0.05,
+            "extract_validation": "path tree compare against source (names/types/bytes/symlink targets)",
             "telemetry_dir": str(telemetry_run_dir),
         }
     )
@@ -2530,6 +2841,7 @@ def main() -> int:
                         "raw_oxide_presets": settings.raw_oxide_presets,
                         "skip_baseline": settings.skip_baseline,
                         "host_telemetry": True,
+                        "extract_validation": "path tree compare against source (names/types/bytes/symlink targets)",
                     }
                 )
 
