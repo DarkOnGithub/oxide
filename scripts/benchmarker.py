@@ -2133,13 +2133,15 @@ def oxide_extract_command(
 
 
 def unsquashfs_extract_command(
-    settings: Settings, _: str, __: ModeConfig, __workers: str
+    settings: Settings, _: str, __: ModeConfig, workers: str
 ) -> list[str]:
     return [
         resolve_tool("unsquashfs"),
         "-q",
         "-f",
         "-no-xattrs",
+        "-processors",
+        resolved_thread_count(settings, workers),
         "-d",
         str(settings.squashfs_extract_dir),
         str(settings.squashfs_output),
