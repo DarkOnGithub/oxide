@@ -2032,6 +2032,18 @@ def drop_caches(target: Path) -> None:
     # subprocess.run(["sudo", "sh", "-c", "echo 3 >/proc/sys/vm/drop_caches"], check=True)
 
 
+def cache_eviction_target(settings: Settings, step: Step) -> Path:
+    if step.phase == "archive":
+        return settings.source
+    if step.tool == "oxide":
+        return settings.oxide_output
+    if step.tool == "unsquashfs":
+        return settings.squashfs_output
+    if step.tool == "7zz":
+        return settings.squashfs_output.with_suffix(".7z")
+    raise SystemExit(f"No cache eviction target configured for {step.tool} {step.phase}")
+
+
 def build_oxide(settings: Settings) -> None:
     if settings.oxide_bin.exists() and not settings.rebuild_oxide:
         if not settings.quiet:
@@ -2683,7 +2695,7 @@ def run_bench_with_telemetry(
 
             for _tool_name, archive_step, extract_step in tool_groups:
                 if settings.drop_caches:
-                    drop_caches(settings.source)
+                    drop_caches(cache_eviction_target(settings, archive_step))
                 archive_row = record_step(
                     settings,
                     archive_step,
@@ -2702,7 +2714,7 @@ def run_bench_with_telemetry(
 
                 if extract_step is not None:
                     if settings.drop_caches:
-                        drop_caches(settings.source)
+                        drop_caches(cache_eviction_target(settings, extract_step))
                     extract_row = record_step(
                         settings,
                         extract_step,
