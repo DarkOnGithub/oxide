@@ -58,6 +58,69 @@ BENCHMARK_BLOCK_SIZE_OVERRIDES: dict[str, str] = {
     "balanced": "1M",
     "ultra": "4M",
 }
+LEGACY_MODE_COMPETITORS: dict[str, tuple[str, ...]] = {
+    "fast": ("squashfs",),
+    "balanced": ("squashfs",),
+    "ultra": ("7zip",),
+}
+MODE_DEFAULT_COMPETITORS: dict[str, tuple[str, ...]] = {
+    "fast": (
+        "squashfs",
+        "tar+zstd",
+    ),
+    "balanced": (
+        "squashfs",
+        "tar+zstd",
+    ),
+    "ultra": (
+        "7zip",
+        "dwarfs",
+        "pixz",
+    ),
+}
+
+MODE_DEFAULT_COMPETITOR_ALIASES: tuple[str, ...] = (
+    "mode-defaults",
+    "mode-default",
+    "comparable",
+    "fair",
+)
+TIER1_COMPETITORS: tuple[str, ...] = ("dwarfs", "tar+zstd", "pixz")
+TIER2_COMPETITORS: tuple[str, ...] = ("plzip", "pigz", "pbzip2")
+ALL_COMPETITORS: tuple[str, ...] = (
+    "squashfs",
+    "7zip",
+    *TIER1_COMPETITORS,
+    *TIER2_COMPETITORS,
+)
+COMPETITOR_NAME_ALIASES: dict[str, str] = {
+    "squashfs": "squashfs",
+    "mksquashfs": "squashfs",
+    "sqfs": "squashfs",
+    "7zip": "7zip",
+    "7z": "7zip",
+    "7zz": "7zip",
+    "dwarfs": "dwarfs",
+    "mkdwarfs": "dwarfs",
+    "tar+zstd": "tar+zstd",
+    "tar-zstd": "tar+zstd",
+    "tar_zstd": "tar+zstd",
+    "tar.zst": "tar+zstd",
+    "zstd": "tar+zstd",
+    "pixz": "pixz",
+    "plzip": "plzip",
+    "pigz": "pigz",
+    "gzip": "pigz",
+    "pbzip2": "pbzip2",
+    "lbzip2": "pbzip2",
+    "bzip2": "pbzip2",
+    "bzip2-parallel": "pbzip2",
+}
+COMPETITOR_GROUP_ALIASES: dict[str, tuple[str, ...]] = {
+    "tier1": TIER1_COMPETITORS,
+    "tier2": TIER2_COMPETITORS,
+    "all": ALL_COMPETITORS,
+}
 
 
 @dataclass(frozen=True)
@@ -86,6 +149,7 @@ class Settings:
     sync_after_extract: bool
     rebuild_oxide: bool
     modes: tuple[str, ...]
+    competitors_by_mode: dict[str, tuple[str, ...]]
     squashfs_block_size: str | None
     raw_oxide_presets: bool
     telemetry_dir: Path
@@ -127,14 +191,15 @@ class ModeStats:
 class ModeComparison:
     mode: str
     workers: str
+    competitor: str
     archive_fastest_tool: str
     archive_delta_pct: float
     extract_fastest_tool: str | None
     extract_delta_pct: float | None
     oxide_archive_ratio: float
-    baseline_archive_ratio: float
+    competitor_archive_ratio: float
     oxide_extract_ratio: float | None
-    baseline_extract_ratio: float | None
+    competitor_extract_ratio: float | None
 
 
 @dataclass(frozen=True)
@@ -149,13 +214,17 @@ class Step:
 
 
 @dataclass(frozen=True)
+class ToolRun:
+    tool: str
+    archive: Step
+    extract: Step | None
+
+
+@dataclass(frozen=True)
 class RunUnit:
     mode: str
     workers: str
-    oxide_archive: Step
-    oxide_extract: Step | None
-    baseline_archive: Step | None
-    baseline_extract: Step | None
+    tool_runs: tuple[ToolRun, ...]
 
 
 @dataclass(frozen=True)
@@ -259,22 +328,6 @@ def load_mode_configs_from_oxide_presets(
 
     return mode_configs
 
-
-MODE_BASELINES: dict[str, str] = {
-    "fast": "mksquashfs",
-    "balanced": "mksquashfs",
-    "ultra": "7zz",
-}
-
-
-def baseline_extract_tool(mode: str) -> str:
-    """Extract step tool for baseline (unsquashfs pairs mksquashfs archives)."""
-    archive_tool = MODE_BASELINES[mode]
-    if archive_tool == "mksquashfs":
-        return "unsquashfs"
-    return archive_tool
-
-
 def resolve_tool(*candidates: str) -> str:
     for candidate in candidates:
         resolved = shutil.which(candidate)
@@ -315,9 +368,101 @@ def env_value(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def supported_competitor_names() -> str:
+    return ", ".join(sorted(set(ALL_COMPETITORS)))
+
+
+def normalize_competitor_name(raw_value: str) -> str:
+    normalized = raw_value.strip().lower().replace("_", "-")
+    normalized = normalized.replace(" ", "")
+    competitor = COMPETITOR_NAME_ALIASES.get(normalized)
+    if competitor is None:
+        raise SystemExit(
+            f"Unknown competitor '{raw_value}'. Supported names: {supported_competitor_names()} "
+            "and aliases: mode-defaults/mode-default/comparable/fair, legacy, tier1, tier2, all."
+        )
+    return competitor
+
+
+def append_unique(target: list[str], values: Sequence[str]) -> None:
+    seen = set(target)
+    for value in values:
+        if value not in seen:
+            target.append(value)
+            seen.add(value)
+
+
+def resolve_competitors_by_mode(
+    raw_values: Sequence[str] | None, modes: Sequence[str]
+) -> dict[str, tuple[str, ...]]:
+    tokens = list(raw_values) if raw_values else [
+        env_value("BENCHMARK_COMPETITORS", "mode-defaults")
+    ]
+    tokens = [token for token in tokens if token]
+    if not tokens:
+        tokens = ["mode-defaults"]
+
+    competitors_by_mode: dict[str, list[str]] = {mode: [] for mode in modes}
+    for token in tokens:
+        normalized = token.strip().lower().replace("_", "-")
+        normalized = normalized.replace(" ", "")
+        if normalized in MODE_DEFAULT_COMPETITOR_ALIASES:
+            for mode in modes:
+                default_competitors = MODE_DEFAULT_COMPETITORS.get(mode)
+                if default_competitors is None:
+                    raise SystemExit(
+                        "mode-default competitors are only defined for fast/balanced/ultra; "
+                        f"got mode '{mode}'"
+                    )
+                append_unique(competitors_by_mode[mode], default_competitors)
+            continue
+
+        if normalized == "legacy":
+            for mode in modes:
+                default_competitors = LEGACY_MODE_COMPETITORS.get(mode)
+                if default_competitors is None:
+                    raise SystemExit(
+                        f"legacy competitor set is only defined for fast/balanced/ultra; got mode '{mode}'"
+                    )
+                append_unique(competitors_by_mode[mode], default_competitors)
+            continue
+
+        if normalized in COMPETITOR_GROUP_ALIASES:
+            competitors = COMPETITOR_GROUP_ALIASES[normalized]
+        else:
+            competitors = (normalize_competitor_name(token),)
+
+        for mode in modes:
+            append_unique(competitors_by_mode[mode], competitors)
+
+    return {mode: tuple(values) for mode, values in competitors_by_mode.items()}
+
+
+def selected_competitor_names(settings: Settings) -> tuple[str, ...]:
+    ordered: list[str] = []
+    for mode in settings.modes:
+        append_unique(ordered, settings.competitors_by_mode.get(mode, ()))
+    return tuple(ordered)
+
+
+def competitors_for_mode(settings: Settings, mode: str) -> tuple[str, ...]:
+    competitors = settings.competitors_by_mode.get(mode)
+    if competitors is None:
+        raise SystemExit(f"No competitors configured for mode '{mode}'")
+    return competitors
+
+
+def competitor_summary(settings: Settings) -> str:
+    parts: list[str] = []
+    for mode in settings.modes:
+        competitors = ", ".join(competitors_for_mode(settings, mode))
+        parts.append(f"{mode}={competitors}")
+    return "; ".join(parts)
+
+
 def parse_args() -> Settings:
     parser = argparse.ArgumentParser(
-        description="Benchmark oxide against squashfs tools"
+        description="Benchmark oxide against competitor archive tools"
     )
     parser.add_argument(
         "--source",
@@ -336,8 +481,12 @@ def parse_args() -> Settings:
         ),
     )
     parser.add_argument(
+        "--competitor-output",
+        "--baseline-output",
         "--squashfs-output",
+        dest="squashfs_output",
         default=env_value("BENCHMARK_SQUASHFS_OUTPUT", str(BASE_DIR / "archive.sqfs")),
+        help="Base archive path used for competitor outputs (suffix changes per tool).",
     )
     parser.add_argument(
         "--oxide-extract-dir",
@@ -346,10 +495,14 @@ def parse_args() -> Settings:
         ),
     )
     parser.add_argument(
+        "--competitor-extract-dir",
+        "--baseline-extract-dir",
         "--squashfs-extract-dir",
+        dest="squashfs_extract_dir",
         default=env_value(
             "BENCHMARK_SQUASHFS_EXTRACT_DIR", str(BASE_DIR / "squashfs_extract_out")
         ),
+        help="Base directory used for competitor extraction outputs (per-tool subdirectories are created under it).",
     )
     parser.add_argument(
         "--threads",
@@ -374,12 +527,24 @@ def parse_args() -> Settings:
         default=env_value("BENCHMARK_SKIP_EXTRACT", "0") == "1",
     )
     parser.add_argument(
+        "--competitors",
+        nargs="+",
+        default=None,
+        help=(
+            "Competitors to benchmark. Accepts specific tools (squashfs, 7zip, dwarfs, "
+            "tar+zstd, pixz, plzip, pigz, pbzip2) or aliases "
+            "(mode-defaults/comparable/fair, legacy, tier1, tier2, all). "
+            "Default: mode-defaults."
+        ),
+    )
+    parser.add_argument(
         "--skip-baseline",
+        "--skip-competitors",
         action="store_true",
         default=env_value("BENCHMARK_SKIP_BASELINE", "0") == "1",
         help=(
-            "Do not run the baseline tool (mksquashfs/unsquashfs or 7zz). "
-            "Comparisons average baseline steps from prior runs with the same "
+            "Do not run competitor tools in this invocation. "
+            "Comparisons average compatible competitor steps from prior runs with the same "
             "--source (resolved path) and same --skip-extract setting in run.json."
         ),
     )
@@ -456,6 +621,7 @@ def parse_args() -> Settings:
     )
     squashfs_block_size = args.squashfs_block_size or None
     worker_modes = normalize_worker_modes(args.worker_modes)
+    competitors_by_mode = resolve_competitors_by_mode(args.competitors, tuple(args.modes))
 
     return Settings(
         source=Path(args.source),
@@ -474,6 +640,7 @@ def parse_args() -> Settings:
         sync_after_extract=args.sync_after_extract,
         rebuild_oxide=args.rebuild_oxide,
         modes=tuple(args.modes),
+        competitors_by_mode=competitors_by_mode,
         squashfs_block_size=squashfs_block_size,
         raw_oxide_presets=args.raw_oxide_presets,
         telemetry_dir=Path(args.telemetry_dir),
@@ -1110,6 +1277,33 @@ def host_telemetry_payload(host: HostTelemetry, elapsed_ns: int) -> dict[str, ob
     return payload
 
 
+def competitor_threading_policy(tool: str, workers: str) -> str:
+    if tool in {"oxide", "squashfs", "7zip", "tar+zstd"}:
+        return "worker-matched"
+    if tool == "pigz":
+        return "worker-matched" if workers != "auto" else "tool-default"
+    if tool in {"dwarfs", "pixz", "plzip", "pbzip2"}:
+        return "tool-default"
+    return "unknown"
+
+
+def tool_threading_summary(tool: str, worker_modes: Sequence[str]) -> str:
+    policies = {competitor_threading_policy(tool, workers) for workers in worker_modes}
+    ordered = [policy for policy in ("worker-matched", "tool-default", "unknown") if policy in policies]
+    if not ordered:
+        return f"{tool}=unknown"
+    if len(ordered) == 1:
+        return f"{tool}={ordered[0]}"
+    return f"{tool}={'+'.join(ordered)}"
+
+
+def threading_policy_summary(settings: Settings) -> str:
+    return "; ".join(
+        tool_threading_summary(tool, settings.worker_modes)
+        for tool in ("oxide", *selected_competitor_names(settings))
+    )
+
+
 def run_command_with_host_telemetry(
     command: Sequence[str],
     telemetry_path: Path,
@@ -1150,16 +1344,33 @@ def run_command_with_host_telemetry(
         if ps_proc is None:
             return
         try:
-            memory_info = ps_proc.memory_info()
-            peak_rss = max(peak_rss, int(memory_info.rss))
-            final_rss = int(memory_info.rss)
-            if hasattr(ps_proc, "io_counters"):
-                io = ps_proc.io_counters()
-                if io is not None:
-                    io_read_bytes = int(getattr(io, "read_bytes", 0))
-                    io_write_bytes = int(getattr(io, "write_bytes", 0))
-                    io_read_count = int(getattr(io, "read_count", 0))
-                    io_write_count = int(getattr(io, "write_count", 0))
+            procs = [ps_proc, *ps_proc.children(recursive=True)]
+            total_rss = 0
+            total_read_bytes = 0
+            total_write_bytes = 0
+            total_read_count = 0
+            total_write_count = 0
+
+            for child_proc in procs:
+                try:
+                    memory_info = child_proc.memory_info()
+                    total_rss += int(memory_info.rss)
+                    if hasattr(child_proc, "io_counters"):
+                        io = child_proc.io_counters()
+                        if io is not None:
+                            total_read_bytes += int(getattr(io, "read_bytes", 0))
+                            total_write_bytes += int(getattr(io, "write_bytes", 0))
+                            total_read_count += int(getattr(io, "read_count", 0))
+                            total_write_count += int(getattr(io, "write_count", 0))
+                except PSUTIL_SAMPLE_ERRORS:
+                    continue
+
+            peak_rss = max(peak_rss, total_rss)
+            final_rss = total_rss
+            io_read_bytes = total_read_bytes
+            io_write_bytes = total_write_bytes
+            io_read_count = total_read_count
+            io_write_count = total_write_count
         except PSUTIL_SAMPLE_ERRORS:
             pass
 
@@ -1479,7 +1690,7 @@ def _read_run_json(run_dir: Path) -> dict[str, object] | None:
 def _donor_run_matches_current_benchmark(
     payload: dict[str, object], settings: Settings
 ) -> bool:
-    """Pool baseline only from runs that used the same source path and extract flag."""
+    """Pool competitor rows only from runs that used the same source path and extract flag."""
     if bool(payload.get("skip_baseline")):
         return False
     if bool(payload.get("skip_extract")) != settings.skip_extract:
@@ -1493,23 +1704,22 @@ def _donor_run_matches_current_benchmark(
         return str(p_src) == str(settings.source)
 
 
-def _record_is_baseline_step(rec: dict[str, object]) -> bool:
-    mode = str(rec.get("mode") or "")
-    if mode not in MODE_BASELINES:
-        return False
-    tool = str(rec.get("tool") or "")
-    phase = str(rec.get("phase") or "")
-    if phase == "archive":
-        return tool == MODE_BASELINES[mode]
-    if phase == "extract":
-        return tool == baseline_extract_tool(mode)
-    return False
+def normalize_telemetry_tool(tool: str, phase: str) -> str:
+    legacy_map = {
+        ("mksquashfs", "archive"): "squashfs",
+        ("unsquashfs", "extract"): "squashfs",
+        ("7zz", "archive"): "7zip",
+        ("7zz", "extract"): "7zip",
+        ("7z", "archive"): "7zip",
+        ("7z", "extract"): "7zip",
+    }
+    return legacy_map.get((tool, phase), tool)
 
 
 def load_baseline_result_rows_from_telemetry_run(
     run_dir: Path, settings: Settings, source_bytes: int
 ) -> list[ResultRow]:
-    """Rebuild ResultRow list for baseline tools from a prior run's steps.jsonl."""
+    """Rebuild ResultRow list for selected competitor tools from a prior run's steps.jsonl."""
     path = run_dir / "steps.jsonl"
     if not path.is_file():
         return []
@@ -1537,25 +1747,51 @@ def load_baseline_result_rows_from_telemetry_run(
             continue
         mode = str(rec.get("mode") or "")
         workers = str(rec.get("workers") or "")
+        phase = str(rec.get("phase") or "")
+        tool = normalize_telemetry_tool(str(rec.get("tool") or ""), phase)
         if mode not in mode_set or workers not in workers_set:
             continue
-        if not _record_is_baseline_step(rec):
+        if tool == "oxide":
             continue
-        phase = str(rec.get("phase") or "")
+        if tool not in competitors_for_mode(settings, mode):
+            continue
         if settings.skip_extract and phase == "extract":
             continue
+
+        required_fields = (
+            "pass_num",
+            "elapsed_ns",
+            "throughput_mib_s",
+            "output_bytes",
+            "command",
+            "output_path",
+            "stdout_path",
+            "stderr_path",
+        )
+        if any(field not in rec for field in required_fields):
+            continue
+
+        try:
+            pass_num = int(rec["pass_num"])
+            elapsed_ns = int(rec["elapsed_ns"])
+            throughput_mib_s = float(rec["throughput_mib_s"])
+            output_bytes = int(rec["output_bytes"])
+            input_bytes = int(rec.get("input_bytes") or source_bytes)
+        except (TypeError, ValueError):
+            continue
+
         tp = rec.get("telemetry_path")
         rows.append(
             ResultRow(
-                tool=str(rec.get("tool") or ""),
+                tool=tool,
                 phase=phase,
                 mode=mode,
                 workers=workers,
-                pass_num=int(rec.get("pass_num") or 0),
-                elapsed_ns=int(rec.get("elapsed_ns") or 0),
-                throughput_mib_s=float(rec.get("throughput_mib_s") or 0.0),
-                output_bytes=int(rec.get("output_bytes") or 0),
-                input_bytes=int(rec.get("input_bytes") or source_bytes),
+                pass_num=pass_num,
+                elapsed_ns=elapsed_ns,
+                throughput_mib_s=throughput_mib_s,
+                output_bytes=output_bytes,
+                input_bytes=input_bytes,
                 command=str(rec.get("command") or ""),
                 output_path=str(rec.get("output_path") or ""),
                 stdout_path=str(rec.get("stdout_path") or ""),
@@ -1572,7 +1808,7 @@ def load_baseline_rows_from_prior_telemetry_runs(
     source_bytes: int,
 ) -> tuple[list[ResultRow], list[Path], int]:
     """
-    Load baseline steps from prior telemetry runs whose ``run.json`` reports the
+    Load competitor steps from prior telemetry runs whose ``run.json`` reports the
     same ``--source`` (resolved path) and the same ``--skip-extract`` flag as
     this run. Returned rows are merged into ``results``; ``result_to_stats``
     averages every sample per tool/phase/mode/workers.
@@ -1627,8 +1863,6 @@ def format_quiet_step(row: ResultRow) -> str:
 
 
 def efficiency_suite(tool: str) -> str:
-    if tool in {"mksquashfs", "unsquashfs"}:
-        return "squashfs"
     return tool
 
 
@@ -1707,57 +1941,60 @@ def mode_comparisons(
 ) -> list[ModeComparison]:
     lookup = stats_lookup(stats_rows)
     comparisons: list[ModeComparison] = []
+    competitor_names = sorted({row.tool for row in stats_rows if row.tool != "oxide"})
 
     for mode in modes:
-        baseline_tool = MODE_BASELINES[mode]
         for workers in worker_modes:
             oxide_archive = lookup.get(("oxide", "archive", mode, workers))
-            baseline_archive = lookup.get((baseline_tool, "archive", mode, workers))
-            if oxide_archive is None or baseline_archive is None:
+            if oxide_archive is None:
                 continue
             oxide_extract = lookup.get(("oxide", "extract", mode, workers))
-            baseline_extract = lookup.get(
-                (baseline_extract_tool(mode), "extract", mode, workers)
-            )
 
-            archive_fastest_tool = (
-                "oxide"
-                if oxide_archive.avg_seconds <= baseline_archive.avg_seconds
-                else baseline_tool
-            )
-            if oxide_extract is not None and baseline_extract is not None:
-                extract_fastest_tool: str | None = (
+            for competitor in competitor_names:
+                competitor_archive = lookup.get((competitor, "archive", mode, workers))
+                if competitor_archive is None:
+                    continue
+                competitor_extract = lookup.get((competitor, "extract", mode, workers))
+
+                archive_fastest_tool = (
                     "oxide"
-                    if oxide_extract.avg_seconds <= baseline_extract.avg_seconds
-                    else baseline_tool
+                    if oxide_archive.avg_seconds <= competitor_archive.avg_seconds
+                    else competitor
                 )
-                extract_delta_pct: float | None = percent_delta(
-                    oxide_extract.avg_seconds, baseline_extract.avg_seconds
-                )
-                oxide_extract_ratio: float | None = oxide_extract.ratio
-                baseline_extract_ratio: float | None = baseline_extract.ratio
-            else:
-                extract_fastest_tool = None
-                extract_delta_pct = None
-                oxide_extract_ratio = None
-                baseline_extract_ratio = None
+                if oxide_extract is not None and competitor_extract is not None:
+                    extract_fastest_tool: str | None = (
+                        "oxide"
+                        if oxide_extract.avg_seconds <= competitor_extract.avg_seconds
+                        else competitor
+                    )
+                    extract_delta_pct: float | None = percent_delta(
+                        oxide_extract.avg_seconds, competitor_extract.avg_seconds
+                    )
+                    oxide_extract_ratio: float | None = oxide_extract.ratio
+                    competitor_extract_ratio: float | None = competitor_extract.ratio
+                else:
+                    extract_fastest_tool = None
+                    extract_delta_pct = None
+                    oxide_extract_ratio = None
+                    competitor_extract_ratio = None
 
-            comparisons.append(
-                ModeComparison(
-                    mode=mode,
-                    workers=workers,
-                    archive_fastest_tool=archive_fastest_tool,
-                    archive_delta_pct=percent_delta(
-                        oxide_archive.avg_seconds, baseline_archive.avg_seconds
-                    ),
-                    extract_fastest_tool=extract_fastest_tool,
-                    extract_delta_pct=extract_delta_pct,
-                    oxide_archive_ratio=oxide_archive.ratio,
-                    baseline_archive_ratio=baseline_archive.ratio,
-                    oxide_extract_ratio=oxide_extract_ratio,
-                    baseline_extract_ratio=baseline_extract_ratio,
+                comparisons.append(
+                    ModeComparison(
+                        mode=mode,
+                        workers=workers,
+                        competitor=competitor,
+                        archive_fastest_tool=archive_fastest_tool,
+                        archive_delta_pct=percent_delta(
+                            oxide_archive.avg_seconds, competitor_archive.avg_seconds
+                        ),
+                        extract_fastest_tool=extract_fastest_tool,
+                        extract_delta_pct=extract_delta_pct,
+                        oxide_archive_ratio=oxide_archive.ratio,
+                        competitor_archive_ratio=competitor_archive.ratio,
+                        oxide_extract_ratio=oxide_extract_ratio,
+                        competitor_extract_ratio=competitor_extract_ratio,
+                    )
                 )
-            )
 
     return comparisons
 
@@ -1776,14 +2013,14 @@ def build_takes(comparisons: Sequence[ModeComparison]) -> list[str]:
         best_ratio = min(mode_items, key=lambda item: item.oxide_archive_ratio)
 
         takes.append(
-            f"[{mode}] workers={best_archive.workers}: Closest archive match ({format_delta_pct(best_archive.archive_delta_pct)})."
+            f"[{mode}] workers={best_archive.workers}: Closest archive match vs {best_archive.competitor} ({format_delta_pct(best_archive.archive_delta_pct, best_archive.competitor)})."
         )
         if extract_candidates:
             best_extract = min(
                 extract_candidates, key=lambda item: abs(item.extract_delta_pct or 0.0)
             )
             takes.append(
-                f"[{mode}] workers={best_extract.workers}: Closest extract match ({format_delta_pct(best_extract.extract_delta_pct or 0.0)})."
+                f"[{mode}] workers={best_extract.workers}: Closest extract match vs {best_extract.competitor} ({format_delta_pct(best_extract.extract_delta_pct or 0.0, best_extract.competitor)})."
             )
         takes.append(
             f"[{mode}] workers={best_ratio.workers}: Best Oxide archive ratio ({best_ratio.oxide_archive_ratio:.3f})."
@@ -1803,9 +2040,11 @@ def print_run_header(
             f"source: [cyan]{settings.source}[/cyan]\n"
             f"source size: [cyan]{format_bytes(source_bytes)}[/cyan]\n"
             f"modes: [cyan]{', '.join(settings.modes)}[/cyan]\n"
+            f"selected competitors: [cyan]{competitor_summary(settings)}[/cyan]\n"
             f"worker modes: [cyan]{worker_modes}[/cyan]\n"
             f"passes: [cyan]{settings.passes}[/cyan]  explicit threads: [cyan]{settings.threads}[/cyan]  auto threads: [cyan]{settings.logical_threads}[/cyan]\n"
-            f"baseline: [cyan]{'skipped (reuse baseline, same source)' if settings.skip_baseline else 'enabled'}[/cyan]\n"
+            f"competitor runs: [cyan]{'skipped (reuse prior competitor samples)' if settings.skip_baseline else 'enabled'}[/cyan]\n"
+            f"threading policy: [cyan]{threading_policy_summary(settings)}[/cyan]\n"
             f"oxide preset mode: [cyan]{oxide_preset_mode}[/cyan]\n"
             f"squashfs block size: [cyan]{squashfs_policy}[/cyan]\n"
             f"sync after extract: [cyan]{'yes' if settings.sync_after_extract else 'no'}[/cyan]\n"
@@ -1896,48 +2135,42 @@ def print_analysis(
 
     lookup = stats_lookup(stats_rows)
     table = Table(box=box.SIMPLE_HEAVY)
-    table.caption = "Delta is Oxide minus baseline: negative means Oxide is faster."
+    table.caption = "Delta is Oxide minus competitor: negative means Oxide is faster."
     table.add_column("mode", style="bold")
     table.add_column("workers", justify="right")
-    table.add_column("baseline")
+    table.add_column("competitor")
     table.add_column("comparison", style="bold")
     table.add_column("oxide avg sec", justify="right")
-    table.add_column("baseline avg sec", justify="right")
+    table.add_column("competitor avg sec", justify="right")
     table.add_column("winner")
     table.add_column("delta", justify="right")
     table.add_column("oxide ratio", justify="right")
-    table.add_column("baseline ratio", justify="right")
+    table.add_column("competitor ratio", justify="right")
 
     for comparison in comparisons:
-        baseline_tool = MODE_BASELINES.get(comparison.mode, "baseline")
         archive_oxide = lookup.get(
             ("oxide", "archive", comparison.mode, comparison.workers)
         )
         archive_base = lookup.get(
-            (baseline_tool, "archive", comparison.mode, comparison.workers)
+            (comparison.competitor, "archive", comparison.mode, comparison.workers)
         )
         extract_oxide = lookup.get(
             ("oxide", "extract", comparison.mode, comparison.workers)
         )
         extract_base = lookup.get(
-            (
-                baseline_extract_tool(comparison.mode),
-                "extract",
-                comparison.mode,
-                comparison.workers,
-            )
+            (comparison.competitor, "extract", comparison.mode, comparison.workers)
         )
 
         if archive_oxide is not None and archive_base is not None:
             table.add_row(
                 comparison.mode,
                 comparison.workers,
-                baseline_tool,
+                comparison.competitor,
                 "archive",
                 f"{archive_oxide.avg_seconds:.3f}",
                 f"{archive_base.avg_seconds:.3f}",
                 comparison.archive_fastest_tool,
-                format_delta_pct(comparison.archive_delta_pct),
+                format_delta_pct(comparison.archive_delta_pct, comparison.competitor),
                 f"{archive_oxide.ratio:.3f}",
                 f"{archive_base.ratio:.3f}",
             )
@@ -1946,12 +2179,14 @@ def print_analysis(
             table.add_row(
                 comparison.mode,
                 comparison.workers,
-                baseline_tool,
+                comparison.competitor,
                 "extract",
                 f"{extract_oxide.avg_seconds:.3f}",
                 f"{extract_base.avg_seconds:.3f}",
                 comparison.extract_fastest_tool or "—",
-                format_delta_pct(comparison.extract_delta_pct or 0.0),
+                format_delta_pct(
+                    comparison.extract_delta_pct or 0.0, comparison.competitor
+                ),
                 f"{extract_oxide.ratio:.3f}",
                 f"{extract_base.ratio:.3f}",
             )
@@ -2053,12 +2288,10 @@ def drop_caches(target: Path) -> None:
 def cache_eviction_target(settings: Settings, step: Step) -> Path:
     if step.phase == "archive":
         return settings.source
+    if step.cleanup_targets:
+        return step.cleanup_targets[0]
     if step.tool == "oxide":
         return settings.oxide_output
-    if step.tool == "unsquashfs":
-        return settings.squashfs_output
-    if step.tool == "7zz":
-        return settings.squashfs_output.with_suffix(".7z")
     raise SystemExit(f"No cache eviction target configured for {step.tool} {step.phase}")
 
 
@@ -2085,11 +2318,115 @@ def build_oxide(settings: Settings) -> None:
 
 
 def step_key(step: Step, pass_num: int) -> str:
-    return f"p{pass_num:02d}_{step.mode}_{step.workers}_{step.tool}_{step.phase}"
+    return f"p{pass_num:02d}_{step.workers}_{step.tool}_{step.phase}"
 
 
 def resolved_thread_count(settings: Settings, workers: str) -> str:
     return workers if workers != "auto" else str(settings.logical_threads)
+
+
+def shell_quote(value: Path | str) -> str:
+    return shlex.quote(str(value))
+
+
+def shell_pipeline_command(script: str) -> list[str]:
+    return [resolve_tool("bash"), "-lc", f"set -euo pipefail; {script}"]
+
+
+def competitor_archive_suffix(tool: str) -> str:
+    suffixes = {
+        "squashfs": ".sqfs",
+        "7zip": ".7z",
+        "dwarfs": ".dwarfs",
+        "tar+zstd": ".tar.zst",
+        "pixz": ".tar.xz",
+        "plzip": ".tar.lz",
+        "pigz": ".tar.gz",
+        "pbzip2": ".tar.bz2",
+    }
+    suffix = suffixes.get(tool)
+    if suffix is None:
+        raise SystemExit(f"Unknown competitor: {tool}")
+    return suffix
+
+
+def archive_path_for(tool: str, settings: Settings) -> Path:
+    if tool == "oxide":
+        return settings.oxide_output
+    if tool == "squashfs":
+        return settings.squashfs_output
+    suffix = competitor_archive_suffix(tool)
+    if settings.squashfs_output.suffix:
+        return settings.squashfs_output.with_suffix(suffix)
+    return settings.squashfs_output.parent / f"{settings.squashfs_output.name}{suffix}"
+
+
+def extract_path_for(tool: str, settings: Settings) -> Path:
+    if tool == "oxide":
+        return settings.oxide_extract_dir
+    return settings.squashfs_extract_dir / normalize_key(tool)
+
+
+def mode_level(mode: str, fast: str, balanced: str, ultra: str) -> str:
+    levels = {
+        "fast": fast,
+        "balanced": balanced,
+        "ultra": ultra,
+    }
+    try:
+        return levels[mode]
+    except KeyError as exc:
+        raise SystemExit(f"Unsupported mode for competitor tuning: {mode}") from exc
+
+
+def tar_source_path(settings: Settings) -> Path:
+    try:
+        return settings.source.resolve()
+    except OSError:
+        return settings.source
+
+
+def tar_archive_pipeline(
+    settings: Settings,
+    tool: str,
+    compressor: Sequence[str],
+) -> list[str]:
+    source_path = tar_source_path(settings)
+    tar_bin = shell_quote(resolve_tool("tar"))
+    compressor_cmd = shlex.join([str(part) for part in compressor])
+    script = (
+        f"{tar_bin} -C {shell_quote(source_path.parent)} -cf - {shell_quote(source_path.name)} | "
+        f"{compressor_cmd} > {shell_quote(archive_path_for(tool, settings))}"
+    )
+    return shell_pipeline_command(script)
+
+
+def tar_extract_pipeline(
+    settings: Settings,
+    tool: str,
+    decompressor: Sequence[str],
+) -> list[str]:
+    tar_bin = shell_quote(resolve_tool("tar"))
+    decompressor_cmd = shlex.join([str(part) for part in decompressor])
+    script = (
+        f"{decompressor_cmd} {shell_quote(archive_path_for(tool, settings))} | "
+        f"{tar_bin} -xf - -C {shell_quote(extract_path_for(tool, settings))}"
+    )
+    return shell_pipeline_command(script)
+
+
+def resolved_zstd_threads(settings: Settings, workers: str) -> str:
+    return "-T0" if workers == "auto" else f"-T{workers}"
+
+
+def resolved_pigz_threads(settings: Settings, workers: str) -> list[str]:
+    if workers == "auto":
+        return []
+    return ["-p", workers]
+
+
+def resolved_parallel_bzip2_tool() -> str:
+    return resolve_tool("pbzip2", "lbzip2")
 
 
 def oxide_archive_command(
@@ -2132,7 +2469,7 @@ def oxide_extract_command(
     return command
 
 
-def unsquashfs_extract_command(
+def squashfs_extract_command(
     settings: Settings, _: str, __: ModeConfig, workers: str
 ) -> list[str]:
     return [
@@ -2143,12 +2480,12 @@ def unsquashfs_extract_command(
         "-processors",
         resolved_thread_count(settings, workers),
         "-d",
-        str(settings.squashfs_extract_dir),
-        str(settings.squashfs_output),
+        str(extract_path_for("squashfs", settings)),
+        str(archive_path_for("squashfs", settings)),
     ]
 
 
-def mksquashfs_command(
+def squashfs_archive_command(
     settings: Settings, mode: str, config: ModeConfig, workers: str
 ) -> list[str]:
     block_size = settings.squashfs_block_size or config.block_size
@@ -2156,7 +2493,7 @@ def mksquashfs_command(
     command = [
         resolve_tool("mksquashfs"),
         str(settings.source),
-        str(settings.squashfs_output),
+        str(archive_path_for("squashfs", settings)),
         "-comp",
         config.compression,
         "-b",
@@ -2187,7 +2524,7 @@ def sevenzip_archive_command(
         "-snl",  # Store Symbolic Links
         "-snh",  # Store Hard Links
         "-snld",
-        str(settings.squashfs_output.with_suffix(".7z")),
+        str(archive_path_for("7zip", settings)),
         str(settings.source),
     ]
 
@@ -2198,8 +2535,8 @@ def sevenzip_extract_command(
     command = [
         resolve_tool("7zz", "7z"),
         "x",
-        str(settings.squashfs_output.with_suffix(".7z")),
-        f"-o{settings.squashfs_extract_dir}",
+        str(archive_path_for("7zip", settings)),
+        f"-o{extract_path_for('7zip', settings)}",
         "-aoa",
         "-snl",  # Extract Symbolic Links
         "-snh",  # Extract Hard Links
@@ -2210,54 +2547,207 @@ def sevenzip_extract_command(
     return command
 
 
-def archive_path_for(tool: str, settings: Settings) -> Path:
-    if tool == "oxide":
-        return settings.oxide_output
-    if tool == "mksquashfs":
-        return settings.squashfs_output
-    if tool == "7zz":
-        return settings.squashfs_output.with_suffix(".7z")
-    raise SystemExit(f"Unknown tool: {tool}")
+def dwarfs_archive_command(
+    settings: Settings, _: str, __: ModeConfig, ___workers: str
+) -> list[str]:
+    return [
+        resolve_tool("mkdwarfs"),
+        "-i",
+        str(settings.source),
+        "-o",
+        str(archive_path_for("dwarfs", settings)),
+    ]
 
 
-def baseline_steps(
-    settings: Settings, mode: str, config: ModeConfig, workers: str
+def dwarfs_extract_command(
+    settings: Settings, _: str, __: ModeConfig, ___workers: str
+) -> list[str]:
+    return [
+        resolve_tool("dwarfsextract"),
+        "-i",
+        str(archive_path_for("dwarfs", settings)),
+        "-o",
+        str(extract_path_for("dwarfs", settings)),
+    ]
+
+
+def tar_zstd_archive_command(
+    settings: Settings, mode: str, __: ModeConfig, workers: str
+) -> list[str]:
+    return tar_archive_pipeline(
+        settings,
+        "tar+zstd",
+        [
+            resolve_tool("zstd"),
+            mode_level(mode, "-1", "-3", "-19"),
+            resolved_zstd_threads(settings, workers),
+        ],
+    )
+
+
+def tar_zstd_extract_command(
+    settings: Settings, _: str, __: ModeConfig, ___workers: str
+) -> list[str]:
+    return tar_extract_pipeline(settings, "tar+zstd", [resolve_tool("zstd"), "-dc"])
+
+
+def pixz_archive_command(
+    settings: Settings, mode: str, __: ModeConfig, ___workers: str
+) -> list[str]:
+    return tar_archive_pipeline(
+        settings,
+        "pixz",
+        [resolve_tool("pixz"), mode_level(mode, "-1", "-6", "-9")],
+    )
+
+
+def pixz_extract_command(
+    settings: Settings, _: str, __: ModeConfig, ___workers: str
+) -> list[str]:
+    tar_bin = shell_quote(resolve_tool("tar"))
+    pixz_bin = shell_quote(resolve_tool("pixz"))
+    script = (
+        f"{pixz_bin} -d < {shell_quote(archive_path_for('pixz', settings))} | "
+        f"{tar_bin} -xf - -C {shell_quote(extract_path_for('pixz', settings))}"
+    )
+    return shell_pipeline_command(script)
+
+
+def plzip_archive_command(
+    settings: Settings, mode: str, __: ModeConfig, ___workers: str
+) -> list[str]:
+    return tar_archive_pipeline(
+        settings,
+        "plzip",
+        [resolve_tool("plzip"), mode_level(mode, "-1", "-6", "-9")],
+    )
+
+
+def plzip_extract_command(
+    settings: Settings, _: str, __: ModeConfig, ___workers: str
+) -> list[str]:
+    return tar_extract_pipeline(settings, "plzip", [resolve_tool("plzip"), "-dc"])
+
+
+def pigz_archive_command(
+    settings: Settings, mode: str, __: ModeConfig, workers: str
+) -> list[str]:
+    return tar_archive_pipeline(
+        settings,
+        "pigz",
+        [
+            resolve_tool("pigz"),
+            mode_level(mode, "-1", "-6", "-9"),
+            *resolved_pigz_threads(settings, workers),
+        ],
+    )
+
+
+def pigz_extract_command(
+    settings: Settings, _: str, __: ModeConfig, ___workers: str
+) -> list[str]:
+    return tar_extract_pipeline(settings, "pigz", [resolve_tool("pigz"), "-dc"])
+
+
+def parallel_bzip2_archive_command(
+    settings: Settings, mode: str, __: ModeConfig, ___workers: str
+) -> list[str]:
+    return tar_archive_pipeline(
+        settings,
+        "pbzip2",
+        [resolved_parallel_bzip2_tool(), mode_level(mode, "-1", "-6", "-9")],
+    )
+
+
+def parallel_bzip2_extract_command(
+    settings: Settings, _: str, __: ModeConfig, ___workers: str
+) -> list[str]:
+    return tar_extract_pipeline(
+        settings, "pbzip2", [resolved_parallel_bzip2_tool(), "-dc"]
+    )
+
+
+def competitor_steps(
+    settings: Settings, tool: str, mode: str, config: ModeConfig, workers: str
 ) -> tuple[Step, Step]:
-    tool = MODE_BASELINES[mode]
-    output_path = archive_path_for(tool, settings)
+    archive_path = archive_path_for(tool, settings)
+    extract_path = extract_path_for(tool, settings)
 
-    if tool == "mksquashfs":
+    if tool == "squashfs":
         return (
-            Step(tool, "archive", workers, output_path, config, mksquashfs_command),
-            Step(
-                "unsquashfs",
-                "extract",
-                workers,
-                settings.squashfs_extract_dir,
-                config,
-                unsquashfs_extract_command,
-                cleanup_targets=(output_path, settings.squashfs_extract_dir),
-            ),
-        )
-
-    if tool == "7zz":
-        return (
-            Step(
-                tool, "archive", workers, output_path, config, sevenzip_archive_command
-            ),
+            Step(tool, "archive", workers, archive_path, config, squashfs_archive_command),
             Step(
                 tool,
                 "extract",
                 workers,
-                settings.squashfs_extract_dir,
+                extract_path,
                 config,
-                sevenzip_extract_command,
-                cleanup_targets=(output_path, settings.squashfs_extract_dir),
+                squashfs_extract_command,
+                cleanup_targets=(archive_path, extract_path),
             ),
         )
 
-    raise SystemExit(f"Unsupported baseline tool for {mode}: {tool}")
+    if tool == "7zip":
+        return (
+            Step(tool, "archive", workers, archive_path, config, sevenzip_archive_command),
+            Step(
+                tool,
+                "extract",
+                workers,
+                extract_path,
+                config,
+                sevenzip_extract_command,
+                cleanup_targets=(archive_path, extract_path),
+            ),
+        )
 
+    if tool == "dwarfs":
+        return (
+            Step(tool, "archive", workers, archive_path, config, dwarfs_archive_command),
+            Step(
+                tool,
+                "extract",
+                workers,
+                extract_path,
+                config,
+                dwarfs_extract_command,
+                cleanup_targets=(archive_path, extract_path),
+            ),
+        )
+
+    command_builders: dict[
+        str,
+        tuple[
+            Callable[[Settings, str, ModeConfig, str], Sequence[str]],
+            Callable[[Settings, str, ModeConfig, str], Sequence[str]],
+        ],
+    ] = {
+        "tar+zstd": (tar_zstd_archive_command, tar_zstd_extract_command),
+        "pixz": (pixz_archive_command, pixz_extract_command),
+        "plzip": (plzip_archive_command, plzip_extract_command),
+        "pigz": (pigz_archive_command, pigz_extract_command),
+        "pbzip2": (
+            parallel_bzip2_archive_command,
+            parallel_bzip2_extract_command,
+        ),
+    }
+    builders = command_builders.get(tool)
+    if builders is None:
+        raise SystemExit(f"Unsupported competitor: {tool}")
+
+    archive_builder, extract_builder = builders
+    return (
+        Step(tool, "archive", workers, archive_path, config, archive_builder),
+        Step(
+            tool,
+            "extract",
+            workers,
+            extract_path,
+            config,
+            extract_builder,
+            cleanup_targets=(archive_path, extract_path),
+        ),
+    )
 
 def build_run_units(settings: Settings) -> list[RunUnit]:
     units: list[RunUnit] = []
@@ -2272,19 +2762,6 @@ def build_run_units(settings: Settings) -> list[RunUnit]:
             oxide_mode_config = oxide_mode_configs.get(mode)
             if oxide_mode_config is None:
                 raise SystemExit(f"Unknown mode: {mode}")
-
-            baseline_archive_step: Step | None
-            baseline_extract_step: Step | None
-            if settings.skip_baseline:
-                baseline_archive_step = None
-                baseline_extract_step = None
-            else:
-                baseline_mode_config = tuned_mode_configs.get(mode)
-                if baseline_mode_config is None:
-                    raise SystemExit(f"Unknown mode: {mode}")
-                baseline_archive_step, baseline_extract_step = baseline_steps(
-                    settings, mode, baseline_mode_config, workers
-                )
             oxide_archive_step = Step(
                 "oxide",
                 "archive",
@@ -2312,28 +2789,35 @@ def build_run_units(settings: Settings) -> list[RunUnit]:
                     oxide_archive_step.command_builder,
                     cleanup_targets=(oxide_archive_step.output_path,),
                 )
-                if baseline_archive_step is not None:
-                    baseline_archive_step = Step(
-                        baseline_archive_step.tool,
-                        baseline_archive_step.phase,
-                        baseline_archive_step.workers,
-                        baseline_archive_step.output_path,
-                        baseline_archive_step.mode_config,
-                        baseline_archive_step.command_builder,
-                        cleanup_targets=(baseline_archive_step.output_path,),
-                    )
                 oxide_extract_step = None
-                baseline_extract_step = None
+
+            tool_runs: list[ToolRun] = [
+                ToolRun("oxide", oxide_archive_step, oxide_extract_step)
+            ]
+
+            if not settings.skip_baseline:
+                baseline_mode_config = tuned_mode_configs.get(mode)
+                if baseline_mode_config is None:
+                    raise SystemExit(f"Unknown mode: {mode}")
+                for competitor in competitors_for_mode(settings, mode):
+                    archive_step, extract_step = competitor_steps(
+                        settings, competitor, mode, baseline_mode_config, workers
+                    )
+                    if settings.skip_extract:
+                        archive_step = Step(
+                            archive_step.tool,
+                            archive_step.phase,
+                            archive_step.workers,
+                            archive_step.output_path,
+                            archive_step.mode_config,
+                            archive_step.command_builder,
+                            cleanup_targets=(archive_step.output_path,),
+                        )
+                        extract_step = None
+                    tool_runs.append(ToolRun(competitor, archive_step, extract_step))
 
             units.append(
-                RunUnit(
-                    mode=mode,
-                    workers=workers,
-                    oxide_archive=oxide_archive_step,
-                    oxide_extract=oxide_extract_step,
-                    baseline_archive=baseline_archive_step,
-                    baseline_extract=baseline_extract_step,
-                )
+                RunUnit(mode=mode, workers=workers, tool_runs=tuple(tool_runs))
             )
 
     return units
@@ -2448,6 +2932,8 @@ def record_step(
     telemetry: TelemetryWriter,
 ) -> ResultRow:
     cleanup_path(step.output_path)
+    if step.phase == "extract":
+        step.output_path.mkdir(parents=True, exist_ok=True)
 
     command = step.command_builder(settings, mode, step.mode_config, step.workers)
     start_ns = time.perf_counter_ns()
@@ -2672,8 +3158,16 @@ def run_bench_with_telemetry(
             "rebuild_oxide": settings.rebuild_oxide,
             "sync_after_extract": settings.sync_after_extract,
             "modes": list(settings.modes),
+            "competitors_by_mode": {
+                mode: list(competitors_for_mode(settings, mode))
+                for mode in settings.modes
+            },
+            "selected_competitors": list(selected_competitor_names(settings)),
+            "threading_policy": threading_policy_summary(settings),
             "workers": settings.threads,
             "shuffle_seed": settings.shuffle_seed,
+            "competitor_output_base": str(settings.squashfs_output),
+            "competitor_extract_base": str(settings.squashfs_extract_dir),
             "squashfs_block_size": settings.squashfs_block_size,
             "raw_oxide_presets": settings.raw_oxide_presets,
             "mode_configs": {
@@ -2703,20 +3197,12 @@ def run_bench_with_telemetry(
         for unit in pass_units:
             console.rule(f"Mode {unit.mode} / workers {unit.workers}")
 
-            tool_groups: list[tuple[str, Step, Step | None]] = [
-                ("oxide", unit.oxide_archive, unit.oxide_extract),
-            ]
-            if unit.baseline_archive is not None:
-                tool_groups.append(
-                    (
-                        MODE_BASELINES[unit.mode],
-                        unit.baseline_archive,
-                        unit.baseline_extract,
-                    )
-                )
+            tool_groups: list[ToolRun] = list(unit.tool_runs)
             rng.shuffle(tool_groups)
 
-            for _tool_name, archive_step, extract_step in tool_groups:
+            for tool_run in tool_groups:
+                archive_step = tool_run.archive
+                extract_step = tool_run.extract
                 if settings.drop_caches:
                     drop_caches(cache_eviction_target(settings, archive_step))
                 archive_row = record_step(
@@ -2805,7 +3291,7 @@ def main() -> int:
                             else ""
                         )
                         console.print(
-                            f"[dim]Baseline averaged across {len(contributor_runs)} prior "
+                            f"[dim]Competitors averaged across {len(contributor_runs)} prior "
                             f"run(s) with same source & skip-extract ({len(baseline_rows)} samples): "
                             f"{preview}{extra}[/dim]"
                         )
@@ -2819,7 +3305,7 @@ def main() -> int:
                 elif not settings.quiet:
                     parts = [
                         "[yellow]Warning:[/yellow] --skip-baseline but no compatible "
-                        f"prior baseline under {settings.telemetry_dir}."
+                        f"prior competitor telemetry under {settings.telemetry_dir}."
                     ]
                     if skipped_runs:
                         parts.append(
@@ -2827,12 +3313,12 @@ def main() -> int:
                         )
                     else:
                         parts.append(
-                            "(Record at least one baseline run without --skip-baseline.)"
+                            "(Record at least one competitor run without --skip-baseline.)"
                         )
                     console.print(" ".join(parts) + "\n")
                 else:
                     print(
-                        "Warning: --skip-baseline but no compatible prior baseline telemetry "
+                        "Warning: --skip-baseline but no compatible prior competitor telemetry "
                         f"under {settings.telemetry_dir}"
                         + (
                             f" ({skipped_runs} run(s): wrong source or skip-extract)"
@@ -2877,6 +3363,11 @@ def main() -> int:
                         "shuffle_seed": settings.shuffle_seed,
                         "workers": settings.threads,
                         "worker_modes": list(settings.worker_modes),
+                        "competitors_by_mode": {
+                            mode: list(competitors_for_mode(settings, mode))
+                            for mode in settings.modes
+                        },
+                        "threading_policy": threading_policy_summary(settings),
                         "raw_oxide_presets": settings.raw_oxide_presets,
                         "skip_baseline": settings.skip_baseline,
                         "sync_after_extract": settings.sync_after_extract,
