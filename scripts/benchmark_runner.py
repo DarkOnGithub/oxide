@@ -45,6 +45,7 @@ COMMON_ARGS: tuple[str, ...] = (
     "16",
     "--raw-oxide-presets",
     "--sync-after-extract",
+    "--competitors mode-defaults"
     "--quiet",
 )
 
@@ -87,11 +88,11 @@ class BenchmarkResult:
 
 def default_jobs() -> tuple[BenchmarkJob, ...]:
     return (
-        BenchmarkJob(BASE_DIR / "datasets/200mb", 30, "dataset_200mb_30_passes"),
+        BenchmarkJob(BASE_DIR / "datasets/200mb", 5, "dataset_200mb"),
         BenchmarkJob(
-            BASE_DIR / "datasets/6gb/linux", 5, "dataset_6gb_linux_5_passes"
+            BASE_DIR / "datasets/6gb/linux", 4, "dataset_6gb_linux"
         ),
-        BenchmarkJob(BASE_DIR / "datasets/6gb", 3, "dataset_6gb_3_passes"),
+        BenchmarkJob(BASE_DIR / "datasets/6gb", 3, "dataset_6gb"),
     )
 
 
