@@ -2598,6 +2598,8 @@ def pixz_archive_command(
         settings,
         "pixz",
         [resolve_tool("pixz"), mode_level(mode, "-1", "-6", "-9")],
+        "-p",
+        "12"
     )
 
 
