@@ -2025,7 +2025,7 @@ def print_efficiency_scores(console: Console, stats_rows: Sequence[ModeStats]) -
 
 def drop_caches(target: Path) -> None:
     subprocess.run(["sync"], check=True)
-    subprocess.run([resolve_tool("vmtouch"), "-e", str(target)], check=True)
+    subprocess.run([resolve_tool("vmtouch"), "-q" , "-e", str(target)], check=True)
 
     # Old global cache-drop approach kept here for reference:
     # subprocess.run(["sync"], check=True)
