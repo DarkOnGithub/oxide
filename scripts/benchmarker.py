@@ -2023,9 +2023,13 @@ def print_efficiency_scores(console: Console, stats_rows: Sequence[ModeStats]) -
     console.print(table)
 
 
-def drop_caches() -> None:
+def drop_caches(target: Path) -> None:
     subprocess.run(["sync"], check=True)
-    subprocess.run(["sudo", "sh", "-c", "echo 3 >/proc/sys/vm/drop_caches"], check=True)
+    subprocess.run([resolve_tool("vmtouch"), "-e", str(target)], check=True)
+
+    # Old global cache-drop approach kept here for reference:
+    # subprocess.run(["sync"], check=True)
+    # subprocess.run(["sudo", "sh", "-c", "echo 3 >/proc/sys/vm/drop_caches"], check=True)
 
 
 def build_oxide(settings: Settings) -> None:
@@ -2679,7 +2683,7 @@ def run_bench_with_telemetry(
 
             for _tool_name, archive_step, extract_step in tool_groups:
                 if settings.drop_caches:
-                    drop_caches()
+                    drop_caches(settings.source)
                 archive_row = record_step(
                     settings,
                     archive_step,
@@ -2698,7 +2702,7 @@ def run_bench_with_telemetry(
 
                 if extract_step is not None:
                     if settings.drop_caches:
-                        drop_caches()
+                        drop_caches(settings.source)
                     extract_row = record_step(
                         settings,
                         extract_step,
