@@ -1278,12 +1278,10 @@ def host_telemetry_payload(host: HostTelemetry, elapsed_ns: int) -> dict[str, ob
 
 
 def competitor_threading_policy(tool: str, workers: str) -> str:
-    if tool in {"oxide", "squashfs", "7zip", "tar+zstd"}:
+    if tool in {"oxide", "squashfs", "7zip", "tar+zstd", "dwarfs", "pixz", "plzip", "pbzip2"}:
         return "worker-matched"
     if tool == "pigz":
         return "worker-matched" if workers != "auto" else "tool-default"
-    if tool in {"dwarfs", "pixz", "plzip", "pbzip2"}:
-        return "tool-default"
     return "unknown"
 
 
@@ -2550,25 +2548,45 @@ def sevenzip_extract_command(
 def dwarfs_archive_command(
     settings: Settings, _: str, __: ModeConfig, ___workers: str
 ) -> list[str]:
+    workers = resolved_thread_count(settings, ___workers)
     return [
         resolve_tool("mkdwarfs"),
         "-i",
         str(settings.source),
         "-o",
         str(archive_path_for("dwarfs", settings)),
+        "-N",
+        workers,
     ]
 
 
 def dwarfs_extract_command(
     settings: Settings, _: str, __: ModeConfig, ___workers: str
 ) -> list[str]:
+    workers = resolved_thread_count(settings, ___workers)
     return [
         resolve_tool("dwarfsextract"),
         "-i",
         str(archive_path_for("dwarfs", settings)),
         "-o",
         str(extract_path_for("dwarfs", settings)),
+        "-n",
+        workers,
     ]
+
+
+def pixz_threads(settings: Settings, workers: str) -> list[str]:
+    return ["-p", resolved_thread_count(settings, workers)]
+
+
+def plzip_threads(settings: Settings, workers: str) -> list[str]:
+    return ["-n", resolved_thread_count(settings, workers)]
+
+
+def parallel_bzip2_threads(settings: Settings, workers: str) -> list[str]:
+    tool = Path(resolved_parallel_bzip2_tool()).name
+    thread_flag = "-n" if tool == "lbzip2" else "-p"
+    return [thread_flag, resolved_thread_count(settings, workers)]
 
 
 def tar_zstd_archive_command(
@@ -2597,7 +2615,7 @@ def pixz_archive_command(
     return tar_archive_pipeline(
         settings,
         "pixz",
-        [resolve_tool("pixz"), mode_level(mode, "-1", "-6", "-9")],
+        [resolve_tool("pixz"), mode_level(mode, "-1", "-6", "-9"), *pixz_threads(settings, ___workers)],
     )
 
 
@@ -2605,7 +2623,7 @@ def pixz_extract_command(
     settings: Settings, _: str, __: ModeConfig, ___workers: str
 ) -> list[str]:
     tar_bin = shell_quote(resolve_tool("tar"))
-    pixz_bin = shell_quote(resolve_tool("pixz"))
+    pixz_bin = shlex.join([resolve_tool("pixz"), *pixz_threads(settings, ___workers)])
     script = (
         f"{pixz_bin} -d < {shell_quote(archive_path_for('pixz', settings))} | "
         f"{tar_bin} -xf - -C {shell_quote(extract_path_for('pixz', settings))}"
@@ -2619,14 +2637,18 @@ def plzip_archive_command(
     return tar_archive_pipeline(
         settings,
         "plzip",
-        [resolve_tool("plzip"), mode_level(mode, "-1", "-6", "-9")],
+        [resolve_tool("plzip"), mode_level(mode, "-1", "-6", "-9"), *plzip_threads(settings, ___workers)],
     )
 
 
 def plzip_extract_command(
     settings: Settings, _: str, __: ModeConfig, ___workers: str
 ) -> list[str]:
-    return tar_extract_pipeline(settings, "plzip", [resolve_tool("plzip"), "-dc"])
+    return tar_extract_pipeline(
+        settings,
+        "plzip",
+        [resolve_tool("plzip"), *plzip_threads(settings, ___workers), "-dc"],
+    )
 
 
 def pigz_archive_command(
@@ -2655,7 +2677,7 @@ def parallel_bzip2_archive_command(
     return tar_archive_pipeline(
         settings,
         "pbzip2",
-        [resolved_parallel_bzip2_tool(), mode_level(mode, "-1", "-6", "-9")],
+        [resolved_parallel_bzip2_tool(), mode_level(mode, "-1", "-6", "-9"), *parallel_bzip2_threads(settings, ___workers)],
     )
 
 
@@ -2663,7 +2685,9 @@ def parallel_bzip2_extract_command(
     settings: Settings, _: str, __: ModeConfig, ___workers: str
 ) -> list[str]:
     return tar_extract_pipeline(
-        settings, "pbzip2", [resolved_parallel_bzip2_tool(), "-dc"]
+        settings,
+        "pbzip2",
+        [resolved_parallel_bzip2_tool(), *parallel_bzip2_threads(settings, ___workers), "-dc"],
     )
 
 
