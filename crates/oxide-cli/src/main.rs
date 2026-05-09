@@ -28,6 +28,8 @@ fn run() -> AppResult {
         Commands::Archive(args) => commands::archive(*args)?,
         Commands::Extract(args) => commands::extract(args)?,
         Commands::Tree(args) => commands::tree(args)?,
+        Commands::Encrypt(args) => commands::encrypt(args)?,
+        Commands::Decrypt(args) => commands::decrypt(args)?,
     }
 
     Ok(())

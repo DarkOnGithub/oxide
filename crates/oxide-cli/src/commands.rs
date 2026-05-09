@@ -10,7 +10,7 @@ use oxide_core::{
 
 use crate::AppResult;
 use crate::cli::{
-    ArchiveArgs, ExtractArgs, TreeArgs, default_extract_output_path, default_output_path,
+    ArchiveArgs, ExtractArgs, TreeArgs, EncryptArgs, DecryptArgs, default_extract_output_path, default_output_path,
 };
 use crate::presets::{ArchiveOverrides, ResolvedArchiveSettings, resolve_archive_settings};
 use crate::progress::{ArchiveCliSink, ExtractCliSink, LiveRateStats};
@@ -239,6 +239,43 @@ pub fn extract(args: ExtractArgs) -> AppResult {
 pub fn tree(args: TreeArgs) -> AppResult {
     let reader = oxide_core::ArchiveReader::new(File::open(&args.input)?)?;
     print_archive_tree(&args.input, reader.manifest().entries());
+    Ok(())
+}
+
+pub fn encrypt(args: EncryptArgs) -> AppResult {
+    let EncryptArgs { input, output } = args;
+    
+    // Si l'utilisateur ne donne pas de chemin de sortie, on suffixe temporairement
+    let output_path = output.unwrap_or_else(|| {
+        let mut path = input.clone();
+        path.set_extension("oxz.tmp");
+        path
+    });
+
+    println!("Starting encryption for: {}", input.display());
+    
+    // TODO: 1. Demander le mot de passe interactif
+    // TODO: 2. Appeler le pipeline pour chiffrer les blocs
+    // TODO: 3. Renommer le fichier temporaire pour écraser l'original si output était None
+
+    Ok(())
+}
+
+pub fn decrypt(args: DecryptArgs) -> AppResult {
+    let DecryptArgs { input, output } = args;
+
+    let output_path = output.unwrap_or_else(|| {
+        let mut path = input.clone();
+        path.set_extension("oxz.tmp");
+        path
+    });
+
+    println!("Starting decryption for: {}", input.display());
+    
+    // TODO: 1. Demander le mot de passe interactif
+    // TODO: 2. Appeler le pipeline pour déchiffrer les blocs
+    // TODO: 3. Renommer le fichier temporaire pour écraser l'original si output était None
+
     Ok(())
 }
 
