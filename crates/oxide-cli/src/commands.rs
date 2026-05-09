@@ -245,8 +245,7 @@ pub fn tree(args: TreeArgs) -> AppResult {
 pub fn encrypt(args: EncryptArgs) -> AppResult {
     let EncryptArgs { input, output } = args;
     
-    // Si l'utilisateur ne donne pas de chemin de sortie, on suffixe temporairement
-    let output_path = output.unwrap_or_else(|| {
+    let output_path = output.clone().unwrap_or_else(|| {
         let mut path = input.clone();
         path.set_extension("oxz.tmp");
         path
@@ -254,9 +253,20 @@ pub fn encrypt(args: EncryptArgs) -> AppResult {
 
     println!("Starting encryption for: {}", input.display());
     
-    // TODO: 1. Demander le mot de passe interactif
-    // TODO: 2. Appeler le pipeline pour chiffrer les blocs
-    // TODO: 3. Renommer le fichier temporaire pour écraser l'original si output était None
+    // 1. Demander le mot de passe interactif (AVEC confirmation)
+    let password = get_secure_password("Enter password to encrypt archive", true)?;
+    
+    // 2. Appeler le pipeline (On préparera cette fonction dans oxide-core juste après !)
+    // oxide_core::encrypt_existing_archive(&input, &output_path, &password)?;
+    println!("Encrypting blocks... (Core function to be implemented)");
+
+    // 3. Remplacer le fichier original si l'utilisateur n'a pas spécifié de sortie
+    if output.is_none() {
+        std::fs::rename(&output_path, &input)?;
+        println!("Successfully encrypted and secured: {}", input.display());
+    } else {
+        println!("Successfully encrypted to: {}", output_path.display());
+    }
 
     Ok(())
 }
@@ -264,7 +274,7 @@ pub fn encrypt(args: EncryptArgs) -> AppResult {
 pub fn decrypt(args: DecryptArgs) -> AppResult {
     let DecryptArgs { input, output } = args;
 
-    let output_path = output.unwrap_or_else(|| {
+    let output_path = output.clone().unwrap_or_else(|| {
         let mut path = input.clone();
         path.set_extension("oxz.tmp");
         path
@@ -272,9 +282,20 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
 
     println!("Starting decryption for: {}", input.display());
     
-    // TODO: 1. Demander le mot de passe interactif
-    // TODO: 2. Appeler le pipeline pour déchiffrer les blocs
-    // TODO: 3. Renommer le fichier temporaire pour écraser l'original si output était None
+    // 1. Demander le mot de passe interactif (SANS confirmation)
+    let password = get_secure_password("Enter password to decrypt archive", false)?;
+    
+    // 2. Appeler le pipeline
+    // oxide_core::decrypt_existing_archive(&input, &output_path, &password)?;
+    println!("Decrypting blocks... (Core function to be implemented)");
+
+    // 3. Remplacer le fichier original
+    if output.is_none() {
+        std::fs::rename(&output_path, &input)?;
+        println!("Successfully decrypted and restored: {}", input.display());
+    } else {
+        println!("Successfully decrypted to: {}", output_path.display());
+    }
 
     Ok(())
 }
@@ -386,4 +407,20 @@ fn compression_name(compression: CompressionAlgo, level: Option<i32>, extreme: b
         (None, true) => format!("{name}+extreme"),
         (None, false) => name.to_string(),
     }
+}
+
+fn get_secure_password(prompt: &str, require_confirmation: bool) -> AppResult<String> {
+    if let Ok(env_pass) = std::env::var("OXIDE_PASSWORD") {
+        return Ok(env_pass);
+    }
+
+    let mut dialog = dialoguer::Password::new();
+    dialog.with_prompt(prompt);
+    
+    if require_confirmation {
+        dialog.with_confirmation("Confirm password", "Passwords do not match");
+    }
+    
+    let password = dialog.interact()?;
+    Ok(password)
 }
