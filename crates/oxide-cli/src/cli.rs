@@ -62,6 +62,10 @@ pub struct ArchiveArgs {
     #[arg(long, default_value_t = false)]
     pub skip_compression: bool,
 
+    /// Encrypt the archive with a password
+    #[arg(long, default_value_t = false)]
+    pub encrypt: bool,
+
     /// Explicit codec-specific compression level.
     #[arg(long)]
     pub compression_level: Option<i32>,

@@ -25,6 +25,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
     let ArchiveArgs {
         input,
         output,
+        encrypt,
         block_size,
         chunking,
         min_block_size,
@@ -48,6 +49,23 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         result_wait_ms,
         telemetry_details,
     } = args;
+    let mut archive_password: Option<String> = None;
+
+    if encrypt {
+        // 1. On regarde si le mot de passe est dans l'environnement (pour les scripts auto)
+        if let Ok(env_pass) = std::env::var("OXIDE_PASSWORD") {
+            archive_password = Some(env_pass);
+        } else {
+            // 2. Sinon, on demande à l'humain de taper son mot de passe de manière invisible !
+            // (Nécessite d'ajouter la crate `dialoguer` dans le Cargo.toml du CLI)
+            let password = dialoguer::Password::new()
+                .with_prompt("Enter password")
+                .with_confirmation("Confirm password", "Passwords do not match")
+                .interact()?;
+            
+            archive_password = Some(password);
+        }
+    }
     let workers_explicitly_requested = workers.is_some();
     let producer_threads_explicitly_requested = producer_threads.is_some();
     let settings = resolve_archive_settings(
