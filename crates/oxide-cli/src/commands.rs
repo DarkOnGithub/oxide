@@ -415,10 +415,10 @@ fn get_secure_password(prompt: &str, require_confirmation: bool) -> AppResult<St
     }
 
     let mut dialog = dialoguer::Password::new();
-    dialog.with_prompt(prompt);
+    dialog = dialog.with_prompt(prompt); 
     
     if require_confirmation {
-        dialog.with_confirmation("Confirm password", "Passwords do not match");
+        dialog = dialog.with_confirmation("Confirm password", "Passwords do not match");
     }
     
     let password = dialog.interact()?;
