@@ -449,10 +449,7 @@ pub(crate) fn process_batch(
 }
 
 #[inline]
-pub fn select_stored_payload<'a>(
-    source: &'a [u8],
-    compressed: &'a [u8],
-) -> (&'a [u8], bool) {
+pub fn select_stored_payload<'a>(source: &'a [u8], compressed: &'a [u8]) -> (&'a [u8], bool) {
     let raw_passthrough = compressed.len() >= source.len();
     let payload = if raw_passthrough { source } else { compressed };
     (payload, raw_passthrough)
@@ -504,4 +501,3 @@ mod tests {
         );
     }
 }
-

@@ -125,6 +125,28 @@ fn extract_command_accepts_telemetry_flag() {
 }
 
 #[test]
+fn extract_command_accepts_preset_flag() {
+    let cli = Cli::try_parse_from(["oxide", "extract", "demo/input.oxz", "--preset", "fast"])
+        .expect("extract arguments should parse");
+
+    match cli.command {
+        Commands::Extract(args) => assert_eq!(args.preset.as_deref(), Some("fast")),
+        _ => panic!("expected extract command"),
+    }
+}
+
+#[test]
+fn extract_command_workers_default_is_none_for_preset_resolution() {
+    let cli = Cli::try_parse_from(["oxide", "extract", "demo/input.oxz"])
+        .expect("extract arguments should parse");
+
+    match cli.command {
+        Commands::Extract(args) => assert_eq!(args.workers, None),
+        _ => panic!("expected extract command"),
+    }
+}
+
+#[test]
 fn extract_command_accepts_extract_write_shards_flag() {
     let cli = Cli::try_parse_from([
         "oxide",
@@ -137,6 +159,17 @@ fn extract_command_accepts_extract_write_shards_flag() {
 
     match cli.command {
         Commands::Extract(args) => assert_eq!(args.extract_write_shards, 3),
+        _ => panic!("expected extract command"),
+    }
+}
+
+#[test]
+fn extract_command_defaults_extract_write_shards_to_auto() {
+    let cli = Cli::try_parse_from(["oxide", "extract", "demo/input.oxz"])
+        .expect("extract arguments should parse");
+
+    match cli.command {
+        Commands::Extract(args) => assert_eq!(args.extract_write_shards, 0),
         _ => panic!("expected extract command"),
     }
 }

@@ -24,8 +24,8 @@ use crate::types::Result;
 use super::super::super::directory;
 use super::super::reorder_writer::{OrderedChunkWriter, OwnedChunk, SharedChunk};
 
-mod metadata;
 mod direct;
+mod metadata;
 mod planner;
 mod selection;
 mod write_shards;
@@ -43,6 +43,7 @@ const SMALL_OUTPUT_BUFFER_CAPACITY: usize = 64 * 1024;
 const PARALLEL_METADATA_MIN_ITEMS: usize = 8;
 const MAX_METADATA_WORKERS: usize = 8;
 const MAX_PREPARED_ENTRY_WORKERS: usize = 8;
+const MAX_AUTO_EXTRACT_WRITE_SHARDS: usize = 8;
 const PREPARED_ENTRY_QUEUE_CAPACITY: usize = 256;
 const BASE_PREOPENED_FILE_WINDOW_MULTIPLIER: usize = 12;
 const PREOPENED_FILE_WINDOW_BONUS_STEP: usize = 3;
@@ -50,7 +51,7 @@ const MIN_PREOPENED_FILE_WINDOW_CAPACITY: usize = 32;
 const MAX_PREOPENED_FILE_WINDOW_CAPACITY: usize = 384;
 const MIN_READY_ENTRY_WINDOW_CAPACITY: usize = 32;
 const MAX_READY_ENTRY_WINDOW_CAPACITY: usize = 96;
-const WRITE_SHARD_QUEUE_CAPACITY: usize = 128;
+const WRITE_SHARD_QUEUE_CAPACITY: usize = 256;
 const DIRECT_FILE_WRITE_MAX_BYTES: u64 = 32 * 1024;
 const SMALL_FILE_BUFFER_MAX_BYTES: u64 = 256 * 1024;
 const MEDIUM_FILE_BUFFER_MAX_BYTES: u64 = 1024 * 1024;
@@ -368,6 +369,7 @@ struct WriteShardWorker {
     next_file_id: usize,
     next_shard_hint: usize,
     shard_load_bytes: Vec<u64>,
+    shard_pending_files: Vec<usize>,
     completion_rx: Receiver<Result<WriteShardCompletion>>,
     task_txs: Vec<Sender<WriteShardTask>>,
     handles: Vec<thread::JoinHandle<Result<WriteShardOutcome>>>,
@@ -474,6 +476,49 @@ fn output_buffer_capacity(entry_size: u64) -> Option<usize> {
     Some(OUTPUT_BUFFER_CAPACITY)
 }
 
+fn data_file_entry_count(entries: &[RestoreEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|restore_entry| {
+            matches!(restore_entry.entry.kind, crate::ArchiveEntryKind::File)
+                && restore_entry.entry.size > 0
+        })
+        .count()
+}
+
+pub(super) fn resolve_extract_write_shards(
+    entries: &[RestoreEntry],
+    requested_shards: usize,
+) -> usize {
+    let available_parallelism = thread::available_parallelism()
+        .unwrap_or(NonZeroUsize::MIN)
+        .get();
+    resolve_extract_write_shards_for_counts(
+        data_file_entry_count(entries),
+        requested_shards,
+        available_parallelism,
+    )
+}
+
+fn resolve_extract_write_shards_for_counts(
+    data_file_count: usize,
+    requested_shards: usize,
+    available_parallelism: usize,
+) -> usize {
+    let data_file_count = data_file_count.max(1);
+
+    if requested_shards > 0 {
+        return requested_shards.min(data_file_count).max(1);
+    }
+
+    available_parallelism
+        .max(1)
+        .div_ceil(2)
+        .clamp(1, MAX_AUTO_EXTRACT_WRITE_SHARDS)
+        .min(data_file_count)
+        .max(1)
+}
+
 fn available_prepared_entry_workers(item_count: usize) -> usize {
     thread::available_parallelism()
         .unwrap_or(NonZeroUsize::MIN)
@@ -562,4 +607,32 @@ fn adaptive_preopened_file_window_capacity(
             MAX_PREOPENED_FILE_WINDOW_CAPACITY,
         )
         .min(file_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_extract_write_shards_for_counts;
+
+    #[test]
+    fn auto_extract_write_shards_use_conservative_parallel_default() {
+        assert_eq!(resolve_extract_write_shards_for_counts(32, 0, 1), 1);
+        assert_eq!(resolve_extract_write_shards_for_counts(32, 0, 8), 4);
+        assert_eq!(resolve_extract_write_shards_for_counts(32, 0, 32), 8);
+    }
+
+    #[test]
+    fn auto_extract_write_shards_are_capped_by_workload() {
+        assert_eq!(resolve_extract_write_shards_for_counts(0, 0, 16), 1);
+        assert_eq!(resolve_extract_write_shards_for_counts(2, 0, 16), 2);
+    }
+
+    #[test]
+    fn explicit_single_shard_disables_sharding() {
+        assert_eq!(resolve_extract_write_shards_for_counts(32, 1, 16), 1);
+    }
+
+    #[test]
+    fn explicit_shards_do_not_exceed_data_files() {
+        assert_eq!(resolve_extract_write_shards_for_counts(3, 8, 16), 3);
+    }
 }
