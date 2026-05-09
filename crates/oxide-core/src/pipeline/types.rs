@@ -271,7 +271,8 @@ pub struct PipelinePerformanceOptions {
     /// Set to 0 to disable writer-side deduplication.
     pub block_dedup_window_blocks: usize,
     /// Initial extract write shard count for directory restores.
-    /// Values below 1 disable sharding.
+    /// `0` enables adaptive auto-sharding, `1` disables sharding, and larger
+    /// values request that many write shards.
     pub extract_write_shards: usize,
     /// Restore stored ownership, mode, and timestamps during directory extraction.
     pub extract_preserve_metadata: bool,

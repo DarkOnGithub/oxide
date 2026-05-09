@@ -567,6 +567,14 @@ def summarize_oxide_telemetry(
         if isinstance(effective_cores, (int, float)):
             bucket.setdefault("effective_cores", []).append(effective_cores)
 
+        wall_ratio = parse_numeric_scalar(
+            runtime.get("write_shard_payload_wall_ratio")
+        )
+        if isinstance(wall_ratio, (int, float)):
+            bucket.setdefault("write_shard_payload_wall_ratio", []).append(
+                float(wall_ratio)
+            )
+
         for stage_key, value in stage_timings.items():
             numeric_value = parse_numeric_scalar(value)
             if isinstance(numeric_value, (int, float)):
@@ -610,6 +618,10 @@ def summarize_oxide_telemetry(
         }
         if "effective_cores" in values:
             summary["effective_cores"] = _numeric_summary(values["effective_cores"])
+        if "write_shard_payload_wall_ratio" in values:
+            summary["write_shard_payload_wall_ratio"] = _numeric_summary(
+                values["write_shard_payload_wall_ratio"]
+            )
         if stage_summaries:
             summary["stage_timings_us"] = stage_summaries
         if queue_summaries:
@@ -631,6 +643,21 @@ def format_oxide_metric(name: str, value: int | float | None, *, kind: str) -> s
         return format_value(value)
 
     return format_value(value)
+
+
+def format_extract_payload_wall_cell(row: dict[str, object]) -> str:
+    """`write_payload_wall_ratio` exists only for extract; archive rows omit it."""
+    if str(row.get("phase", "")).lower() != "extract":
+        return "—"
+    ratio = row.get("write_shard_payload_wall_ratio")
+    if isinstance(ratio, dict):
+        avg = ratio.get("avg")
+        if isinstance(avg, (int, float)):
+            return f"{float(avg):.2f}x"
+        return "—"
+    if isinstance(ratio, (int, float)):
+        return f"{float(ratio):.2f}x"
+    return "—"
 
 
 def flatten_oxide_stage_rows(
@@ -843,6 +870,7 @@ def print_text_report(console: Console, payload: dict[str, object]) -> None:
                     "workers",
                     "samples",
                     "effective cores",
+                    "payload/wall (ext)",
                 ],
                 [
                     [
@@ -854,10 +882,11 @@ def print_text_report(console: Console, payload: dict[str, object]) -> None:
                         row.get("effective_cores", {}).get("avg")
                         if isinstance(row.get("effective_cores"), dict)
                         else row.get("effective_cores"),
+                        format_extract_payload_wall_cell(row),
                     ]
                     for row in oxide_telemetry
                 ],
-                right_align={4, 5},
+                right_align={4, 5, 6},
             )
         )
 

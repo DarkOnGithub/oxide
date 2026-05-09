@@ -48,14 +48,19 @@ struct DirectBlockExtent {
     file_offset: u64,
 }
 
+#[derive(Debug, Clone)]
+struct DirectWriteRegion {
+    file_id: usize,
+    path: Arc<PathBuf>,
+    range: std::ops::Range<usize>,
+    file_offset: u64,
+}
+
 #[derive(Debug)]
 enum DirectWriteTask {
-    Write {
-        file_id: usize,
-        path: Arc<PathBuf>,
+    WriteBatch {
         chunk: SharedChunk,
-        range: std::ops::Range<usize>,
-        file_offset: u64,
+        writes: Vec<DirectWriteRegion>,
     },
 }
 
@@ -87,7 +92,7 @@ impl DirectDirectoryRestoreWriter {
         )?;
         stats.record_output_prepare_directories(started.elapsed());
 
-        let shard_count = write_shards.max(1);
+        let shard_count = resolve_extract_write_shards(&entries, write_shards);
         stats.ensure_write_shards(shard_count);
         let block_extents = build_block_extents(block_descriptors, &files, shard_count)?;
         let mut task_txs = Vec::with_capacity(shard_count);
@@ -115,29 +120,48 @@ impl DirectDirectoryRestoreWriter {
         })
     }
 
-    pub(crate) fn write_decoded_block(&mut self, block_index: usize, block: OwnedChunk) -> Result<()> {
+    pub(crate) fn write_decoded_block(
+        &mut self,
+        block_index: usize,
+        block: OwnedChunk,
+    ) -> Result<()> {
         let shared = block.into_shared();
-        let extents = self
-            .block_extents
-            .get(block_index)
-            .ok_or(crate::OxideError::InvalidFormat(
-                "decoded directory block index out of range",
-            ))?;
+        let shard_count = self.task_txs.len();
+        let extents =
+            self.block_extents
+                .get(block_index)
+                .ok_or(crate::OxideError::InvalidFormat(
+                    "decoded directory block index out of range",
+                ))?;
+        let mut pending_writes = vec![Vec::new(); shard_count.max(1)];
         for extent in extents {
-            let tx = self.task_txs.get(extent.shard).ok_or_else(|| {
-                crate::OxideError::CompressionError("direct write shard unavailable".to_string())
+            let shard_writes = pending_writes.get_mut(extent.shard).ok_or_else(|| {
+                crate::OxideError::CompressionError(
+                    "direct write shard assignment out of range".to_string(),
+                )
             })?;
-            let task = DirectWriteTask::Write {
+            shard_writes.push(DirectWriteRegion {
                 file_id: extent.file_id,
                 path: Arc::clone(&extent.path),
-                chunk: shared.clone(),
                 range: extent.block_offset..extent.block_offset + extent.len,
                 file_offset: extent.file_offset,
+            });
+        }
+
+        for (shard, writes) in pending_writes.into_iter().enumerate() {
+            if writes.is_empty() {
+                continue;
+            }
+            let tx = self.task_txs.get(shard).ok_or_else(|| {
+                crate::OxideError::CompressionError("direct write shard unavailable".to_string())
+            })?;
+            let task = DirectWriteTask::WriteBatch {
+                chunk: shared.clone(),
+                writes,
             };
             match tx.try_send(task) {
                 Ok(()) => {
-                    self.stats
-                        .record_write_shard_queue_peak(extent.shard, tx.len());
+                    self.stats.record_write_shard_queue_peak(shard, tx.len());
                 }
                 Err(TrySendError::Full(task)) => {
                     let blocked_started = Instant::now();
@@ -147,9 +171,8 @@ impl DirectDirectoryRestoreWriter {
                         )
                     })?;
                     self.stats
-                        .record_write_shard_blocked(extent.shard, blocked_started.elapsed());
-                    self.stats
-                        .record_write_shard_queue_peak(extent.shard, tx.len());
+                        .record_write_shard_blocked(shard, blocked_started.elapsed());
+                    self.stats.record_write_shard_queue_peak(shard, tx.len());
                 }
                 Err(TrySendError::Disconnected(_)) => {
                     return Err(crate::OxideError::CompressionError(
@@ -244,9 +267,16 @@ fn prepare_direct_entries(
     for restore_entry in entries {
         match restore_entry.entry.kind {
             crate::ArchiveEntryKind::Directory => {
-                ensure_direct_directory(root, &restore_entry.path, &mut created_directories, stats)?;
-                pending_directory_metadata
-                    .push(PendingMetadata::new(restore_entry.path.clone(), restore_entry.entry.clone()));
+                ensure_direct_directory(
+                    root,
+                    &restore_entry.path,
+                    &mut created_directories,
+                    stats,
+                )?;
+                pending_directory_metadata.push(PendingMetadata::new(
+                    restore_entry.path.clone(),
+                    restore_entry.entry.clone(),
+                ));
             }
             crate::ArchiveEntryKind::File | crate::ArchiveEntryKind::Symlink => {
                 if let Some(parent) = restore_entry
@@ -270,8 +300,10 @@ fn prepare_direct_entries(
                     drop(file);
                     stats.record_output_create_file(create_started.elapsed());
                 }
-                pending_file_metadata
-                    .push(PendingMetadata::new(restore_entry.path.clone(), restore_entry.entry.clone()));
+                pending_file_metadata.push(PendingMetadata::new(
+                    restore_entry.path.clone(),
+                    restore_entry.entry.clone(),
+                ));
                 files.push(DirectFileEntry {
                     id: files.len(),
                     path: Arc::new(restore_entry.path.clone()),
@@ -345,6 +377,7 @@ fn build_block_extents(
     files: &[DirectFileEntry],
     shard_count: usize,
 ) -> Result<Vec<Vec<DirectBlockExtent>>> {
+    let file_shards = assign_direct_file_shards(files, shard_count.max(1));
     let mut by_offset = files.iter().collect::<Vec<_>>();
     by_offset.sort_by_key(|file| file.entry.content_offset);
 
@@ -353,9 +386,12 @@ fn build_block_extents(
     let mut block_start = 0u64;
     for descriptor in block_descriptors {
         let block_len = descriptor.raw_len as u64;
-        let block_end = block_start
-            .checked_add(block_len)
-            .ok_or(crate::OxideError::InvalidFormat("decoded block range overflow"))?;
+        let block_end =
+            block_start
+                .checked_add(block_len)
+                .ok_or(crate::OxideError::InvalidFormat(
+                    "decoded block range overflow",
+                ))?;
         let mut extents = Vec::new();
 
         while file_index < by_offset.len()
@@ -372,9 +408,12 @@ fn build_block_extents(
         while scan < by_offset.len() {
             let file = by_offset[scan];
             let file_start = file.entry.content_offset;
-            let file_end = file_start
-                .checked_add(file.entry.size)
-                .ok_or(crate::OxideError::InvalidFormat("file content range overflow"))?;
+            let file_end =
+                file_start
+                    .checked_add(file.entry.size)
+                    .ok_or(crate::OxideError::InvalidFormat(
+                        "file content range overflow",
+                    ))?;
             if file_start >= block_end {
                 break;
             }
@@ -383,14 +422,20 @@ fn build_block_extents(
             let overlap_end = block_end.min(file_end);
             if overlap_start < overlap_end {
                 let len = usize::try_from(overlap_end - overlap_start).map_err(|_| {
-                    crate::OxideError::InvalidFormat("direct write extent length exceeds usize range")
+                    crate::OxideError::InvalidFormat(
+                        "direct write extent length exceeds usize range",
+                    )
                 })?;
                 let block_offset = usize::try_from(overlap_start - block_start).map_err(|_| {
-                    crate::OxideError::InvalidFormat("direct write block offset exceeds usize range")
+                    crate::OxideError::InvalidFormat(
+                        "direct write block offset exceeds usize range",
+                    )
                 })?;
                 extents.push(DirectBlockExtent {
                     file_id: file.id,
-                    shard: file.id % shard_count.max(1),
+                    shard: *file_shards.get(file.id).ok_or(crate::OxideError::InvalidFormat(
+                        "direct restore file shard assignment out of range",
+                    ))?,
                     path: Arc::clone(&file.path),
                     block_offset,
                     len,
@@ -409,13 +454,16 @@ fn build_block_extents(
         block_start = block_end;
     }
 
-    let expected_total = by_offset
-        .iter()
-        .map(|file| file.entry.size)
-        .try_fold(0u64, |acc, size| {
-            acc.checked_add(size)
-                .ok_or(crate::OxideError::InvalidFormat("directory content size overflow"))
-        })?;
+    let expected_total =
+        by_offset
+            .iter()
+            .map(|file| file.entry.size)
+            .try_fold(0u64, |acc, size| {
+                acc.checked_add(size)
+                    .ok_or(crate::OxideError::InvalidFormat(
+                        "directory content size overflow",
+                    ))
+            })?;
     if block_start != expected_total {
         return Err(crate::OxideError::InvalidFormat(
             "directory block payload size does not match manifest file sizes",
@@ -423,6 +471,49 @@ fn build_block_extents(
     }
 
     Ok(block_extents)
+}
+
+fn assign_direct_file_shards(files: &[DirectFileEntry], shard_count: usize) -> Vec<usize> {
+    let shard_count = shard_count.max(1);
+    let mut assignments = vec![0; files.len()];
+    let mut shard_load_bytes = vec![0u64; shard_count];
+    let mut shard_pending_files = vec![0usize; shard_count];
+    let mut next_shard_hint = 0usize;
+    let mut ordered = files.iter().collect::<Vec<_>>();
+
+    ordered.sort_by(|left, right| {
+        right
+            .entry
+            .size
+            .cmp(&left.entry.size)
+            .then_with(|| left.entry.content_offset.cmp(&right.entry.content_offset))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    for file in ordered {
+        let mut chosen_shard = 0usize;
+        let mut best_key = (u64::MAX, usize::MAX, usize::MAX);
+        for offset in 0..shard_count {
+            let shard = (next_shard_hint + offset) % shard_count;
+            let candidate_key = (
+                shard_load_bytes[shard],
+                shard_pending_files[shard],
+                offset,
+            );
+            if candidate_key < best_key {
+                best_key = candidate_key;
+                chosen_shard = shard;
+            }
+        }
+
+        assignments[file.id] = chosen_shard;
+        shard_load_bytes[chosen_shard] =
+            shard_load_bytes[chosen_shard].saturating_add(file.entry.size);
+        shard_pending_files[chosen_shard] = shard_pending_files[chosen_shard].saturating_add(1);
+        next_shard_hint = (chosen_shard + 1) % shard_count;
+    }
+
+    assignments
 }
 
 /// Caps aggregate `File` handles held across all direct-write shards so extract stays
@@ -473,17 +564,13 @@ fn run_direct_write_shard(
 
     while let Ok(task) = task_rx.recv() {
         match task {
-            DirectWriteTask::Write {
-                file_id,
-                path,
-                chunk,
-                range,
-                file_offset,
-            } => {
-                let file = files.get(file_id, &path)?;
-                let started = Instant::now();
-                write_all_at(file, &chunk.as_ref()[range], file_offset)?;
-                outcome.output_data += started.elapsed();
+            DirectWriteTask::WriteBatch { chunk, writes } => {
+                for write in writes {
+                    let file = files.get(write.file_id, &write.path)?;
+                    let started = Instant::now();
+                    write_all_at(file, &chunk.as_ref()[write.range], write.file_offset)?;
+                    outcome.output_data += started.elapsed();
+                }
             }
         }
     }
@@ -656,4 +743,48 @@ fn write_all_at(file: &mut fs::File, bytes: &[u8], offset: u64) -> std::io::Resu
 
     file.seek(SeekFrom::Start(offset))?;
     file.write_all(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ArchiveEntryKind, ArchiveListingEntry, ArchiveTimestamp};
+
+    fn file(id: usize, size: u64) -> DirectFileEntry {
+        DirectFileEntry {
+            id,
+            path: Arc::new(PathBuf::from(format!("file-{id}"))),
+            entry: ArchiveListingEntry {
+                path: format!("file-{id}"),
+                kind: ArchiveEntryKind::File,
+                target: None,
+                size,
+                mode: 0,
+                mtime: ArchiveTimestamp::default(),
+                uid: 0,
+                gid: 0,
+                content_offset: id as u64,
+            },
+        }
+    }
+
+    #[test]
+    fn direct_file_shards_balance_large_files_by_size() {
+        let files = vec![file(0, 100), file(1, 90), file(2, 80), file(3, 10), file(4, 10)];
+
+        let assignments = assign_direct_file_shards(&files, 2);
+
+        let mut loads = [0u64; 2];
+        let mut modulo_loads = [0u64; 2];
+        for file in &files {
+            loads[assignments[file.id]] += file.entry.size;
+            modulo_loads[file.id % 2] += file.entry.size;
+        }
+
+        assert_eq!(assignments.len(), files.len());
+        assert!(
+            loads[0].abs_diff(loads[1]) < modulo_loads[0].abs_diff(modulo_loads[1]),
+            "loads were {loads:?}, modulo loads were {modulo_loads:?}"
+        );
+    }
 }

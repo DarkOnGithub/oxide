@@ -19,6 +19,7 @@ impl WriteShardWorker {
             next_file_id: 0,
             next_shard_hint: 0,
             shard_load_bytes: vec![0; shard_count],
+            shard_pending_files: vec![0; shard_count],
             completion_rx,
             task_txs,
             handles,
@@ -34,8 +35,8 @@ impl WriteShardWorker {
         for offset in 0..self.shard_count.max(1) {
             let candidate = (self.next_shard_hint + offset) % self.shard_count.max(1);
             let candidate_load = self.shard_load_bytes[candidate];
-            let candidate_queue = self.task_txs[candidate].len();
-            let candidate_key = (candidate_load, candidate_queue, offset);
+            let candidate_pending_files = self.shard_pending_files[candidate];
+            let candidate_key = (candidate_load, candidate_pending_files, offset);
             if candidate_key < best {
                 best = candidate_key;
                 shard = candidate;
@@ -44,12 +45,16 @@ impl WriteShardWorker {
         self.next_file_id = self.next_file_id.saturating_add(1);
         self.next_shard_hint = (shard + 1) % self.shard_count.max(1);
         self.shard_load_bytes[shard] = self.shard_load_bytes[shard].saturating_add(file_size);
+        self.shard_pending_files[shard] = self.shard_pending_files[shard].saturating_add(1);
         (file_id, shard)
     }
 
     pub(super) fn release_file(&mut self, shard: usize, file_size: u64) {
         if let Some(load) = self.shard_load_bytes.get_mut(shard) {
             *load = load.saturating_sub(file_size);
+        }
+        if let Some(pending_files) = self.shard_pending_files.get_mut(shard) {
+            *pending_files = pending_files.saturating_sub(1);
         }
     }
 
@@ -187,6 +192,8 @@ impl WriteShardWorker {
         })?;
         self.shard_load_bytes[pending.shard] =
             self.shard_load_bytes[pending.shard].saturating_sub(pending.entry.size);
+        self.shard_pending_files[pending.shard] =
+            self.shard_pending_files[pending.shard].saturating_sub(1);
         stats.record_output_flush(completion.flush_elapsed);
         pending_file_metadata.push(PendingMetadata::new(pending.path, pending.entry));
         *completed_data_files = completed_data_files.saturating_add(1);
