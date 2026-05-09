@@ -10,13 +10,13 @@ pub mod tags;
 pub mod worker;
 
 pub use events::{
-    ArchivePlanningCompleteEvent, ArchiveProgressEvent, ExtractProgressEvent,
-    ProfileEvent, TelemetryEvent, TelemetrySink,
+    ArchivePlanningCompleteEvent, ArchiveProgressEvent, ExtractProgressEvent, ProfileEvent,
+    TelemetryEvent, TelemetrySink,
 };
 pub use memory::ProcessMemorySample;
 pub use report::{
-    ArchiveReport, ArchiveRun, ExtractReport, ReportValue, RunReport,
-    RunTelemetryOptions, ThreadReport, WorkerReport,
+    ArchiveReport, ArchiveRun, ExtractReport, ReportValue, RunReport, RunTelemetryOptions,
+    ThreadReport, WorkerReport,
 };
 
 /// Histogram summary captured in telemetry snapshots.

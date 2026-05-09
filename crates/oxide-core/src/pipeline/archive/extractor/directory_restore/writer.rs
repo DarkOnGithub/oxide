@@ -9,7 +9,7 @@ impl DirectoryRestoreWriter {
         Self::create_with_shards(
             root,
             manifest,
-            performance.extract_write_shards.max(1),
+            performance.extract_write_shards,
             performance.extract_preserve_metadata,
         )
     }
@@ -22,7 +22,7 @@ impl DirectoryRestoreWriter {
     ) -> Result<Self> {
         let entries = build_restore_entries(root, manifest)?;
         let window_config = prepared_entry_window_config(&entries);
-        let write_shard_count = write_shards.max(1);
+        let write_shard_count = resolve_extract_write_shards(&entries, write_shards);
         let mut writer = Self {
             root: root.to_path_buf(),
             data_file_count_total: 0,
