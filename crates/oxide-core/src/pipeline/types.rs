@@ -314,6 +314,8 @@ pub struct ArchivePipelineConfig {
     pub compression_algo: CompressionAlgo,
     /// Whether compression should be skipped entirely.
     pub skip_compression: bool,
+    /// Optional password for archive encryption
+    pub password: Option<String>,
     /// Optional prebuilt archive dictionary bank imported from another archive.
     pub imported_dictionary_bank: Option<ArchiveDictionaryBank>,
     /// Performance tuning options.
@@ -335,6 +337,7 @@ impl ArchivePipelineConfig {
             buffer_pool,
             compression_algo,
             skip_compression: false,
+            password: None,
             imported_dictionary_bank: None,
             performance: PipelinePerformanceOptions::default(),
         }

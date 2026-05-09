@@ -57,3 +57,11 @@ pub use types::{
     Batch, BatchData, ChunkEncodingPlan, CompressedBlock, CompressedPayload, CompressionAlgo,
     CompressionMeta, Result,
 };
+
+use std::path::Path;
+
+/// Vérifie si une archive OXZ est chiffrée en lisant son en-tête.
+pub fn probe_encryption<P: AsRef<Path>>(_path: P) -> crate::types::Result<bool> {
+    // TODO: Implémenter la vraie lecture du flag de chiffrement dans le GlobalHeader
+    Ok(false) 
+}
