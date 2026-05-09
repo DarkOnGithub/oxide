@@ -117,6 +117,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         compression_workers,
         producer_threads,
         Arc::clone(&buffer_pool),
+        archive_password,
     )?;
     let output_file = File::create(&output_path)?;
     let telemetry_options = RunTelemetryOptions {
@@ -196,8 +197,15 @@ pub fn extract(args: ExtractArgs) -> AppResult {
         telemetry_details,
     } = args;
 
+    let is_encrypted = oxide_core::probe_encryption(&input)?;
+
+    let mut password: Option<String> = None;
+    if is_encrypted {
+        password = Some(get_secure_password("This archive is encrypted. Enter password", false)?);
+    }
+
     let output_path = output.unwrap_or_else(|| default_extract_output_path(&input));
-    let pipeline = build_extract_pipeline(workers, extract_write_shards);
+    let pipeline = build_extract_pipeline(workers, extract_write_shards, password);
     let telemetry_options = RunTelemetryOptions {
         progress_interval: Duration::from_millis(stats_interval_ms.max(50)),
         emit_final_progress: true,
@@ -305,6 +313,7 @@ fn build_archive_pipeline(
     workers: usize,
     producer_threads: usize,
     buffer_pool: Arc<BufferPool>,
+    password: Option<String>,
 ) -> AppResult<ArchivePipeline> {
     let performance = PipelinePerformanceOptions {
         compression_level: settings.compression_level,
@@ -329,6 +338,7 @@ fn build_archive_pipeline(
         buffer_pool,
         settings.compression,
     );
+    config.password = password;
     config.chunking_policy = settings.chunking_policy;
     config.imported_dictionary_bank = settings
         .dictionary_from
@@ -345,7 +355,7 @@ fn import_dictionary_bank(path: &std::path::Path) -> AppResult<oxide_core::Archi
     Ok(reader.manifest().dictionary_bank().clone())
 }
 
-fn build_extract_pipeline(workers: usize, extract_write_shards: usize) -> ArchivePipeline {
+fn build_extract_pipeline(workers: usize, extract_write_shards: usize, password: Option<String>) -> ArchivePipeline {
     let decode_workers = workers.max(1);
     let buffer_pool = Arc::new(BufferPool::new(
         1024 * 1024,
@@ -357,6 +367,8 @@ fn build_extract_pipeline(workers: usize, extract_write_shards: usize) -> Archiv
         buffer_pool,
         CompressionAlgo::Lz4,
     );
+    config.password = password;
+
     let mut performance = PipelinePerformanceOptions::default();
     performance.extract_write_shards = extract_write_shards.max(1);
     performance.extract_preserve_metadata = false;
