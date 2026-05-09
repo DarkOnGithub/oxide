@@ -40,9 +40,7 @@ DEFAULT_TELEMETRY_ROOT = (
 MIB = 1024 * 1024
 COMMON_ARGS: tuple[str, ...] = (
     "--worker-modes",
-    "16",
-    "--threads",
-    "16",
+    "auto",
     "--raw-oxide-presets",
     "--sync-after-extract",
     "--competitors",
