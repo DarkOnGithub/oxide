@@ -27,7 +27,6 @@ fn build_pipeline(
     ArchivePipeline::new(config)
 }
 
-
 #[test]
 fn archive_report_can_include_telemetry_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = TELEMETRY_TEST_MUTEX

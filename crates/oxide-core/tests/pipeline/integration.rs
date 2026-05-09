@@ -929,6 +929,10 @@ fn extract_path_restores_file_payload() -> Result<(), Box<dyn std::error::Error>
         Some(ReportValue::U64(1))
     ));
     assert!(matches!(
+        report.extensions.get("pipeline.ordered_write_queue_peak"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
         report.extensions.get("pipeline.write_shard_queue_peak[0]"),
         Some(ReportValue::U64(_))
     ));
@@ -1082,6 +1086,10 @@ fn extract_path_restores_directory_payload() -> Result<(), Box<dyn std::error::E
         Some(ReportValue::U64(1))
     ));
     assert!(matches!(
+        report.extensions.get("pipeline.ordered_write_queue_peak"),
+        Some(ReportValue::U64(_))
+    ));
+    assert!(matches!(
         report.extensions.get("pipeline.write_shard_queue_peak[0]"),
         Some(ReportValue::U64(_))
     ));
@@ -1186,6 +1194,101 @@ fn extract_path_restores_directory_payload_with_write_shards()
             .stage_us
             .contains_key("write_shard_output_data[1]")
     );
+    Ok(())
+}
+
+#[test]
+fn extract_path_auto_write_shards_are_applied_adaptively() -> Result<(), Box<dyn std::error::Error>>
+{
+    let source = tempfile::tempdir()?;
+    let alpha = build_incompressible_fixture(64 * 1024);
+    let beta = build_text_fixture(48 * 1024);
+    write_directory_file(&source, "nested/alpha.bin", &alpha)?;
+    write_directory_file(&source, "nested/beta.txt", &beta)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 128));
+    let pipeline = build_pipeline_with_performance(
+        8 * 1024,
+        2,
+        buffer_pool,
+        CompressionAlgo::Lz4,
+        |performance| {
+            performance.extract_write_shards = 0;
+        },
+    );
+
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let out_root = tempfile::tempdir()?;
+    let out_dir = out_root.path().join("restored-tree");
+    let report = pipeline.extract_path(
+        Cursor::new(archive),
+        &out_dir,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    let expected_shards = std::thread::available_parallelism()
+        .unwrap_or(std::num::NonZeroUsize::MIN)
+        .get()
+        .max(1)
+        .div_ceil(2)
+        .clamp(1, 8)
+        .min(2);
+    assert!(matches!(
+        report.extensions.get("pipeline.write_shard_count"),
+        Some(ReportValue::U64(value)) if *value == expected_shards as u64
+    ));
+    Ok(())
+}
+
+#[test]
+fn extract_path_caps_requested_write_shards_to_data_files() -> Result<(), Box<dyn std::error::Error>>
+{
+    let source = tempfile::tempdir()?;
+    let alpha = build_incompressible_fixture(64 * 1024);
+    let beta = build_text_fixture(48 * 1024);
+    write_directory_file(&source, "nested/alpha.bin", &alpha)?;
+    write_directory_file(&source, "nested/beta.txt", &beta)?;
+
+    let buffer_pool = Arc::new(BufferPool::new(16 * 1024, 128));
+    let pipeline = build_pipeline_with_performance(
+        8 * 1024,
+        2,
+        buffer_pool,
+        CompressionAlgo::Lz4,
+        |performance| {
+            performance.extract_write_shards = 8;
+        },
+    );
+
+    let archive = pipeline
+        .archive_path(
+            source.path(),
+            Vec::new(),
+            RunTelemetryOptions::default(),
+            None,
+        )?
+        .writer;
+    let out_root = tempfile::tempdir()?;
+    let out_dir = out_root.path().join("restored-tree");
+    let report = pipeline.extract_path(
+        Cursor::new(archive),
+        &out_dir,
+        RunTelemetryOptions::default(),
+        None,
+    )?;
+
+    assert!(matches!(
+        report.extensions.get("pipeline.write_shard_count"),
+        Some(ReportValue::U64(2))
+    ));
     Ok(())
 }
 

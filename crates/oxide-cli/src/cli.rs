@@ -159,12 +159,22 @@ pub struct ExtractArgs {
     #[arg(long, default_value_t = 250)]
     pub stats_interval_ms: u64,
 
-    /// Number of decode worker threads (defaults to CPU count).
-    #[arg(long, default_value_t = num_cpus::get())]
-    pub workers: usize,
+    /// Decode tuning preset name from the preset config file (same `archive` section as `oxide archive`).
+    #[arg(long)]
+    pub preset: Option<String>,
 
-    /// Number of directory extract write shards.
-    #[arg(long, default_value_t = num_cpus::get().max(1))]
+    /// Preset config file path. Defaults to the crate's `presets.json` file.
+    #[arg(long)]
+    pub preset_file: Option<PathBuf>,
+
+    /// Number of decode worker threads (0 = auto from logical cores).
+    ///
+    /// When omitted, uses the selected archive preset's `workers` value (presets typically use `0` for auto).
+    #[arg(long)]
+    pub workers: Option<usize>,
+
+    /// Number of directory extract write shards (0 = adaptive auto, 1 = disable sharding).
+    #[arg(long, default_value_t = 0)]
     pub extract_write_shards: usize,
 
     /// Print full telemetry tables in the final report.
