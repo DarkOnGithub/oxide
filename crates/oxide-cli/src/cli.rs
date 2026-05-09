@@ -23,6 +23,10 @@ pub enum Commands {
     Extract(ExtractArgs),
     /// Print the contents of an .oxz archive as a tree with sizes.
     Tree(TreeArgs),
+    /// Encrypt an existing .oxz archive
+    Encrypt(EncryptArgs),
+    /// Decrypt an encrypted .oxz archive back to a standard one
+    Decrypt(DecryptArgs),
 }
 
 #[derive(Args)]
@@ -172,6 +176,26 @@ pub struct ExtractArgs {
 pub struct TreeArgs {
     /// Source archive to inspect.
     pub input: PathBuf,
+}
+
+#[derive(Args)]
+pub struct EncryptArgs {
+    /// Source .oxz archive to encrypt.
+    pub input: PathBuf,
+
+    /// Destination output path. Defaults to overwriting the input file safely.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct DecryptArgs {
+    /// Source encrypted .oxz archive to decrypt.
+    pub input: PathBuf,
+
+    /// Destination output path. Defaults to overwriting the input file safely.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
