@@ -203,7 +203,27 @@ pub fn extract(args: ExtractArgs) -> AppResult {
 
     let mut password: Option<String> = None;
     if is_encrypted {
-        password = Some(get_secure_password("This archive is encrypted. Enter password", false)?);
+        loop {
+            // 1. On demande le mot de passe
+            let pwd = get_secure_password("This archive is encrypted. Enter password", false)?;
+            
+            // 2. On vérifie instantanément si c'est le bon
+            match oxide_core::verify_archive_password(&input, &pwd) {
+                Ok(true) => {
+                    // C'est le bon ! On le sauvegarde et on casse la boucle.
+                    password = Some(pwd);
+                    break;
+                }
+                Ok(false) => {
+                    // C'est le mauvais, on affiche une erreur et la boucle recommence !
+                    eprintln!("Wrong password, please try again.\n");
+                }
+                Err(e) => {
+                    // S'il y a un vrai problème (fichier corrompu, etc.), on arrête tout.
+                    return Err(e.into());
+                }
+            }
+        }
     }
 
     let output_path = output.unwrap_or_else(|| default_extract_output_path(&input));
