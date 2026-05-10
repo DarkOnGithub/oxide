@@ -208,7 +208,6 @@ pub fn extract(args: ExtractArgs) -> AppResult {
             
             match oxide_core::verify_archive_password(&input, &pwd) {
                 Ok(true) => {
-                    // ICI on utilise bien 'password = Some()' car l'extracteur veut une Option !
                     password = Some(pwd); 
                     break;
                 }
@@ -301,7 +300,6 @@ pub fn tree(args: TreeArgs) -> AppResult {
 pub fn encrypt(args: EncryptArgs) -> AppResult {
     let EncryptArgs { input, output } = args;
     
-    // 1. Vérification : est-ce que c'est déjà chiffré ?
     let is_encrypted = oxide_core::probe_encryption(&input)?;
     if is_encrypted {
         return Err(std::io::Error::new(std::io::ErrorKind::Other, "This archive is already encrypted.").into());
@@ -317,15 +315,13 @@ pub fn encrypt(args: EncryptArgs) -> AppResult {
     
     let password = get_secure_password("Enter password to encrypt archive", true)?;
     
-    // 2. Appel au Moteur
     if let Err(e) = oxide_core::encrypt_existing_archive(&input, &output_path, &password) {
         if output.is_none() && output_path.exists() {
-            let _ = std::fs::remove_file(&output_path); // On nettoie les traces
+            let _ = std::fs::remove_file(&output_path); 
         }
         return Err(e.into());
     }
 
-    // 3. Remplacement du fichier
     if output.is_none() {
         std::fs::rename(&output_path, &input)?;
         println!("Successfully encrypted and secured: {}", input.display());
@@ -339,7 +335,6 @@ pub fn encrypt(args: EncryptArgs) -> AppResult {
 pub fn decrypt(args: DecryptArgs) -> AppResult {
     let DecryptArgs { input, output } = args;
 
-    // 1. Vérification : est-ce que c'est bien chiffré ?
     let is_encrypted = oxide_core::probe_encryption(&input)?;
     if !is_encrypted {
         return Err(std::io::Error::new(std::io::ErrorKind::Other, "This archive is not encrypted.").into());
@@ -353,10 +348,8 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
 
     println!("Starting decryption for: {}", input.display());
     
-    // 2. La boucle de vérification robuste du mot de passe
     let mut try_env_var = true;
 
-    // Regarde ici : "let final_password = loop {"
     let final_password = loop {
         let pwd = if try_env_var && std::env::var("OXIDE_PASSWORD").is_ok() {
             try_env_var = false; 
@@ -367,7 +360,6 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
         
         match oxide_core::verify_archive_password(&input, &pwd) {
             Ok(true) => {
-                // On casse la boucle et on renvoie le mot de passe !
                 break pwd;
             }
             Ok(false) => {
@@ -379,7 +371,6 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
         }
     };
     
-    // 3. Appel au Moteur
     if let Err(e) = oxide_core::decrypt_existing_archive(&input, &output_path, &final_password) {
         if output.is_none() && output_path.exists() {
             let _ = std::fs::remove_file(&output_path); 
@@ -387,7 +378,6 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
         return Err(e.into());
     }
 
-    // 4. Remplacement du fichier
     if output.is_none() {
         std::fs::rename(&output_path, &input)?;
         println!("Successfully decrypted and restored: {}", input.display());
