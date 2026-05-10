@@ -246,6 +246,7 @@ impl ArchivePipeline {
             self.num_workers,
             Arc::clone(&self.buffer_pool),
             self.performance.clone(),
+            self.config().password.clone(),
         );
         let mut decoded =
             extractor.read_archive_payload_with_metrics(reader, started_at, &options, sink)?;
@@ -292,6 +293,7 @@ impl ArchivePipeline {
             self.num_workers,
             Arc::clone(&self.buffer_pool),
             self.performance.clone(),
+            self.config().password.clone(),
         );
         let mut decoded = extractor
             .read_archive_payload_from_file_with_metrics(file, started_at, &options, sink)?;
@@ -338,6 +340,7 @@ impl ArchivePipeline {
             self.num_workers,
             Arc::clone(&self.buffer_pool),
             self.performance.clone(),
+            self.config().password.clone(),
         );
         let restored = extractor.extract_directory_to_path_with_metrics(
             reader,
@@ -393,6 +396,7 @@ impl ArchivePipeline {
             self.num_workers,
             Arc::clone(&self.buffer_pool),
             self.performance.clone(),
+            self.config().password.clone(),
         );
         let restored = extractor.extract_directory_to_path_from_file_with_metrics(
             file,
@@ -450,6 +454,7 @@ impl ArchivePipeline {
             self.num_workers,
             Arc::clone(&self.buffer_pool),
             self.performance.clone(),
+            self.config().password.clone(),
         );
         let mut reader = reader;
         let source_kind = Extractor::probe_archive_source_kind(&mut reader)?;
@@ -527,6 +532,7 @@ impl ArchivePipeline {
             self.num_workers,
             Arc::clone(&self.buffer_pool),
             self.performance.clone(),
+            self.config().password.clone(),
         );
         let source_kind = Extractor::probe_archive_source_kind(&mut file)?;
         file.seek(SeekFrom::Start(0))?;
@@ -638,6 +644,7 @@ impl ArchivePipeline {
             self.num_workers,
             Arc::clone(&self.buffer_pool),
             self.performance.clone(),
+            self.config().password.clone(),
         );
         let mut reader = reader;
         let source_kind = Extractor::probe_archive_source_kind(&mut reader)?;
@@ -730,6 +737,7 @@ impl ArchivePipeline {
             self.num_workers,
             Arc::clone(&self.buffer_pool),
             self.performance.clone(),
+            self.config().password.clone(),
         );
         let source_kind = Extractor::probe_archive_source_kind(&mut file)?;
         file.seek(SeekFrom::Start(0))?;

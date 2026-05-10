@@ -119,6 +119,8 @@ pub struct ArchiveWriter<W: Write> {
     next_payload_offset: u64,
     pending_descriptors: Vec<ChunkDescriptor>,
     block_deduper: BlockDeduper,
+    password: Option<String>,
+    crypto_key: Option<[u8; crate::crypto::KEY_SIZE]>,
 }
 
 /// Seekable variant of [`ArchiveWriter`] that validates the writer position
@@ -165,8 +167,16 @@ impl<W: Write> ArchiveWriter<W> {
             next_payload_offset: GLOBAL_HEADER_SIZE as u64,
             pending_descriptors: Vec::new(),
             block_deduper: BlockDeduper::new(dedupe_window_blocks),
+            password: None,
+            crypto_key: None,
         }
     }
+
+    pub fn with_password(mut self, password: Option<String>) -> Self {
+        self.password = password;
+        self
+    }
+
 
     pub fn with_reorder_limit(writer: W, max_pending: usize) -> Self {
         Self::with_reorder_limit_and_manifest(writer, max_pending, None)
@@ -188,7 +198,15 @@ impl<W: Write> ArchiveWriter<W> {
         self.pending_descriptors.reserve(block_count as usize);
         self.next_payload_offset = GLOBAL_HEADER_SIZE as u64;
 
-        let header = GlobalHeader::new(source_kind, block_count, 0, 0, 0, 0, 0);
+        let mut salt_opt = None;
+        if let Some(ref pwd) = self.password {
+            let salt = crate::crypto::generate_salt();
+            let key = crate::crypto::derive_key(pwd, &salt)?;
+            self.crypto_key = Some(key);
+            salt_opt = Some(salt);
+        }
+
+        let header = GlobalHeader::new(source_kind, block_count, 0, 0, 0, 0, 0, salt_opt);
         let started = Instant::now();
         header.write(&mut self.writer)?;
         profile::event(
@@ -313,7 +331,15 @@ impl<W: Write> ArchiveWriter<W> {
             return Err(OxideError::InvalidFormat("archive block count exceeded"));
         }
 
-        let block = self.block_deduper.rewrite(block)?;
+        let mut block = self.block_deduper.rewrite(block)?;
+
+        if let Some(ref key) = self.crypto_key {
+            if !block.is_reference() && !block.data.is_empty() {
+                let encrypted_data = crate::crypto::encrypt_block(key, block.data.as_slice())?;
+                block.data = crate::types::CompressedPayload::Owned(encrypted_data); 
+            }
+        }
+
         let descriptor = ChunkDescriptor::from_block(&block, self.next_payload_offset)?;
         self.next_payload_offset = descriptor.payload_end()?;
         self.writer.write_all(block.data.as_slice())?;
@@ -337,6 +363,11 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             DEFAULT_DEDUP_WINDOW_BLOCKS,
             manifest,
         )
+    }
+
+    pub fn with_password(mut self, password: Option<String>) -> Self {
+        self.0 = self.0.with_password(password); 
+        self
     }
 
     pub fn with_reorder_limit_and_manifest(

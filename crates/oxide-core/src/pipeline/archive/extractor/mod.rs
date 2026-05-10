@@ -78,6 +78,7 @@ pub struct Extractor {
     pub num_workers: usize,
     buffer_pool: Arc<BufferPool>,
     performance: PipelinePerformanceOptions,
+    pub password: Option<String>,
 }
 
 impl Extractor {
@@ -85,11 +86,13 @@ impl Extractor {
         num_workers: usize,
         buffer_pool: Arc<BufferPool>,
         performance: PipelinePerformanceOptions,
+        password: Option<String>,
     ) -> Self {
         Self {
             num_workers,
             buffer_pool,
             performance,
+            password,
         }
     }
 
@@ -109,7 +112,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?.with_password(self.password.clone())?;
         let archive_read_elapsed = archive_started.elapsed();
         let writer = VecChunkWriter::default();
         let (decoded, writer) = self.decode_archive_to_writer_with_backend(
@@ -151,7 +154,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new(file.try_clone()?)?;
+        let archive = ArchiveReader::new(file.try_clone()?)?.with_password(self.password.clone())?;
         let archive_read_elapsed = archive_started.elapsed();
         let writer = VecChunkWriter::default();
         let backend = ParallelFileDecodeReadBackend::new(archive, file)?;
@@ -195,7 +198,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?.with_password(self.password.clone())?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::File {
             return Err(crate::OxideError::InvalidFormat(
@@ -257,7 +260,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new(file.try_clone()?)?;
+        let archive = ArchiveReader::new(file.try_clone()?)?.with_password(self.password.clone())?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::File {
             return Err(crate::OxideError::InvalidFormat(
@@ -320,7 +323,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DirectoryRestoreOutcome> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?.with_password(self.password.clone())?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::Directory {
             return Err(crate::OxideError::InvalidFormat(
@@ -384,7 +387,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DirectoryRestoreOutcome> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new(file.try_clone()?)?;
+        let archive = ArchiveReader::new(file.try_clone()?)?.with_password(self.password.clone())?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::Directory {
             return Err(crate::OxideError::InvalidFormat(
@@ -519,7 +522,7 @@ impl Extractor {
         T: AsRef<str>,
     {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?.with_password(self.password.clone())?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::Directory {
             return Err(crate::OxideError::InvalidFormat(
@@ -597,7 +600,7 @@ impl Extractor {
         T: AsRef<str>,
     {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new(file.try_clone()?)?;
+        let archive = ArchiveReader::new(file.try_clone()?)?.with_password(self.password.clone())?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::Directory {
             return Err(crate::OxideError::InvalidFormat(

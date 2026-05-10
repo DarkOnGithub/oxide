@@ -25,6 +25,8 @@ pub struct ArchiveReader<R: Read + Seek> {
     footer: Footer,
     sequential_extract_state: Option<SequentialExtractState>,
     reference_target_cache: Option<ReferenceTargetCache>,
+    password: Option<String>,
+    crypto_key: Option<[u8; crate::crypto::KEY_SIZE]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -211,7 +213,25 @@ impl<R: Read + Seek> ArchiveReader<R> {
             footer,
             sequential_extract_state: None,
             reference_target_cache: None,
+            password: None,
+            crypto_key: None,
         })
+    }
+
+    pub fn with_password(mut self, password: Option<String>) -> Result<Self> {
+        self.password = password.clone();
+
+        if self.global_header.flags & super::headers::HEADER_FLAG_ENCRYPTED != 0 {
+            if let Some(pwd) = password {
+                let key = crate::crypto::derive_key(&pwd, &self.global_header.salt)?;
+                self.crypto_key = Some(key);
+            } else {
+                return Err(OxideError::InvalidFormat(
+                    "Archive is encrypted but no password was provided",
+                ));
+            }
+        }
+        Ok(self)
     }
 
     pub(crate) fn new_for_sequential_extract(reader: R) -> Result<Self> {
@@ -223,7 +243,8 @@ impl<R: Read + Seek> ArchiveReader<R> {
             next_block_index: 0,
             next_payload_offset: archive.global_header.payload_offset,
         });
-        archive.reference_target_cache = ReferenceTargetCache::new(&archive.chunk_descriptors);
+        let descriptors_clone = archive.chunk_descriptors.clone();
+        archive.reference_target_cache = ReferenceTargetCache::new(&descriptors_clone);
         Ok(archive)
     }
 
@@ -279,7 +300,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
     ) -> Result<ChunkDescriptor> {
         let start = Instant::now();
         let descriptor = self.block_descriptor(index)?;
-        let resolved = self.resolve_data_descriptor(index, descriptor)?;
+        let mut resolved = self.resolve_data_descriptor(index, descriptor)?;
         let sequentially_aligned = self.sequential_extract_state.map(|state| {
             state.next_block_index == index
                 && state.next_payload_offset == descriptor.payload_offset
@@ -306,6 +327,15 @@ impl<R: Read + Seek> ArchiveReader<R> {
             buffer.clear();
             buffer.resize(resolved.encoded_len as usize, 0);
             self.reader.read_exact(buffer.as_mut_slice())?;
+
+            if let Some(ref key) = self.crypto_key {
+                if !buffer.is_empty() && !descriptor.is_reference() {
+                    let decrypted_data = crate::crypto::decrypt_block(key, buffer.as_slice())?;
+                    buffer.clear();
+                    buffer.extend_from_slice(&decrypted_data);
+                    resolved.encoded_len = buffer.len() as u32;
+                }
+            }
         }
 
         if let Some(reference_target) = descriptor.reference_target {

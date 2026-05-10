@@ -22,6 +22,7 @@ pub mod io;
 pub mod pipeline;
 pub mod telemetry;
 pub mod types;
+pub mod crypto;
 
 pub use buffer::{BufferPool, PoolMetricsSnapshot, PooledBuffer};
 pub use checksum::compute_checksum;
@@ -58,10 +59,37 @@ pub use types::{
     CompressionMeta, Result,
 };
 
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
-/// Vérifie si une archive OXZ est chiffrée en lisant son en-tête.
-pub fn probe_encryption<P: AsRef<Path>>(_path: P) -> crate::types::Result<bool> {
-    // TODO: Implémenter la vraie lecture du flag de chiffrement dans le GlobalHeader
-    Ok(false) 
+/// Quickly checks if an OXZ archive is encrypted by reading only its header flags.
+/// This is extremely fast as it only reads the first 8 bytes of the file.
+pub fn probe_encryption(path: &Path) -> crate::Result<bool> {
+    // Attempt to open the file. If it fails, we return false and let the 
+    // main extractor pipeline handle the standard file error later.
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Ok(false),
+    };
+
+    // We only need the first 8 bytes (Magic is 0..4, Version is 4..6, Flags are 6..8)
+    let mut buffer = [0u8; 8];
+    if file.read_exact(&mut buffer).is_err() {
+        return Ok(false); // File is too short to be a valid archive
+    }
+
+    // Verify the OXZ magic signature to ensure it's actually our format
+    // Note: adjust the path to OXZ_MAGIC if your imports are structured differently
+    if buffer[0..4] != crate::format::oxz::OXZ_MAGIC {
+        return Ok(false);
+    }
+
+    // Read the flags (bytes 6 and 7 in Little Endian)
+    let flags = u16::from_le_bytes([buffer[6], buffer[7]]);
+    
+    // Check if the encryption flag is set
+    let is_encrypted = (flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0;
+
+    Ok(is_encrypted)
 }

@@ -71,19 +71,21 @@ impl<'a> Archiver<'a> {
             },
         ));
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
+        let password = self.config.password.clone();
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            |writer, manifest| {
+            move |writer, manifest| {
                 ArchiveWriter::with_limits_and_manifest(
                     writer,
                     crate::format::DEFAULT_REORDER_PENDING_LIMIT,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
+                .with_password(password)
             },
         )
     }
@@ -115,19 +117,21 @@ impl<'a> Archiver<'a> {
             },
         ));
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
+        let password = self.config.password.clone();
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            |writer, manifest| {
+            move |writer, manifest| {
                 SeekableArchiveWriter::with_limits_and_manifest(
                     writer,
                     crate::format::DEFAULT_REORDER_PENDING_LIMIT,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
+                .with_password(password)
             },
         )
     }
@@ -141,6 +145,7 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
+        let password = self.config.password.clone();
         archive_directory_streaming_with_writer(
             self.config,
             root,
@@ -154,6 +159,7 @@ impl<'a> Archiver<'a> {
                     dedupe_window_blocks,
                     Some(manifest),
                 )
+                .with_password(password)
             },
         )
     }
@@ -167,6 +173,7 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
+        let password = self.config.password.clone();
         archive_directory_streaming_with_writer(
             self.config,
             root,
@@ -180,6 +187,7 @@ impl<'a> Archiver<'a> {
                     dedupe_window_blocks,
                     Some(manifest),
                 )
+                .with_password(password)
             },
         )
     }
@@ -194,6 +202,7 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
+        let password = self.config.password.clone();
         self.archive_prepared_with_writer(
             prepared,
             writer,
@@ -207,6 +216,7 @@ impl<'a> Archiver<'a> {
                     dedupe_window_blocks,
                     Some(manifest),
                 )
+                .with_password(password)
             },
         )
     }
@@ -221,6 +231,7 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
+        let password = self.config.password.clone();
         self.archive_prepared_with_writer(
             prepared,
             writer,
@@ -234,6 +245,7 @@ impl<'a> Archiver<'a> {
                     dedupe_window_blocks,
                     Some(manifest),
                 )
+                .with_password(password)
             },
         )
     }

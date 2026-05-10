@@ -13,6 +13,10 @@ telemetry = []
 crossbeam-channel = "0.5"
 crossbeam-deque = "0.8"
 num_cpus = "1.16"
+# Cryptography & Security
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
 
 # Zero-copy I/O and memory management
 memmap2 = "0.9"

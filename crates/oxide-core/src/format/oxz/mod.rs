@@ -1,5 +1,5 @@
 mod consts;
-mod headers;
+pub(crate) mod headers;
 mod manifest;
 mod reader;
 mod reorder;
