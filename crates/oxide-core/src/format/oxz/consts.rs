@@ -6,7 +6,7 @@ pub const OXZ_END_MAGIC: [u8; 4] = *b"END\0";
 pub const OXZ_VERSION: u16 = 3;
 
 /// Fixed size of the global header in bytes.
-pub const GLOBAL_HEADER_SIZE: usize = 8;
+pub const GLOBAL_HEADER_SIZE: usize = 24; //8 -> 24
 /// OXZ v2 no longer stores a dedicated archive metadata section.
 pub const ARCHIVE_METADATA_SIZE: usize = 0;
 /// OXZ v2 no longer stores a dedicated chunk table header.

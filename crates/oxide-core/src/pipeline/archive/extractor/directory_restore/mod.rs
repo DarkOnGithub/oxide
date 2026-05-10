@@ -229,7 +229,7 @@ impl DirectoryRestoreStats {
 }
 
 #[derive(Debug)]
-struct RestoreEntry {
+pub(super) struct RestoreEntry {
     path: PathBuf,
     entry: crate::ArchiveListingEntry,
 }

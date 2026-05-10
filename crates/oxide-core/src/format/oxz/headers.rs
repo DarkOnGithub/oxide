@@ -20,11 +20,13 @@ const HEADER_FLAG_PATH_PREFIX: u16 = 1 << 1;
 const HEADER_FLAG_METADATA_INHERIT: u16 = 1 << 2;
 const HEADER_FLAG_IMPLICIT_CONTENT_OFFSETS: u16 = 1 << 3;
 const HEADER_FLAG_IMPLICIT_CHUNK_OFFSETS: u16 = 1 << 4;
+pub const HEADER_FLAG_ENCRYPTED: u16 = 1 << 5;
 const SUPPORTED_HEADER_FLAGS: u16 = HEADER_FLAG_DIRECTORY
     | HEADER_FLAG_PATH_PREFIX
     | HEADER_FLAG_METADATA_INHERIT
     | HEADER_FLAG_IMPLICIT_CONTENT_OFFSETS
-    | HEADER_FLAG_IMPLICIT_CHUNK_OFFSETS;
+    | HEADER_FLAG_IMPLICIT_CHUNK_OFFSETS
+    | HEADER_FLAG_ENCRYPTED;
 
 /// Resolved OXZ container header.
 ///
@@ -35,6 +37,7 @@ pub struct GlobalHeader {
     pub magic: [u8; 4],
     pub version: u16,
     pub flags: u16,
+    pub salt: [u8; 16], //for Argon2
     pub block_count: u32,
     pub payload_offset: u64,
     pub entry_table_offset: u64,
@@ -53,11 +56,20 @@ impl GlobalHeader {
         chunk_table_offset: u64,
         chunk_table_len: u32,
         footer_offset: u64,
+        salt: Option<[u8; 16]>,
     ) -> Self {
+        let mut flags = flags_for_source_kind(source_kind);
+        let mut final_salt = [0u8; 16];
+
+        if let Some(s) = salt {
+            flags |= HEADER_FLAG_ENCRYPTED; 
+            final_salt = s;
+        }
         Self {
             magic: OXZ_MAGIC,
             version: OXZ_VERSION,
-            flags: flags_for_source_kind(source_kind),
+            flags,
+            salt: final_salt,
             block_count,
             payload_offset: GLOBAL_HEADER_SIZE as u64,
             entry_table_offset,
@@ -78,7 +90,7 @@ impl GlobalHeader {
 
         let mut prefix = [0u8; GLOBAL_HEADER_SIZE];
         reader.read_exact(&mut prefix)?;
-        let (magic, version, flags) = parse_prefix(prefix)?;
+        let (magic, version, flags, salt) = parse_prefix(prefix)?;
 
         let file_len = reader.seek(SeekFrom::End(0))?;
         if file_len < (GLOBAL_HEADER_SIZE + FOOTER_SIZE) as u64 {
@@ -94,6 +106,7 @@ impl GlobalHeader {
             magic,
             version,
             flags,
+            salt,
             block_count: footer.block_count,
             payload_offset: GLOBAL_HEADER_SIZE as u64,
             entry_table_offset: footer.entry_table_offset,
@@ -111,6 +124,7 @@ impl GlobalHeader {
         bytes[..4].copy_from_slice(&self.magic);
         bytes[4..6].copy_from_slice(&self.version.to_le_bytes());
         bytes[6..8].copy_from_slice(&self.flags.to_le_bytes());
+        bytes[8..24].copy_from_slice(&self.salt);
         bytes
     }
 
@@ -525,7 +539,7 @@ impl Footer {
     }
 }
 
-fn parse_prefix(bytes: [u8; GLOBAL_HEADER_SIZE]) -> Result<([u8; 4], u16, u16)> {
+fn parse_prefix(bytes: [u8; GLOBAL_HEADER_SIZE]) -> Result<([u8; 4], u16, u16, [u8; 16])> {
     let mut magic = [0u8; 4];
     magic.copy_from_slice(&bytes[..4]);
     if magic != OXZ_MAGIC {
@@ -542,7 +556,10 @@ fn parse_prefix(bytes: [u8; GLOBAL_HEADER_SIZE]) -> Result<([u8; 4], u16, u16)> 
         return Err(OxideError::InvalidFormat("unsupported OXZ header flags"));
     }
 
-    Ok((magic, version, flags))
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&bytes[8..24]);
+
+    Ok((magic, version, flags, salt))
 }
 
 fn flags_for_source_kind(source_kind: ArchiveSourceKind) -> u16 {
