@@ -38,11 +38,12 @@ DEFAULT_TELEMETRY_ROOT = (
     / f"named_benchmark_batch_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 )
 MIB = 1024 * 1024
+MAX_THREADS = str(os.cpu_count() or 1)
 COMMON_ARGS: tuple[str, ...] = (
     "--worker-modes",
-    "16",
+    MAX_THREADS,
     "--threads",
-    "16",
+    MAX_THREADS,
     "--raw-oxide-presets",
     "--sync-after-extract",
     "--competitors",
@@ -414,7 +415,7 @@ def main() -> int:
                     f"Oxide bin: {display_path(config.oxide_bin)}",
                     f"Benchmarker: {display_path(config.benchmarker)}",
                     f"Telemetry root: {display_path(config.telemetry_root)}",
-                    "Common args: --worker-modes 16 --threads 16 --raw-oxide-presets --sync-after-extract --quiet",
+                    f"Common args: --worker-modes {MAX_THREADS} --threads {MAX_THREADS} --raw-oxide-presets --sync-after-extract --quiet",
                 ]
             ),
             title="Benchmark runner",
