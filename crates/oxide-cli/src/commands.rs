@@ -305,6 +305,13 @@ pub fn tree(args: TreeArgs) -> AppResult {
 pub fn encrypt(args: EncryptArgs) -> AppResult {
     let EncryptArgs { input, output } = args;
     
+    // 1. Vérification : est-ce que c'est déjà chiffré ?
+    let is_encrypted = oxide_core::probe_encryption(&input)?;
+    if is_encrypted {
+        eprintln!("This archive is already encrypted.");
+        std::process::exit(1);
+    }
+
     let output_path = output.clone().unwrap_or_else(|| {
         let mut path = input.clone();
         path.set_extension("oxz.tmp");
@@ -313,14 +320,12 @@ pub fn encrypt(args: EncryptArgs) -> AppResult {
 
     println!("Starting encryption for: {}", input.display());
     
-    // 1. Demander le mot de passe interactif (AVEC confirmation)
     let password = get_secure_password("Enter password to encrypt archive", true)?;
     
-    // 2. Appeler le pipeline (On préparera cette fonction dans oxide-core juste après !)
-    // oxide_core::encrypt_existing_archive(&input, &output_path, &password)?;
-    println!("Encrypting blocks... (Core function to be implemented)");
+    // 2. Appel au Moteur
+    oxide_core::encrypt_existing_archive(&input, &output_path, &password)?;
 
-    // 3. Remplacer le fichier original si l'utilisateur n'a pas spécifié de sortie
+    // 3. Remplacement du fichier
     if output.is_none() {
         std::fs::rename(&output_path, &input)?;
         println!("Successfully encrypted and secured: {}", input.display());
@@ -334,6 +339,13 @@ pub fn encrypt(args: EncryptArgs) -> AppResult {
 pub fn decrypt(args: DecryptArgs) -> AppResult {
     let DecryptArgs { input, output } = args;
 
+    // 1. Vérification : est-ce que c'est bien chiffré ?
+    let is_encrypted = oxide_core::probe_encryption(&input)?;
+    if !is_encrypted {
+        eprintln!("❌ This archive is not encrypted.");
+        std::process::exit(1);
+    }
+
     let output_path = output.clone().unwrap_or_else(|| {
         let mut path = input.clone();
         path.set_extension("oxz.tmp");
@@ -342,14 +354,28 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
 
     println!("Starting decryption for: {}", input.display());
     
-    // 1. Demander le mot de passe interactif (SANS confirmation)
-    let password = get_secure_password("Enter password to decrypt archive", false)?;
+    // 2. La boucle de vérification robuste du mot de passe
+    let mut final_password = String::new();
+    loop {
+        let pwd = get_secure_password("Enter password to decrypt archive", false)?;
+        match oxide_core::verify_archive_password(&input, &pwd) {
+            Ok(true) => {
+                final_password = pwd;
+                break;
+            }
+            Ok(false) => {
+                eprintln!("Wrong password, please try again.\n");
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+        }
+    }
     
-    // 2. Appeler le pipeline
-    // oxide_core::decrypt_existing_archive(&input, &output_path, &password)?;
-    println!("Decrypting blocks... (Core function to be implemented)");
+    // 3. Appel au Moteur
+    oxide_core::decrypt_existing_archive(&input, &output_path, &final_password)?;
 
-    // 3. Remplacer le fichier original
+    // 4. Remplacement du fichier
     if output.is_none() {
         std::fs::rename(&output_path, &input)?;
         println!("Successfully decrypted and restored: {}", input.display());
