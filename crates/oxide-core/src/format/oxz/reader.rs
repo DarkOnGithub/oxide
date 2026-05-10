@@ -329,7 +329,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             self.reader.read_exact(buffer.as_mut_slice())?;
 
             if let Some(ref key) = self.crypto_key {
-                if !buffer.is_empty() && !descriptor.is_reference() {
+                if !buffer.is_empty() && !resolved.is_reference() {
                     let decrypted_data = crate::crypto::decrypt_block(key, buffer.as_slice())?;
                     buffer.clear();
                     buffer.extend_from_slice(&decrypted_data);

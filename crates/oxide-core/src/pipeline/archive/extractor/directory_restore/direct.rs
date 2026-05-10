@@ -433,9 +433,11 @@ fn build_block_extents(
                 })?;
                 extents.push(DirectBlockExtent {
                     file_id: file.id,
-                    shard: *file_shards.get(file.id).ok_or(crate::OxideError::InvalidFormat(
-                        "direct restore file shard assignment out of range",
-                    ))?,
+                    shard: *file_shards
+                        .get(file.id)
+                        .ok_or(crate::OxideError::InvalidFormat(
+                            "direct restore file shard assignment out of range",
+                        ))?,
                     path: Arc::clone(&file.path),
                     block_offset,
                     len,
@@ -495,11 +497,7 @@ fn assign_direct_file_shards(files: &[DirectFileEntry], shard_count: usize) -> V
         let mut best_key = (u64::MAX, usize::MAX, usize::MAX);
         for offset in 0..shard_count {
             let shard = (next_shard_hint + offset) % shard_count;
-            let candidate_key = (
-                shard_load_bytes[shard],
-                shard_pending_files[shard],
-                offset,
-            );
+            let candidate_key = (shard_load_bytes[shard], shard_pending_files[shard], offset);
             if candidate_key < best_key {
                 best_key = candidate_key;
                 chosen_shard = shard;
@@ -770,7 +768,13 @@ mod tests {
 
     #[test]
     fn direct_file_shards_balance_large_files_by_size() {
-        let files = vec![file(0, 100), file(1, 90), file(2, 80), file(3, 10), file(4, 10)];
+        let files = vec![
+            file(0, 100),
+            file(1, 90),
+            file(2, 80),
+            file(3, 10),
+            file(4, 10),
+        ];
 
         let assignments = assign_direct_file_shards(&files, 2);
 

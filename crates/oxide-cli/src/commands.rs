@@ -10,7 +10,8 @@ use oxide_core::{
 
 use crate::AppResult;
 use crate::cli::{
-    ArchiveArgs, ExtractArgs, TreeArgs, EncryptArgs, DecryptArgs, default_extract_output_path, default_output_path,
+    ArchiveArgs, DecryptArgs, EncryptArgs, ExtractArgs, TreeArgs, default_extract_output_path,
+    default_output_path,
 };
 use crate::presets::{ArchiveOverrides, ResolvedArchiveSettings, resolve_archive_settings};
 use crate::progress::{ArchiveCliSink, ExtractCliSink, LiveRateStats};
@@ -200,15 +201,15 @@ pub fn extract(args: ExtractArgs) -> AppResult {
     if is_encrypted {
         loop {
             let pwd = if try_env_var && std::env::var("OXIDE_PASSWORD").is_ok() {
-                try_env_var = false; 
+                try_env_var = false;
                 std::env::var("OXIDE_PASSWORD").unwrap()
             } else {
                 get_secure_password("This archive is encrypted. Enter password", false)?
             };
-            
+
             match oxide_core::verify_archive_password(&input, &pwd) {
                 Ok(true) => {
-                    password = Some(pwd); 
+                    password = Some(pwd);
                     break;
                 }
                 Ok(false) => {
@@ -299,10 +300,14 @@ pub fn tree(args: TreeArgs) -> AppResult {
 
 pub fn encrypt(args: EncryptArgs) -> AppResult {
     let EncryptArgs { input, output } = args;
-    
+
     let is_encrypted = oxide_core::probe_encryption(&input)?;
     if is_encrypted {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "This archive is already encrypted.").into());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "This archive is already encrypted.",
+        )
+        .into());
     }
 
     let output_path = output.clone().unwrap_or_else(|| {
@@ -312,12 +317,13 @@ pub fn encrypt(args: EncryptArgs) -> AppResult {
     });
 
     println!("Starting encryption for: {}", input.display());
-    
-    let password = get_secure_password("Enter password to encrypt archive", true)?;
-    
+    let password = match std::env::var("OXIDE_PASSWORD") {
+        Ok(env_pass) => env_pass,
+        Err(_) => get_secure_password("Enter password to encrypt archive", true)?,
+    };
     if let Err(e) = oxide_core::encrypt_existing_archive(&input, &output_path, &password) {
         if output.is_none() && output_path.exists() {
-            let _ = std::fs::remove_file(&output_path); 
+            let _ = std::fs::remove_file(&output_path);
         }
         return Err(e.into());
     }
@@ -337,7 +343,11 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
 
     let is_encrypted = oxide_core::probe_encryption(&input)?;
     if !is_encrypted {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "This archive is not encrypted.").into());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "This archive is not encrypted.",
+        )
+        .into());
     }
 
     let output_path = output.clone().unwrap_or_else(|| {
@@ -347,17 +357,17 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
     });
 
     println!("Starting decryption for: {}", input.display());
-    
+
     let mut try_env_var = true;
 
     let final_password = loop {
         let pwd = if try_env_var && std::env::var("OXIDE_PASSWORD").is_ok() {
-            try_env_var = false; 
+            try_env_var = false;
             std::env::var("OXIDE_PASSWORD").unwrap()
         } else {
             get_secure_password("Enter password to decrypt archive", false)?
         };
-        
+
         match oxide_core::verify_archive_password(&input, &pwd) {
             Ok(true) => {
                 break pwd;
@@ -370,10 +380,10 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
             }
         }
     };
-    
+
     if let Err(e) = oxide_core::decrypt_existing_archive(&input, &output_path, &final_password) {
         if output.is_none() && output_path.exists() {
-            let _ = std::fs::remove_file(&output_path); 
+            let _ = std::fs::remove_file(&output_path);
         }
         return Err(e.into());
     }
@@ -523,12 +533,12 @@ fn compression_name(compression: CompressionAlgo, level: Option<i32>, extreme: b
 
 fn get_secure_password(prompt: &str, require_confirmation: bool) -> AppResult<String> {
     let mut dialog = dialoguer::Password::new();
-    dialog = dialog.with_prompt(prompt); 
-    
+    dialog = dialog.with_prompt(prompt);
+
     if require_confirmation {
         dialog = dialog.with_confirmation("Confirm password", "Passwords do not match");
     }
-    
+
     let password = dialog.interact()?;
     Ok(password)
 }

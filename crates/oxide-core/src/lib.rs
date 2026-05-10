@@ -15,6 +15,7 @@ pub mod buffer;
 pub mod checksum;
 pub mod compression;
 pub mod core;
+pub mod crypto;
 pub mod dictionary;
 pub mod error;
 pub mod format;
@@ -22,7 +23,6 @@ pub mod io;
 pub mod pipeline;
 pub mod telemetry;
 pub mod types;
-pub mod crypto;
 
 pub use buffer::{BufferPool, PoolMetricsSnapshot, PooledBuffer};
 pub use checksum::compute_checksum;
@@ -66,7 +66,7 @@ use std::path::Path;
 /// Quickly checks if an OXZ archive is encrypted by reading only its header flags.
 /// This is extremely fast as it only reads the first 8 bytes of the file.
 pub fn probe_encryption(path: &Path) -> crate::Result<bool> {
-    // Attempt to open the file. If it fails, we return false and let the 
+    // Attempt to open the file. If it fails, we return false and let the
     // main extractor pipeline handle the standard file error later.
     let mut file = match File::open(path) {
         Ok(f) => f,
@@ -76,81 +76,78 @@ pub fn probe_encryption(path: &Path) -> crate::Result<bool> {
     // We only need the first 8 bytes (Magic is 0..4, Version is 4..6, Flags are 6..8)
     let mut buffer = [0u8; 10];
     if file.read_exact(&mut buffer).is_err() {
-        return Ok(false); 
+        return Ok(false);
     }
-    
+
     if buffer[0..4] != crate::format::oxz::OXZ_MAGIC {
         return Ok(false);
     }
 
     // Read the flags (bytes 6, 7, 8, 9 in Little Endian)
     let flags = u32::from_le_bytes([buffer[6], buffer[7], buffer[8], buffer[9]]);
-    
+
     // Check if the encryption flag is set
     let is_encrypted = (flags & (crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED as u32)) != 0;
     Ok(is_encrypted)
 }
 
-/// Checks if a password is correct by attempting to decrypt the very first block.
+/// Checks if a password is correct by attempting to decrypt the first block.
 pub fn verify_archive_password(path: &std::path::Path, password: &str) -> crate::Result<bool> {
     use std::io::{Read, Seek, SeekFrom};
-    
+
     let mut file = std::fs::File::open(path)?;
     let archive = crate::format::ArchiveReader::new(file.try_clone()?)?;
-    
+
     let header = archive.global_header();
     if (header.flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) == 0 {
-        return Ok(true); // The archive is not encrypted
+        return Ok(true);
     }
-    
+
     if archive.block_count() == 0 {
-        return Ok(true); // Archive empty
+        return Ok(true);
     }
-    
-    
+
     let descriptor = archive.block_descriptor(0)?;
-    
     let mut buffer = vec![0u8; descriptor.encoded_len as usize];
     file.seek(SeekFrom::Start(descriptor.payload_offset))?;
     file.read_exact(&mut buffer)?;
-    
+
     let key = crate::crypto::derive_key(password, &header.salt)?;
-    
-    match crate::crypto::decrypt_block(&key, &buffer) {
-        Ok(_) => Ok(true),  // Decryption successful = Correct password !
-        Err(_) => Ok(false), // Failure = Wrong password !
-    }
+    Ok(crate::crypto::decrypt_block(&key, &buffer).is_ok())
 }
 
-/// Encrypt an existing archive without decompressing it (Pass-through)
+/// Encrypt an existing archive without decompressing it (pass-through).
 pub fn encrypt_existing_archive(
     input_path: &std::path::Path,
     output_path: &std::path::Path,
     password: &str,
 ) -> crate::Result<()> {
     use std::fs::File;
-    
+
     let mut reader = crate::format::ArchiveReader::new(File::open(input_path)?)?;
-    
+
     if (reader.global_header().flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0 {
-        return Err(crate::OxideError::InvalidFormat("The archive is already encrypted."));
+        return Err(crate::OxideError::InvalidFormat(
+            "archive is already encrypted",
+        ));
     }
 
     let out_file = File::create(output_path)?;
-    let mut writer = crate::format::ArchiveWriter::with_manifest(out_file, Some(reader.manifest().clone()))
-        .with_password(Some(password.to_string()));
+    let mut writer =
+        crate::format::ArchiveWriter::with_manifest(out_file, Some(reader.manifest().clone()))
+            .with_password(Some(password.to_string()));
 
     let source_flag = match reader.source_kind() {
         crate::ArchiveSourceKind::File => 0,
         crate::ArchiveSourceKind::Directory => 1,
     };
-    
+
     writer.write_global_header_with_flags(reader.block_count(), source_flag)?;
 
     for index in 0..reader.block_count() {
         let (descriptor, data) = reader.read_block(index)?;
         let meta = descriptor.compression_meta()?;
-        
+
         let block = crate::types::CompressedBlock {
             id: index as usize,
             stream_id: 0,
@@ -162,7 +159,7 @@ pub fn encrypt_existing_archive(
             crc32: 0,
             reference_target: descriptor.reference_target,
         };
-        
+
         writer.write_owned_block(block)?;
     }
 
@@ -170,31 +167,32 @@ pub fn encrypt_existing_archive(
     Ok(())
 }
 
-/// Decrypt an existing archive without decompressing it (Pass-through)
+/// Decrypt an existing archive without decompressing it (pass-through).
 pub fn decrypt_existing_archive(
     input_path: &std::path::Path,
     output_path: &std::path::Path,
     password: &str,
 ) -> crate::Result<()> {
     use std::fs::File;
-    
+
     let mut reader = crate::format::ArchiveReader::new(File::open(input_path)?)?
         .with_password(Some(password.to_string()))?;
 
     let out_file = File::create(output_path)?;
-    let mut writer = crate::format::ArchiveWriter::with_manifest(out_file, Some(reader.manifest().clone()));
+    let mut writer =
+        crate::format::ArchiveWriter::with_manifest(out_file, Some(reader.manifest().clone()));
 
     let source_flag = match reader.source_kind() {
         crate::ArchiveSourceKind::File => 0,
         crate::ArchiveSourceKind::Directory => 1,
     };
-    
+
     writer.write_global_header_with_flags(reader.block_count(), source_flag)?;
 
     for index in 0..reader.block_count() {
         let (descriptor, data) = reader.read_block(index)?;
         let meta = descriptor.compression_meta()?;
-        
+
         let block = crate::types::CompressedBlock {
             id: index as usize,
             stream_id: 0,
@@ -206,7 +204,7 @@ pub fn decrypt_existing_archive(
             crc32: 0,
             reference_target: descriptor.reference_target,
         };
-        
+
         writer.write_owned_block(block)?;
     }
 

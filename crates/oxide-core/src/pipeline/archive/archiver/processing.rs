@@ -28,6 +28,113 @@ const ENTROPY_PROBE_MIN_SAMPLE_LEN: usize = 512;
 const ENTROPY_INCOMPRESSIBLE_THRESHOLD: f64 = 7.5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CompressedBlockDedupeKey {
+    compression_flags: u8,
+    raw_passthrough: bool,
+    dictionary_id: u8,
+    original_len: u64,
+    encoded_len: usize,
+    payload_hash: Blake3Hash,
+}
+
+impl CompressedBlockDedupeKey {
+    fn from_block(block: &CompressedBlock) -> Self {
+        Self {
+            compression_flags: block.compression.to_flags(),
+            raw_passthrough: block.raw_passthrough,
+            dictionary_id: block.dictionary_id,
+            original_len: block.original_len,
+            encoded_len: block.data.len(),
+            payload_hash: blake3::hash(block.data.as_slice()),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CompressedBlockDeduper {
+    max_entries: usize,
+    entries: HashMap<CompressedBlockDedupeKey, usize>,
+    insertion_order: VecDeque<(CompressedBlockDedupeKey, usize)>,
+    next_block_id: usize,
+}
+
+impl CompressedBlockDeduper {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            max_entries,
+            entries: HashMap::new(),
+            insertion_order: VecDeque::new(),
+            next_block_id: 0,
+        }
+    }
+
+    fn rewrite(&mut self, block: CompressedBlock) -> Result<CompressedBlock> {
+        if block.is_reference() || self.max_entries == 0 {
+            return Ok(block);
+        }
+
+        let key = CompressedBlockDedupeKey::from_block(&block);
+        if let Some(&reference_target) = self.entries.get(&key)
+            && reference_target < block.id
+        {
+            return u32::try_from(reference_target)
+                .map(|target| {
+                    CompressedBlock::reference(
+                        block.id,
+                        block.stream_id,
+                        target,
+                        block.original_len,
+                    )
+                })
+                .map_err(|_| crate::OxideError::InvalidFormat("block id exceeds u32 range"));
+        }
+
+        self.entries.insert(key.clone(), block.id);
+        self.insertion_order.push_back((key, block.id));
+        while self.insertion_order.len() > self.max_entries {
+            if let Some((evicted_key, evicted_block_id)) = self.insertion_order.pop_front()
+                && self.entries.get(&evicted_key) == Some(&evicted_block_id)
+            {
+                self.entries.remove(&evicted_key);
+            }
+        }
+
+        Ok(block)
+    }
+}
+
+pub(crate) type SharedCompressedBlockDeduper = Arc<(Mutex<CompressedBlockDeduper>, Condvar)>;
+
+pub(crate) fn shared_compressed_block_deduper(max_entries: usize) -> SharedCompressedBlockDeduper {
+    Arc::new((
+        Mutex::new(CompressedBlockDeduper::new(max_entries)),
+        Condvar::new(),
+    ))
+}
+
+fn rewrite_ordered_compressed_block(
+    deduper: &SharedCompressedBlockDeduper,
+    block: CompressedBlock,
+) -> Result<CompressedBlock> {
+    let (lock, ready) = &**deduper;
+    let mut deduper = lock.lock().map_err(|_| {
+        crate::OxideError::CompressionError("compressed block dedupe state poisoned".to_string())
+    })?;
+    while block.id != deduper.next_block_id {
+        deduper = ready.wait(deduper).map_err(|_| {
+            crate::OxideError::CompressionError(
+                "compressed block dedupe state poisoned".to_string(),
+            )
+        })?;
+    }
+
+    let rewritten = deduper.rewrite(block);
+    deduper.next_block_id = deduper.next_block_id.saturating_add(1);
+    ready.notify_all();
+    rewritten
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RawChunkDedupeKey {
     original_len: u64,
     payload_hash: Blake3Hash,
@@ -286,6 +393,26 @@ pub(crate) struct ProcessBatchConfig<'a> {
     pub dictionary_bank: &'a ArchiveDictionaryBank,
     pub processing_totals: &'a ProcessingThroughputTotals,
     pub raw_chunk_deduper: Option<&'a SharedRawChunkDeduper>,
+    pub encryption_key: Option<crate::crypto::EncryptionKey>,
+    pub compressed_block_deduper: Option<&'a SharedCompressedBlockDeduper>,
+}
+
+fn finalize_compressed_block(
+    mut block: CompressedBlock,
+    config: &ProcessBatchConfig<'_>,
+) -> Result<CompressedBlock> {
+    if let Some(deduper) = config.compressed_block_deduper {
+        block = rewrite_ordered_compressed_block(deduper, block)?;
+    }
+
+    if let Some(key) = config.encryption_key
+        && !block.is_reference()
+        && !block.data.is_empty()
+    {
+        block.data =
+            CompressedPayload::Owned(crate::crypto::encrypt_block(&key, block.data.as_slice())?);
+    }
+    Ok(block)
 }
 
 pub(crate) fn process_batch(
@@ -315,12 +442,10 @@ pub(crate) fn process_batch(
             config
                 .processing_totals
                 .record(source_len as u64, std::time::Duration::ZERO);
-            return Ok(CompressedBlock::reference(
-                id,
-                stream_id,
-                reference_target,
-                source_len as u64,
-            ));
+            return finalize_compressed_block(
+                CompressedBlock::reference(id, stream_id, reference_target, source_len as u64),
+                config,
+            );
         }
     }
 
@@ -328,28 +453,34 @@ pub(crate) fn process_batch(
         config
             .processing_totals
             .record(source_len as u64, std::time::Duration::ZERO);
-        return Ok(CompressedBlock::with_chunk_encoding(
-            id,
-            stream_id,
-            CompressedPayload::from_batch_data(data),
-            plan,
-            true,
-            source_len as u64,
-        ));
+        return finalize_compressed_block(
+            CompressedBlock::with_chunk_encoding(
+                id,
+                stream_id,
+                CompressedPayload::from_batch_data(data),
+                plan,
+                true,
+                source_len as u64,
+            ),
+            config,
+        );
     }
 
     if config.skip_compression {
         config
             .processing_totals
             .record(source_len as u64, std::time::Duration::ZERO);
-        return Ok(CompressedBlock::with_chunk_encoding(
-            id,
-            stream_id,
-            CompressedPayload::from_batch_data(data),
-            plan,
-            true,
-            source_len as u64,
-        ));
+        return finalize_compressed_block(
+            CompressedBlock::with_chunk_encoding(
+                id,
+                stream_id,
+                CompressedPayload::from_batch_data(data),
+                plan,
+                true,
+                source_len as u64,
+            ),
+            config,
+        );
     }
 
     if should_skip_full_compression_probe(source_len, plan)
@@ -364,14 +495,17 @@ pub(crate) fn process_batch(
         config
             .processing_totals
             .record(source_len as u64, std::time::Duration::ZERO);
-        return Ok(CompressedBlock::with_chunk_encoding(
-            id,
-            stream_id,
-            CompressedPayload::from_batch_data(data),
-            plan,
-            true,
-            source_len as u64,
-        ));
+        return finalize_compressed_block(
+            CompressedBlock::with_chunk_encoding(
+                id,
+                stream_id,
+                CompressedPayload::from_batch_data(data),
+                plan,
+                true,
+                source_len as u64,
+            ),
+            config,
+        );
     }
 
     let selected_dictionary =
@@ -412,15 +546,18 @@ pub(crate) fn process_batch(
             CompressedPayload::from(compressed)
         };
 
-        return Ok(CompressedBlock::with_chunk_encoding_and_dictionary(
-            id,
-            stream_id,
-            data,
-            plan,
-            raw_passthrough,
-            source_len as u64,
-            if raw_passthrough { 0 } else { dictionary_id },
-        ));
+        return finalize_compressed_block(
+            CompressedBlock::with_chunk_encoding_and_dictionary(
+                id,
+                stream_id,
+                data,
+                plan,
+                raw_passthrough,
+                source_len as u64,
+                if raw_passthrough { 0 } else { dictionary_id },
+            ),
+            config,
+        );
     }
 
     let compression_started = Instant::now();
@@ -437,15 +574,18 @@ pub(crate) fn process_batch(
         CompressedPayload::from_vec_in_pool(compressed, pool)
     };
 
-    Ok(CompressedBlock::with_chunk_encoding_and_dictionary(
-        id,
-        stream_id,
-        data,
-        plan,
-        raw_passthrough,
-        source_len as u64,
-        if raw_passthrough { 0 } else { dictionary_id },
-    ))
+    finalize_compressed_block(
+        CompressedBlock::with_chunk_encoding_and_dictionary(
+            id,
+            stream_id,
+            data,
+            plan,
+            raw_passthrough,
+            source_len as u64,
+            if raw_passthrough { 0 } else { dictionary_id },
+        ),
+        config,
+    )
 }
 
 #[inline]

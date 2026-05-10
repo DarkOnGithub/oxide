@@ -120,7 +120,8 @@ pub struct ArchiveWriter<W: Write> {
     pending_descriptors: Vec<ChunkDescriptor>,
     block_deduper: BlockDeduper,
     password: Option<String>,
-    crypto_key: Option<[u8; crate::crypto::KEY_SIZE]>,
+    encryption_salt: Option<[u8; crate::crypto::SALT_SIZE]>,
+    crypto_key: Option<crate::crypto::EncryptionKey>,
 }
 
 /// Seekable variant of [`ArchiveWriter`] that validates the writer position
@@ -168,6 +169,7 @@ impl<W: Write> ArchiveWriter<W> {
             pending_descriptors: Vec::new(),
             block_deduper: BlockDeduper::new(dedupe_window_blocks),
             password: None,
+            encryption_salt: None,
             crypto_key: None,
         }
     }
@@ -177,6 +179,12 @@ impl<W: Write> ArchiveWriter<W> {
         self
     }
 
+    pub fn with_pre_encrypted_salt(mut self, salt: Option<[u8; crate::crypto::SALT_SIZE]>) -> Self {
+        self.encryption_salt = salt;
+        self.crypto_key = None;
+        self.password = None;
+        self
+    }
 
     pub fn with_reorder_limit(writer: W, max_pending: usize) -> Self {
         Self::with_reorder_limit_and_manifest(writer, max_pending, None)
@@ -198,13 +206,15 @@ impl<W: Write> ArchiveWriter<W> {
         self.pending_descriptors.reserve(block_count as usize);
         self.next_payload_offset = GLOBAL_HEADER_SIZE as u64;
 
-        let mut salt_opt = None;
-        if let Some(ref pwd) = self.password {
-            let salt = crate::crypto::generate_salt();
-            let key = crate::crypto::derive_key(pwd, &salt)?;
-            self.crypto_key = Some(key);
-            salt_opt = Some(salt);
-        }
+        let salt_opt = if let Some(salt) = self.encryption_salt {
+            Some(salt)
+        } else if let Some(ref pwd) = self.password {
+            let context = crate::crypto::EncryptionContext::from_password(pwd)?;
+            self.crypto_key = Some(context.key);
+            Some(context.salt)
+        } else {
+            None
+        };
 
         let header = GlobalHeader::new(source_kind, block_count, 0, 0, 0, 0, 0, salt_opt);
         let started = Instant::now();
@@ -336,7 +346,7 @@ impl<W: Write> ArchiveWriter<W> {
         if let Some(ref key) = self.crypto_key {
             if !block.is_reference() && !block.data.is_empty() {
                 let encrypted_data = crate::crypto::encrypt_block(key, block.data.as_slice())?;
-                block.data = crate::types::CompressedPayload::Owned(encrypted_data); 
+                block.data = crate::types::CompressedPayload::Owned(encrypted_data);
             }
         }
 
@@ -366,7 +376,12 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
     }
 
     pub fn with_password(mut self, password: Option<String>) -> Self {
-        self.0 = self.0.with_password(password); 
+        self.0 = self.0.with_password(password);
+        self
+    }
+
+    pub fn with_pre_encrypted_salt(mut self, salt: Option<[u8; crate::crypto::SALT_SIZE]>) -> Self {
+        self.0 = self.0.with_pre_encrypted_salt(salt);
         self
     }
 
