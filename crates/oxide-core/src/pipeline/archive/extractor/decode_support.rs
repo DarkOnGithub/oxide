@@ -447,15 +447,31 @@ pub(super) fn decode_block_payload_with_scratch(
     scratch: &mut CompressionScratchArena,
     pool: &BufferPool,
     dictionary_bank: &ArchiveDictionaryBank,
+    crypto_key: Option<[u8; crate::crypto::KEY_SIZE]>,
 ) -> Result<DecodedBlock> {
     let compression_meta = header.compression_meta()?;
+
+    let mut data_slice = block_data.as_slice();
+    let mut decrypted_vec = None;
+
+    if let Some(key) = crypto_key {
+        if !data_slice.is_empty() && !header.is_reference() {
+            let decrypted = crate::crypto::decrypt_block(&key, data_slice)?;
+            decrypted_vec = Some(decrypted);
+        }
+    }
+
+    if let Some(ref d) = decrypted_vec {
+        data_slice = d.as_slice();
+    }
+
     let decoded = if compression_meta.raw_passthrough {
         DecodedBlock::Pooled(block_data)
     } else if crate::compression::supports_direct_buffer_output(compression_meta.algo) {
         let mut decoded = pool.acquire_with_capacity(header.raw_len as usize);
         crate::compression::reverse_compression_request_with_scratch_into(
             crate::compression::DecompressionRequest {
-                data: block_data.as_slice(),
+                data: data_slice,
                 algo: compression_meta.algo,
                 raw_len: Some(header.raw_len as usize),
                 dictionary_id: compression_meta.dictionary_id,
@@ -470,7 +486,7 @@ pub(super) fn decode_block_payload_with_scratch(
         DecodedBlock::Owned(
             crate::compression::reverse_compression_request_with_scratch(
                 crate::compression::DecompressionRequest {
-                    data: block_data.as_slice(),
+                    data: data_slice,
                     algo: compression_meta.algo,
                     raw_len: Some(header.raw_len as usize),
                     dictionary_id: compression_meta.dictionary_id,
