@@ -91,7 +91,7 @@ pub fn probe_encryption(path: &Path) -> crate::Result<bool> {
     Ok(is_encrypted)
 }
 
-/// Vérifie si un mot de passe est correct en tentant de déchiffrer le tout premier bloc.
+/// Checks if a password is correct by attempting to decrypt the very first block.
 pub fn verify_archive_password(path: &std::path::Path, password: &str) -> crate::Result<bool> {
     use std::io::{Read, Seek, SeekFrom};
     
@@ -100,31 +100,29 @@ pub fn verify_archive_password(path: &std::path::Path, password: &str) -> crate:
     
     let header = archive.global_header();
     if (header.flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) == 0 {
-        return Ok(true); // L'archive n'est pas chiffrée
+        return Ok(true); // The archive is not encrypted
     }
     
     if archive.block_count() == 0 {
-        return Ok(true); // Archive vide
+        return Ok(true); // Archive empty
     }
     
-    // On récupère la taille et la position du TOUT PREMIER bloc
+    
     let descriptor = archive.block_descriptor(0)?;
     
-    // On lit les octets chiffrés directement sur le disque
     let mut buffer = vec![0u8; descriptor.encoded_len as usize];
     file.seek(SeekFrom::Start(descriptor.payload_offset))?;
     file.read_exact(&mut buffer)?;
     
-    // On dérive la clé et on teste de déchiffrer JUSTE CE BLOC !
     let key = crate::crypto::derive_key(password, &header.salt)?;
     
     match crate::crypto::decrypt_block(&key, &buffer) {
-        Ok(_) => Ok(true),  // Déchiffrement réussi = Bon mot de passe !
-        Err(_) => Ok(false), // Échec = Mauvais mot de passe !
+        Ok(_) => Ok(true),  // Decryption successful = Correct password !
+        Err(_) => Ok(false), // Failure = Wrong password !
     }
 }
 
-/// Chiffre une archive existante sans la décompresser (Pass-through)
+/// Encrypt an existing archive without decompressing it (Pass-through)
 pub fn encrypt_existing_archive(
     input_path: &std::path::Path,
     output_path: &std::path::Path,
@@ -132,14 +130,12 @@ pub fn encrypt_existing_archive(
 ) -> crate::Result<()> {
     use std::fs::File;
     
-    // On ouvre le lecteur sans mot de passe
     let mut reader = crate::format::ArchiveReader::new(File::open(input_path)?)?;
     
     if (reader.global_header().flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0 {
-        return Err(crate::OxideError::InvalidFormat("L'archive est déjà chiffrée."));
+        return Err(crate::OxideError::InvalidFormat("The archive is already encrypted."));
     }
 
-    // On ouvre le writer AVEC le mot de passe (il va générer le Sel et la clé)
     let out_file = File::create(output_path)?;
     let mut writer = crate::format::ArchiveWriter::with_manifest(out_file, Some(reader.manifest().clone()))
         .with_password(Some(password.to_string()));
@@ -151,7 +147,6 @@ pub fn encrypt_existing_archive(
     
     writer.write_global_header_with_flags(reader.block_count(), source_flag)?;
 
-    // La boucle magique : on lit, on encapsule, on écrit (le writer s'occupe de chiffrer)
     for index in 0..reader.block_count() {
         let (descriptor, data) = reader.read_block(index)?;
         let meta = descriptor.compression_meta()?;
@@ -175,7 +170,7 @@ pub fn encrypt_existing_archive(
     Ok(())
 }
 
-/// Déchiffre une archive existante sans la décompresser (Pass-through)
+/// Decrypt an existing archive without decompressing it (Pass-through)
 pub fn decrypt_existing_archive(
     input_path: &std::path::Path,
     output_path: &std::path::Path,
@@ -183,11 +178,9 @@ pub fn decrypt_existing_archive(
 ) -> crate::Result<()> {
     use std::fs::File;
     
-    // On ouvre le lecteur AVEC le mot de passe (il va vérifier le Sel et déchiffrer)
     let mut reader = crate::format::ArchiveReader::new(File::open(input_path)?)?
         .with_password(Some(password.to_string()))?;
 
-    // On ouvre le writer SANS mot de passe
     let out_file = File::create(output_path)?;
     let mut writer = crate::format::ArchiveWriter::with_manifest(out_file, Some(reader.manifest().clone()));
 
@@ -198,7 +191,6 @@ pub fn decrypt_existing_archive(
     
     writer.write_global_header_with_flags(reader.block_count(), source_flag)?;
 
-    // La même boucle : le lecteur déchiffre à la volée, le writer écrit en clair
     for index in 0..reader.block_count() {
         let (descriptor, data) = reader.read_block(index)?;
         let meta = descriptor.compression_meta()?;
