@@ -71,21 +71,20 @@ impl<'a> Archiver<'a> {
             },
         ));
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
-        let password = self.config.password.clone();
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            move |writer, manifest| {
+            move |writer, manifest, encryption_salt| {
                 ArchiveWriter::with_limits_and_manifest(
                     writer,
                     crate::format::DEFAULT_REORDER_PENDING_LIMIT,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_password(password)
+                .with_pre_encrypted_salt(encryption_salt)
             },
         )
     }
@@ -117,21 +116,20 @@ impl<'a> Archiver<'a> {
             },
         ));
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
-        let password = self.config.password.clone();
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            move |writer, manifest| {
+            move |writer, manifest, encryption_salt| {
                 SeekableArchiveWriter::with_limits_and_manifest(
                     writer,
                     crate::format::DEFAULT_REORDER_PENDING_LIMIT,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_password(password)
+                .with_pre_encrypted_salt(encryption_salt)
             },
         )
     }
@@ -145,21 +143,20 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
-        let password = self.config.password.clone();
         archive_directory_streaming_with_writer(
             self.config,
             root,
             writer,
             options,
             sink,
-            move |writer, manifest, reorder_limit| {
+            move |writer, manifest, reorder_limit, encryption_salt| {
                 ArchiveWriter::with_limits_and_manifest(
                     writer,
                     reorder_limit,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_password(password)
+                .with_pre_encrypted_salt(encryption_salt)
             },
         )
     }
@@ -173,21 +170,20 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
-        let password = self.config.password.clone();
         archive_directory_streaming_with_writer(
             self.config,
             root,
             writer,
             options,
             sink,
-            move |writer, manifest, reorder_limit| {
+            move |writer, manifest, reorder_limit, encryption_salt| {
                 SeekableArchiveWriter::with_limits_and_manifest(
                     writer,
                     reorder_limit,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_password(password)
+                .with_pre_encrypted_salt(encryption_salt)
             },
         )
     }
@@ -202,21 +198,20 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
-        let password = self.config.password.clone();
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            |writer, manifest| {
+            |writer, manifest, encryption_salt| {
                 ArchiveWriter::with_limits_and_manifest(
                     writer,
                     crate::format::DEFAULT_REORDER_PENDING_LIMIT,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_password(password)
+                .with_pre_encrypted_salt(encryption_salt)
             },
         )
     }
@@ -231,21 +226,20 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
-        let password = self.config.password.clone();
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            |writer, manifest| {
+            |writer, manifest, encryption_salt| {
                 SeekableArchiveWriter::with_limits_and_manifest(
                     writer,
                     crate::format::DEFAULT_REORDER_PENDING_LIMIT,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_password(password)
+                .with_pre_encrypted_salt(encryption_salt)
             },
         )
     }
@@ -262,7 +256,7 @@ impl<'a> Archiver<'a> {
     where
         W: Write,
         AW: ArchiveBlockWriter<InnerWriter = W>,
-        F: FnOnce(W, crate::format::ArchiveManifest) -> AW,
+        F: FnOnce(W, crate::format::ArchiveManifest, Option<[u8; crate::crypto::SALT_SIZE]>) -> AW,
     {
         archive_prepared_with_writer(
             self.config,

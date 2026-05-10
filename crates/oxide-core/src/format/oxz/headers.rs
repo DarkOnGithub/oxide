@@ -62,7 +62,7 @@ impl GlobalHeader {
         let mut final_salt = [0u8; 16];
 
         if let Some(s) = salt {
-            flags |= HEADER_FLAG_ENCRYPTED; 
+            flags |= HEADER_FLAG_ENCRYPTED;
             final_salt = s;
         }
         Self {

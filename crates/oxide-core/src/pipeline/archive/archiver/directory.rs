@@ -22,7 +22,9 @@ use crate::types::{Batch, ChunkEncodingPlan, CompressedBlock, Result};
 use super::super::telemetry::*;
 use super::super::types::*;
 use super::super::types::{CompressionTuning, PipelineQueueStats};
-use super::processing::{ProcessBatchConfig, process_batch, shared_raw_chunk_deduper};
+use super::processing::{
+    ProcessBatchConfig, process_batch, shared_compressed_block_deduper, shared_raw_chunk_deduper,
+};
 use super::utils::*;
 
 const AUTO_DICTIONARY_MIN_DIRECTORY_FILES: usize = 8;
@@ -40,7 +42,9 @@ pub fn archive_directory_streaming_with_writer<W, AW, F>(
 where
     W: Write + Send + 'static,
     AW: ArchiveBlockWriter<InnerWriter = W> + Send + 'static,
-    F: FnOnce(W, ArchiveManifest, usize) -> AW + Send + 'static,
+    F: FnOnce(W, ArchiveManifest, usize, Option<[u8; crate::crypto::SALT_SIZE]>) -> AW
+        + Send
+        + 'static,
 {
     let mut stage_timings = StageTimings::default();
     let planning_started = Instant::now();
@@ -91,18 +95,32 @@ where
     );
     let dictionary_bank = Arc::new(dictionary_bank);
     let processing_totals = Arc::new(ProcessingThroughputTotals::default());
+
+    let encryption_context = config
+        .password
+        .as_deref()
+        .map(crate::crypto::EncryptionContext::from_password)
+        .transpose()?;
+    let encryption_salt = encryption_context.map(|context| context.salt);
+    let encryption_key = encryption_context.map(|context| context.key);
     let skip_compression = config.skip_compression;
     let raw_chunk_deduper = (config.performance.raw_chunk_dedup_window_blocks > 0)
         .then(|| shared_raw_chunk_deduper(config.performance.raw_chunk_dedup_window_blocks));
+    let compressed_block_deduper = (encryption_key.is_some()
+        && config.performance.block_dedup_window_blocks > 0)
+        .then(|| shared_compressed_block_deduper(config.performance.block_dedup_window_blocks));
     let worker_processing_totals = Arc::clone(&processing_totals);
     let worker_dictionary_bank = Arc::clone(&dictionary_bank);
     let worker_raw_chunk_deduper = raw_chunk_deduper.clone();
+    let worker_compressed_block_deduper = compressed_block_deduper.clone();
     let handle = worker_pool.spawn(move |_worker_id, batch, pool, compression, scratch| {
         let config = ProcessBatchConfig {
             skip_compression,
             dictionary_bank: worker_dictionary_bank.as_ref(),
             processing_totals: worker_processing_totals.as_ref(),
             raw_chunk_deduper: worker_raw_chunk_deduper.as_ref(),
+            encryption_key,
+            compressed_block_deduper: worker_compressed_block_deduper.as_ref(),
         };
         process_batch(batch, pool, compression, &config, scratch)
     });
@@ -122,7 +140,12 @@ where
     let writer_manifest = manifest.clone();
     let writer_handle = thread::spawn(move || -> Result<DirectoryWriterOutcome<W>> {
         let outcome = (|| -> Result<DirectoryWriterOutcome<W>> {
-            let mut archive_writer = writer_factory(writer, writer_manifest, writer_reorder_limit);
+            let mut archive_writer = writer_factory(
+                writer,
+                writer_manifest,
+                writer_reorder_limit,
+                encryption_salt,
+            );
             archive_writer.write_global_header_with_flags(
                 block_count,
                 directory::source_kind_flags(ArchiveSourceKind::Directory),

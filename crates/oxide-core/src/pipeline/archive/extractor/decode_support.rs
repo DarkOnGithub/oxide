@@ -466,7 +466,11 @@ pub(super) fn decode_block_payload_with_scratch(
     }
 
     let decoded = if compression_meta.raw_passthrough {
-        DecodedBlock::Pooled(block_data)
+        if let Some(decrypted) = decrypted_vec {
+            DecodedBlock::Owned(decrypted)
+        } else {
+            DecodedBlock::Pooled(block_data)
+        }
     } else if crate::compression::supports_direct_buffer_output(compression_meta.algo) {
         let mut decoded = pool.acquire_with_capacity(header.raw_len as usize);
         crate::compression::reverse_compression_request_with_scratch_into(

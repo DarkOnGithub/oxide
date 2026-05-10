@@ -708,15 +708,18 @@ impl Extractor {
             reader_buffer_pool,
             worker_count,
         );
-        let crypto_key = if (archive_header.flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0 {
-            if let Some(ref pwd) = self.password {
-                Some(crate::crypto::derive_key(pwd, &archive_header.salt)?)
+        let crypto_key =
+            if (archive_header.flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0 {
+                if let Some(ref pwd) = self.password {
+                    Some(crate::crypto::derive_key(pwd, &archive_header.salt)?)
+                } else {
+                    return Err(crate::OxideError::InvalidFormat(
+                        "Archive is encrypted but no password was provided",
+                    ));
+                }
             } else {
-                return Err(crate::OxideError::InvalidFormat("Archive is encrypted but no password was provided"));
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         let mut worker_handles = Vec::with_capacity(worker_count);
 
@@ -845,9 +848,9 @@ impl Extractor {
                     drained += 1;
                 }
                 decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
-                
+
                 if first_error.is_some() {
-                    break; 
+                    break;
                 }
 
                 let force = false;
@@ -1022,15 +1025,18 @@ impl Extractor {
             worker_count,
         );
 
-        let crypto_key = if (archive_header.flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0 {
-            if let Some(ref pwd) = self.password {
-                Some(crate::crypto::derive_key(pwd, &archive_header.salt)?)
+        let crypto_key =
+            if (archive_header.flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0 {
+                if let Some(ref pwd) = self.password {
+                    Some(crate::crypto::derive_key(pwd, &archive_header.salt)?)
+                } else {
+                    return Err(crate::OxideError::InvalidFormat(
+                        "Archive is encrypted but no password was provided",
+                    ));
+                }
             } else {
-                return Err(crate::OxideError::InvalidFormat("Archive is encrypted but no password was provided"));
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         for worker_id in 0..worker_count {
             let local_task_rx = task_rx.clone();
@@ -1198,7 +1204,7 @@ impl Extractor {
                 decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
 
                 if first_error.is_some() {
-                    break; 
+                    break;
                 }
 
                 let force = false;
