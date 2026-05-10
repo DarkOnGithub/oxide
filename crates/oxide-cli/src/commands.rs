@@ -52,17 +52,10 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
     let mut archive_password: Option<String> = None;
 
     if encrypt {
-        // 1. On regarde si le mot de passe est dans l'environnement (pour les scripts auto)
         if let Ok(env_pass) = std::env::var("OXIDE_PASSWORD") {
             archive_password = Some(env_pass);
         } else {
-            // 2. Sinon, on demande à l'humain de taper son mot de passe de manière invisible !
-            // (Nécessite d'ajouter la crate `dialoguer` dans le Cargo.toml du CLI)
-            let password = dialoguer::Password::new()
-                .with_prompt("Enter password")
-                .with_confirmation("Confirm password", "Passwords do not match")
-                .interact()?;
-            
+            let password = get_secure_password("Enter password to encrypt archive", true)?;
             archive_password = Some(password);
         }
     }
@@ -202,12 +195,15 @@ pub fn extract(args: ExtractArgs) -> AppResult {
     let is_encrypted = oxide_core::probe_encryption(&input)?;
 
     let mut password: Option<String> = None;
+    let mut try_env_var = true;
     if is_encrypted {
         loop {
-            // 1. On demande le mot de passe
-            let pwd = get_secure_password("This archive is encrypted. Enter password", false)?;
-            
-            // 2. On vérifie instantanément si c'est le bon
+            let pwd = if try_env_var && std::env::var("OXIDE_PASSWORD").is_ok() {
+                try_env_var = false; 
+                std::env::var("OXIDE_PASSWORD").unwrap()
+            } else {
+                get_secure_password("This archive is encrypted. Enter password", false)?
+            };
             match oxide_core::verify_archive_password(&input, &pwd) {
                 Ok(true) => {
                     // C'est le bon ! On le sauvegarde et on casse la boucle.
@@ -308,8 +304,7 @@ pub fn encrypt(args: EncryptArgs) -> AppResult {
     // 1. Vérification : est-ce que c'est déjà chiffré ?
     let is_encrypted = oxide_core::probe_encryption(&input)?;
     if is_encrypted {
-        eprintln!("This archive is already encrypted.");
-        std::process::exit(1);
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "This archive is already encrypted.").into());
     }
 
     let output_path = output.clone().unwrap_or_else(|| {
@@ -323,7 +318,12 @@ pub fn encrypt(args: EncryptArgs) -> AppResult {
     let password = get_secure_password("Enter password to encrypt archive", true)?;
     
     // 2. Appel au Moteur
-    oxide_core::encrypt_existing_archive(&input, &output_path, &password)?;
+    if let Err(e) = oxide_core::encrypt_existing_archive(&input, &output_path, &password) {
+        if output.is_none() && output_path.exists() {
+            let _ = std::fs::remove_file(&output_path); // On nettoie les traces
+        }
+        return Err(e.into());
+    }
 
     // 3. Remplacement du fichier
     if output.is_none() {
@@ -342,8 +342,7 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
     // 1. Vérification : est-ce que c'est bien chiffré ?
     let is_encrypted = oxide_core::probe_encryption(&input)?;
     if !is_encrypted {
-        eprintln!("❌ This archive is not encrypted.");
-        std::process::exit(1);
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "This archive is not encrypted.").into());
     }
 
     let output_path = output.clone().unwrap_or_else(|| {
@@ -356,8 +355,15 @@ pub fn decrypt(args: DecryptArgs) -> AppResult {
     
     // 2. La boucle de vérification robuste du mot de passe
     let mut final_password = String::new();
+    let mut try_env_var = true;
     loop {
-        let pwd = get_secure_password("Enter password to decrypt archive", false)?;
+        let pwd = if try_env_var && std::env::var("OXIDE_PASSWORD").is_ok() {
+            try_env_var = false;
+            std::env::var("OXIDE_PASSWORD").unwrap()
+        } else {
+            get_secure_password("Enter password to decrypt archive", false)?
+        };
+        
         match oxide_core::verify_archive_password(&input, &pwd) {
             Ok(true) => {
                 final_password = pwd;
@@ -520,10 +526,6 @@ fn compression_name(compression: CompressionAlgo, level: Option<i32>, extreme: b
 }
 
 fn get_secure_password(prompt: &str, require_confirmation: bool) -> AppResult<String> {
-    if let Ok(env_pass) = std::env::var("OXIDE_PASSWORD") {
-        return Ok(env_pass);
-    }
-
     let mut dialog = dialoguer::Password::new();
     dialog = dialog.with_prompt(prompt); 
     

@@ -74,23 +74,20 @@ pub fn probe_encryption(path: &Path) -> crate::Result<bool> {
     };
 
     // We only need the first 8 bytes (Magic is 0..4, Version is 4..6, Flags are 6..8)
-    let mut buffer = [0u8; 8];
+    let mut buffer = [0u8; 10];
     if file.read_exact(&mut buffer).is_err() {
-        return Ok(false); // File is too short to be a valid archive
+        return Ok(false); 
     }
-
-    // Verify the OXZ magic signature to ensure it's actually our format
-    // Note: adjust the path to OXZ_MAGIC if your imports are structured differently
+    
     if buffer[0..4] != crate::format::oxz::OXZ_MAGIC {
         return Ok(false);
     }
 
-    // Read the flags (bytes 6 and 7 in Little Endian)
-    let flags = u16::from_le_bytes([buffer[6], buffer[7]]);
+    // Read the flags (bytes 6, 7, 8, 9 in Little Endian)
+    let flags = u32::from_le_bytes([buffer[6], buffer[7], buffer[8], buffer[9]]);
     
     // Check if the encryption flag is set
-    let is_encrypted = (flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0;
-
+    let is_encrypted = (flags & (crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED as u32)) != 0;
     Ok(is_encrypted)
 }
 
