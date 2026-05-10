@@ -600,7 +600,7 @@ impl Extractor {
         T: AsRef<str>,
     {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new(file.try_clone()?)?.with_password(self.password.clone())?;
+        let archive = ArchiveReader::new(file.try_clone()?)?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::Directory {
             return Err(crate::OxideError::InvalidFormat(
@@ -708,6 +708,16 @@ impl Extractor {
             reader_buffer_pool,
             worker_count,
         );
+        let crypto_key = if (archive_header.flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0 {
+            if let Some(ref pwd) = self.password {
+                Some(crate::crypto::derive_key(pwd, &archive_header.salt)?)
+            } else {
+                return Err(crate::OxideError::InvalidFormat("Archive is encrypted but no password was provided"));
+            }
+        } else {
+            None
+        };
+
         let mut worker_handles = Vec::with_capacity(worker_count);
 
         for worker_id in 0..worker_count {
@@ -716,6 +726,9 @@ impl Extractor {
             let local_runtime = Arc::clone(&runtime_state);
             let local_buffer_pool = Arc::clone(&decode_buffer_pool);
             let local_dictionary_bank = Arc::clone(&dictionary_bank);
+
+            let worker_crypto_key = crypto_key.clone();
+
             let handle = thread::spawn(move || -> DecodeWorkerOutcome {
                 let started = Instant::now();
                 let mut tasks_completed = 0usize;
@@ -731,6 +744,7 @@ impl Extractor {
                         &mut scratch,
                         &local_buffer_pool,
                         local_dictionary_bank.as_ref(),
+                        worker_crypto_key,
                     );
                     let busy_elapsed = decode_started.elapsed();
                     busy += busy_elapsed;
@@ -1004,12 +1018,25 @@ impl Extractor {
             worker_count,
         );
 
+        let crypto_key = if (archive_header.flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0 {
+            if let Some(ref pwd) = self.password {
+                Some(crate::crypto::derive_key(pwd, &archive_header.salt)?)
+            } else {
+                return Err(crate::OxideError::InvalidFormat("Archive is encrypted but no password was provided"));
+            }
+        } else {
+            None
+        };
+
         for worker_id in 0..worker_count {
             let local_task_rx = task_rx.clone();
             let local_result_tx = result_tx.clone();
             let local_runtime = Arc::clone(&runtime_state);
             let local_buffer_pool = Arc::clone(&decode_buffer_pool);
             let local_dictionary_bank = Arc::clone(&dictionary_bank);
+
+            let worker_crypto_key = crypto_key.clone();
+
             let handle = thread::spawn(move || -> DecodeWorkerOutcome {
                 let started = Instant::now();
                 let mut tasks_completed = 0usize;
@@ -1025,6 +1052,7 @@ impl Extractor {
                         &mut scratch,
                         &local_buffer_pool,
                         local_dictionary_bank.as_ref(),
+                        worker_crypto_key,
                     );
                     let busy_elapsed = decode_started.elapsed();
                     busy += busy_elapsed;
