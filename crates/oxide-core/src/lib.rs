@@ -126,3 +126,101 @@ pub fn verify_archive_password(path: &std::path::Path, password: &str) -> crate:
         Err(_) => Ok(false), // Échec = Mauvais mot de passe !
     }
 }
+
+/// Chiffre une archive existante sans la décompresser (Pass-through)
+pub fn encrypt_existing_archive(
+    input_path: &std::path::Path,
+    output_path: &std::path::Path,
+    password: &str,
+) -> crate::Result<()> {
+    use std::fs::File;
+    
+    // On ouvre le lecteur sans mot de passe
+    let mut reader = crate::format::ArchiveReader::new(File::open(input_path)?)?;
+    
+    if (reader.global_header().flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) != 0 {
+        return Err(crate::OxideError::InvalidFormat("L'archive est déjà chiffrée."));
+    }
+
+    // On ouvre le writer AVEC le mot de passe (il va générer le Sel et la clé)
+    let out_file = File::create(output_path)?;
+    let mut writer = crate::format::ArchiveWriter::with_manifest(out_file, Some(reader.manifest().clone()))
+        .with_password(Some(password.to_string()));
+
+    let source_flag = match reader.source_kind() {
+        crate::ArchiveSourceKind::File => 0,
+        crate::ArchiveSourceKind::Directory => 1,
+    };
+    
+    writer.write_global_header_with_flags(reader.block_count(), source_flag)?;
+
+    // La boucle magique : on lit, on encapsule, on écrit (le writer s'occupe de chiffrer)
+    for index in 0..reader.block_count() {
+        let (descriptor, data) = reader.read_block(index)?;
+        let meta = descriptor.compression_meta()?;
+        
+        let block = crate::types::CompressedBlock {
+            id: index as usize,
+            stream_id: 0,
+            data: crate::types::CompressedPayload::Owned(data),
+            compression: meta.algo,
+            raw_passthrough: meta.raw_passthrough,
+            dictionary_id: meta.dictionary_id,
+            original_len: descriptor.raw_len as u64,
+            crc32: 0,
+            reference_target: descriptor.reference_target,
+        };
+        
+        writer.write_owned_block(block)?;
+    }
+
+    writer.write_footer()?;
+    Ok(())
+}
+
+/// Déchiffre une archive existante sans la décompresser (Pass-through)
+pub fn decrypt_existing_archive(
+    input_path: &std::path::Path,
+    output_path: &std::path::Path,
+    password: &str,
+) -> crate::Result<()> {
+    use std::fs::File;
+    
+    // On ouvre le lecteur AVEC le mot de passe (il va vérifier le Sel et déchiffrer)
+    let mut reader = crate::format::ArchiveReader::new(File::open(input_path)?)?
+        .with_password(Some(password.to_string()))?;
+
+    // On ouvre le writer SANS mot de passe
+    let out_file = File::create(output_path)?;
+    let mut writer = crate::format::ArchiveWriter::with_manifest(out_file, Some(reader.manifest().clone()));
+
+    let source_flag = match reader.source_kind() {
+        crate::ArchiveSourceKind::File => 0,
+        crate::ArchiveSourceKind::Directory => 1,
+    };
+    
+    writer.write_global_header_with_flags(reader.block_count(), source_flag)?;
+
+    // La même boucle : le lecteur déchiffre à la volée, le writer écrit en clair
+    for index in 0..reader.block_count() {
+        let (descriptor, data) = reader.read_block(index)?;
+        let meta = descriptor.compression_meta()?;
+        
+        let block = crate::types::CompressedBlock {
+            id: index as usize,
+            stream_id: 0,
+            data: crate::types::CompressedPayload::Owned(data),
+            compression: meta.algo,
+            raw_passthrough: meta.raw_passthrough,
+            dictionary_id: meta.dictionary_id,
+            original_len: descriptor.raw_len as u64,
+            crc32: 0,
+            reference_target: descriptor.reference_target,
+        };
+        
+        writer.write_owned_block(block)?;
+    }
+
+    writer.write_footer()?;
+    Ok(())
+}
