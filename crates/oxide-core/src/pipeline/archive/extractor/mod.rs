@@ -112,7 +112,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new_for_sequential_extract(reader)?.with_password(self.password.clone())?;
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
         let archive_read_elapsed = archive_started.elapsed();
         let writer = VecChunkWriter::default();
         let (decoded, writer) = self.decode_archive_to_writer_with_backend(
@@ -154,7 +154,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new(file.try_clone()?)?.with_password(self.password.clone())?;
+        let archive = ArchiveReader::new(file.try_clone()?)?;
         let archive_read_elapsed = archive_started.elapsed();
         let writer = VecChunkWriter::default();
         let backend = ParallelFileDecodeReadBackend::new(archive, file)?;
@@ -198,7 +198,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new_for_sequential_extract(reader)?.with_password(self.password.clone())?;
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::File {
             return Err(crate::OxideError::InvalidFormat(
@@ -260,7 +260,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DecodedArchivePayload> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new(file.try_clone()?)?.with_password(self.password.clone())?;
+        let archive = ArchiveReader::new(file.try_clone()?)?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::File {
             return Err(crate::OxideError::InvalidFormat(
@@ -323,7 +323,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DirectoryRestoreOutcome> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new_for_sequential_extract(reader)?.with_password(self.password.clone())?;
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::Directory {
             return Err(crate::OxideError::InvalidFormat(
@@ -387,7 +387,7 @@ impl Extractor {
         sink: &mut dyn TelemetrySink,
     ) -> Result<DirectoryRestoreOutcome> {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new(file.try_clone()?)?.with_password(self.password.clone())?;
+        let archive = ArchiveReader::new(file.try_clone()?)?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::Directory {
             return Err(crate::OxideError::InvalidFormat(
@@ -522,7 +522,7 @@ impl Extractor {
         T: AsRef<str>,
     {
         let archive_started = Instant::now();
-        let archive = ArchiveReader::new_for_sequential_extract(reader)?.with_password(self.password.clone())?;
+        let archive = ArchiveReader::new_for_sequential_extract(reader)?;
         let archive_read_elapsed = archive_started.elapsed();
         if archive.source_kind() != ArchiveSourceKind::Directory {
             return Err(crate::OxideError::InvalidFormat(
@@ -845,6 +845,10 @@ impl Extractor {
                     drained += 1;
                 }
                 decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
+                
+                if first_error.is_some() {
+                    break; 
+                }
 
                 let force = false;
                 if progress_emit_due(&last_emit_at, emit_every, force) {
@@ -1192,6 +1196,11 @@ impl Extractor {
                 }
 
                 decode_result_queue_peak = decode_result_queue_peak.max(result_rx.len());
+
+                if first_error.is_some() {
+                    break; 
+                }
+
                 let force = false;
                 if progress_emit_due(&last_emit_at, emit_every, force) {
                     emit_extract_progress_if_due(ExtractProgressIfDueCtx {

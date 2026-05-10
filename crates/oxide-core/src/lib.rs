@@ -93,3 +93,36 @@ pub fn probe_encryption(path: &Path) -> crate::Result<bool> {
 
     Ok(is_encrypted)
 }
+
+/// Vérifie si un mot de passe est correct en tentant de déchiffrer le tout premier bloc.
+pub fn verify_archive_password(path: &std::path::Path, password: &str) -> crate::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    
+    let mut file = std::fs::File::open(path)?;
+    let archive = crate::format::ArchiveReader::new(file.try_clone()?)?;
+    
+    let header = archive.global_header();
+    if (header.flags & crate::format::oxz::headers::HEADER_FLAG_ENCRYPTED) == 0 {
+        return Ok(true); // L'archive n'est pas chiffrée
+    }
+    
+    if archive.block_count() == 0 {
+        return Ok(true); // Archive vide
+    }
+    
+    // On récupère la taille et la position du TOUT PREMIER bloc
+    let descriptor = archive.block_descriptor(0)?;
+    
+    // On lit les octets chiffrés directement sur le disque
+    let mut buffer = vec![0u8; descriptor.encoded_len as usize];
+    file.seek(SeekFrom::Start(descriptor.payload_offset))?;
+    file.read_exact(&mut buffer)?;
+    
+    // On dérive la clé et on teste de déchiffrer JUSTE CE BLOC !
+    let key = crate::crypto::derive_key(password, &header.salt)?;
+    
+    match crate::crypto::decrypt_block(&key, &buffer) {
+        Ok(_) => Ok(true),  // Déchiffrement réussi = Bon mot de passe !
+        Err(_) => Ok(false), // Échec = Mauvais mot de passe !
+    }
+}
