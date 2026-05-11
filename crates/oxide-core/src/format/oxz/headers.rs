@@ -21,12 +21,14 @@ const HEADER_FLAG_METADATA_INHERIT: u16 = 1 << 2;
 const HEADER_FLAG_IMPLICIT_CONTENT_OFFSETS: u16 = 1 << 3;
 const HEADER_FLAG_IMPLICIT_CHUNK_OFFSETS: u16 = 1 << 4;
 pub const HEADER_FLAG_ENCRYPTED: u16 = 1 << 5;
+pub const HEADER_FLAG_RECOVERY: u16 = 1 << 6;
 const SUPPORTED_HEADER_FLAGS: u16 = HEADER_FLAG_DIRECTORY
     | HEADER_FLAG_PATH_PREFIX
     | HEADER_FLAG_METADATA_INHERIT
     | HEADER_FLAG_IMPLICIT_CONTENT_OFFSETS
     | HEADER_FLAG_IMPLICIT_CHUNK_OFFSETS
-    | HEADER_FLAG_ENCRYPTED;
+    | HEADER_FLAG_ENCRYPTED
+    | HEADER_FLAG_RECOVERY;
 
 /// Resolved OXZ container header.
 ///
@@ -571,4 +573,21 @@ fn flags_for_source_kind(source_kind: ArchiveSourceKind) -> u16 {
         flags |= HEADER_FLAG_DIRECTORY;
     }
     flags
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryMetadata {
+    /// The percentage of redundancy requested (ex: 5)
+    pub percentage: u8,
+    /// The number of original data blocks
+    pub data_block_count: u32,
+    /// The number of mathematical parity blocks generated
+    pub parity_block_count: u32,
+    /// The exact size (in bytes) of the mathematical data appended before this structure
+    pub parity_bytes_len: u64,
+}
+
+impl RecoveryMetadata {
+    /// The fixed size that this structure will take on disk (1 + 4 + 4 + 8)
+    pub const SIZE_ON_DISK: usize = 17;
 }

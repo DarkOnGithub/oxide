@@ -31,6 +31,18 @@ pub enum OxideError {
         source: Box<OxideError>,
     },
 
+    /// Recovery data is missing or corrupted
+    #[error("Recovery data is missing or corrupted")]
+    RecoveryDataInvalid,
+
+    /// File is too heavily corrupted to be repaired
+    #[error("File is too heavily corrupted to be repaired (max {max_allowed} blocks, found {found})")]
+    TooMuchCorruption { max_allowed: usize, found: usize },
+
+    /// Invalid recovery percentage
+    #[error("Invalid recovery percentage: {0}% (must be between 1 and 20)")]
+    InvalidRecoveryPercentage(u8),
+
     /// Other error types
     #[error("{0}")]
     Other(#[from] anyhow::Error),
