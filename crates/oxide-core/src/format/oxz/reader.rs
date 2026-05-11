@@ -435,7 +435,16 @@ impl<R: Read + Seek> ArchiveReader<R> {
                     .with_raw_len(expected_len),
             )?;
         }
-        decode_chunk_table(&bytes, header.payload_offset, header.block_count)
+        
+        let descriptors = decode_chunk_table(&bytes, header.payload_offset, header.block_count)?;
+
+        let pos = reader.stream_position()?;
+
+        crate::checksum::detect_corrupted_chunks(reader, &descriptors)?;
+
+        reader.seek(SeekFrom::Start(pos))?;
+
+        Ok(descriptors)
     }
 
     fn validate_chunk_layout(
