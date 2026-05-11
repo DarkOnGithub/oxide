@@ -16,6 +16,7 @@ pub mod checksum;
 pub mod compression;
 pub mod core;
 pub mod crypto;
+pub mod recovery;
 pub mod dictionary;
 pub mod error;
 pub mod format;

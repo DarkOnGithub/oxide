@@ -78,13 +78,18 @@ impl<'a> Archiver<'a> {
             sink,
             block_size,
             move |writer, manifest, encryption_salt| {
-                ArchiveWriter::with_limits_and_manifest(
+                let mut w = ArchiveWriter::with_limits_and_manifest(
                     writer,
                     crate::format::DEFAULT_REORDER_PENDING_LIMIT,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_pre_encrypted_salt(encryption_salt)
+                .with_pre_encrypted_salt(encryption_salt);
+                
+                if let Some(pct) = self.config.recovery_percentage {
+                    w.enable_recovery(pct);
+                }
+                w
             },
         )
     }
@@ -123,13 +128,18 @@ impl<'a> Archiver<'a> {
             sink,
             block_size,
             move |writer, manifest, encryption_salt| {
-                SeekableArchiveWriter::with_limits_and_manifest(
+                let mut w = SeekableArchiveWriter::with_limits_and_manifest(
                     writer,
                     crate::format::DEFAULT_REORDER_PENDING_LIMIT,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_pre_encrypted_salt(encryption_salt)
+                .with_pre_encrypted_salt(encryption_salt);
+
+                if let Some(pct) = self.config.recovery_percentage {
+                    w.enable_recovery(pct);
+                }
+                w
             },
         )
     }
@@ -143,6 +153,7 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
+        let recovery_pct = self.config.recovery_percentage;
         archive_directory_streaming_with_writer(
             self.config,
             root,
@@ -150,13 +161,18 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             move |writer, manifest, reorder_limit, encryption_salt| {
-                ArchiveWriter::with_limits_and_manifest(
+                let mut w = ArchiveWriter::with_limits_and_manifest(
                     writer,
                     reorder_limit,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_pre_encrypted_salt(encryption_salt)
+                .with_pre_encrypted_salt(encryption_salt);
+
+                if let Some(pct) = recovery_pct {
+                    w.enable_recovery(pct);
+                }
+                w
             },
         )
     }
@@ -170,6 +186,7 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
+        let recovery_pct = self.config.recovery_percentage;
         archive_directory_streaming_with_writer(
             self.config,
             root,
@@ -177,13 +194,18 @@ impl<'a> Archiver<'a> {
             options,
             sink,
             move |writer, manifest, reorder_limit, encryption_salt| {
-                SeekableArchiveWriter::with_limits_and_manifest(
+                let mut w = SeekableArchiveWriter::with_limits_and_manifest(
                     writer,
                     reorder_limit,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_pre_encrypted_salt(encryption_salt)
+                .with_pre_encrypted_salt(encryption_salt);
+
+                if let Some(pct) = recovery_pct {
+                    w.enable_recovery(pct);
+                }
+                w
             },
         )
     }
@@ -198,20 +220,26 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
+        let recovery_pct = self.config.recovery_percentage;
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            |writer, manifest, encryption_salt| {
-                ArchiveWriter::with_limits_and_manifest(
+            move |writer, manifest, encryption_salt| {
+                let mut w = ArchiveWriter::with_limits_and_manifest(
                     writer,
                     crate::format::DEFAULT_REORDER_PENDING_LIMIT,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_pre_encrypted_salt(encryption_salt)
+                .with_pre_encrypted_salt(encryption_salt);
+
+                if let Some(pct) = recovery_pct {
+                    w.enable_recovery(pct);
+                }
+                w
             },
         )
     }
@@ -226,20 +254,26 @@ impl<'a> Archiver<'a> {
     ) -> Result<ArchiveRun<W>> {
         telemetry::begin_archive_run_telemetry();
         let dedupe_window_blocks = writer_dedupe_window_blocks(self.config);
+        let recovery_pct = self.config.recovery_percentage;
         self.archive_prepared_with_writer(
             prepared,
             writer,
             options,
             sink,
             block_size,
-            |writer, manifest, encryption_salt| {
-                SeekableArchiveWriter::with_limits_and_manifest(
+            move |writer, manifest, encryption_salt| {
+                let mut w = SeekableArchiveWriter::with_limits_and_manifest(
                     writer,
                     crate::format::DEFAULT_REORDER_PENDING_LIMIT,
                     dedupe_window_blocks,
                     Some(manifest),
                 )
-                .with_pre_encrypted_salt(encryption_salt)
+                .with_pre_encrypted_salt(encryption_salt);
+
+                if let Some(pct) = recovery_pct {
+                    w.enable_recovery(pct);
+                }
+                w
             },
         )
     }

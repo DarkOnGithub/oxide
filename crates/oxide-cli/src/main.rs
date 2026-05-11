@@ -30,6 +30,8 @@ fn run() -> AppResult {
         Commands::Tree(args) => commands::tree(args)?,
         Commands::Encrypt(args) => commands::encrypt(args)?,
         Commands::Decrypt(args) => commands::decrypt(args)?,
+        Commands::Protect(args) => commands::protect(args)?,
+        Commands::Repair(args) => commands::repair(args)?,
     }
 
     Ok(())

@@ -27,6 +27,7 @@ pub struct ArchiveReader<R: Read + Seek> {
     reference_target_cache: Option<ReferenceTargetCache>,
     password: Option<String>,
     crypto_key: Option<[u8; crate::crypto::KEY_SIZE]>,
+    recovery_metadata: Option<crate::format::oxz::headers::RecoveryMetadata>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,6 +174,20 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let chunk_descriptors = Self::read_chunk_table(&mut reader, global_header, footer)?;
         let chunk_table_elapsed_us = duration_to_us(chunk_table_started.elapsed());
 
+        let mut recovery_metadata = None;
+        if global_header.flags & super::headers::HEADER_FLAG_RECOVERY != 0 {
+            reader.seek(SeekFrom::Start(global_header.footer_offset.saturating_sub(17)))?;
+            let mut rec_buf = [0u8; 17];
+            reader.read_exact(&mut rec_buf)?;
+            
+            recovery_metadata = Some(crate::format::oxz::headers::RecoveryMetadata {
+                percentage: rec_buf[0],
+                data_block_count: u32::from_le_bytes(rec_buf[1..5].try_into().unwrap()),
+                parity_block_count: u32::from_le_bytes(rec_buf[5..9].try_into().unwrap()),
+                parity_bytes_len: u64::from_le_bytes(rec_buf[9..17].try_into().unwrap()),
+            });
+        }
+
         Self::validate_chunk_layout(
             &chunk_descriptors,
             global_header,
@@ -215,6 +230,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             reference_target_cache: None,
             password: None,
             crypto_key: None,
+            recovery_metadata,
         })
     }
 
@@ -266,6 +282,10 @@ impl<R: Read + Seek> ArchiveReader<R> {
 
     pub fn manifest(&self) -> &ArchiveManifest {
         &self.manifest
+    }
+
+    pub fn recovery_metadata(&self) -> Option<&crate::format::oxz::headers::RecoveryMetadata> {
+        self.recovery_metadata.as_ref()
     }
 
     pub(crate) fn block_descriptor(&self, index: u32) -> Result<ChunkDescriptor> {

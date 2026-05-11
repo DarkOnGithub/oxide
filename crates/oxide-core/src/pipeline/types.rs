@@ -317,6 +317,8 @@ pub struct ArchivePipelineConfig {
     pub skip_compression: bool,
     /// Optional password for archive encryption
     pub password: Option<String>,
+    /// Optional percentage of recovery data to add (1-20).
+    pub recovery_percentage: Option<u8>,
     /// Optional prebuilt archive dictionary bank imported from another archive.
     pub imported_dictionary_bank: Option<ArchiveDictionaryBank>,
     /// Performance tuning options.
@@ -339,6 +341,7 @@ impl ArchivePipelineConfig {
             compression_algo,
             skip_compression: false,
             password: None,
+            recovery_percentage: None,
             imported_dictionary_bank: None,
             performance: PipelinePerformanceOptions::default(),
         }
