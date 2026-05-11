@@ -12,16 +12,6 @@ pub fn verify_checksum(bytes: &[u8], expected: u32) -> bool {
     compute_checksum(bytes) == expected
 }
 
-/// Vérifie l'intégrité des chunks d'une archive.
-///
-/// Pour chaque ChunkDescriptor :
-/// - on va à `payload_offset`
-/// - on lit `encoded_len` octets
-/// - on recalcule le checksum
-/// - on compare avec `descriptor.checksum`
-///
-/// Les chunks de référence sont ignorés car leur champ `checksum` contient
-/// en réalité l'index de la référence, pas un vrai checksum.
 pub fn detect_corrupted_chunks<R: Read + Seek>(
     reader: &mut R,
     descriptors: &[ChunkDescriptor],
