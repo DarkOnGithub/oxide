@@ -27,6 +27,10 @@ pub enum Commands {
     Encrypt(EncryptArgs),
     /// Decrypt an encrypted .oxz archive back to a standard one
     Decrypt(DecryptArgs),
+    /// Add Reed-Solomon recovery data to an existing archive.
+    Protect(ProtectArgs),
+    /// Repair a corrupted archive using its recovery data.
+    Repair(RepairArgs),
 }
 
 #[derive(Args)]
@@ -69,6 +73,10 @@ pub struct ArchiveArgs {
     /// Encrypt the archive with a password
     #[arg(long, default_value_t = false)]
     pub encrypt: bool,
+
+    /// Add Reed-Solomon recovery data (percentage from 1 to 20).
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=20))]
+    pub recovery: Option<u8>,
 
     /// Explicit codec-specific compression level.
     #[arg(long)]
@@ -287,6 +295,30 @@ pub(crate) fn parse_size(value: &str) -> Result<usize, String> {
 
     base.checked_mul(multiplier)
         .ok_or_else(|| format!("size overflow: {value}"))
+}
+
+#[derive(Args)]
+pub struct ProtectArgs {
+    /// Source .oxz archive to protect.
+    pub input: PathBuf,
+
+    /// Destination output path. Defaults to overwriting the input file safely.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Recovery data percentage (from 1 to 20).
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u8).range(1..=20))]
+    pub recovery: u8,
+}
+
+#[derive(Args)]
+pub struct RepairArgs {
+    /// Corrupted .oxz archive to repair.
+    pub input: PathBuf,
+
+    /// Destination output path for the repaired archive. Defaults to overwriting the input file safely.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
 }
 
 #[cfg(test)]

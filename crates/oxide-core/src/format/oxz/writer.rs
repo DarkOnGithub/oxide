@@ -8,6 +8,7 @@ use crate::checksum::compute_checksum;
 use crate::compression::apply_compression;
 use crate::telemetry::{profile, tags};
 use crate::types::duration_to_us;
+use crate::recovery::RecoveryEncoder;
 use crate::{ArchiveSourceKind, CompressedBlock, CompressionAlgo, OxideError, Result};
 
 use super::headers::{FOOTER_FLAG_COMPRESSED_CHUNK_TABLE, FOOTER_FLAG_COMPRESSED_MANIFEST};
@@ -122,6 +123,7 @@ pub struct ArchiveWriter<W: Write> {
     password: Option<String>,
     encryption_salt: Option<[u8; crate::crypto::SALT_SIZE]>,
     crypto_key: Option<crate::crypto::EncryptionKey>,
+    recovery_encoder: Option<RecoveryEncoder>,
 }
 
 /// Seekable variant of [`ArchiveWriter`] that validates the writer position
@@ -171,6 +173,13 @@ impl<W: Write> ArchiveWriter<W> {
             password: None,
             encryption_salt: None,
             crypto_key: None,
+            recovery_encoder: None,
+        }
+    }
+
+    pub fn enable_recovery(&mut self, percentage: u8) {
+        if percentage > 0 {
+            self.recovery_encoder = Some(RecoveryEncoder::new(percentage));
         }
     }
 
@@ -315,7 +324,18 @@ impl<W: Write> ArchiveWriter<W> {
             .write_all(metadata.entry_table_bytes.as_slice())?;
         self.writer
             .write_all(metadata.chunk_table_bytes.as_slice())?;
-        footer.write(&mut self.writer)?;
+
+        if let Some(encoder) = self.recovery_encoder.take() {
+            let (meta, parity_bytes) = encoder.finish();
+            
+            self.writer.write_all(&parity_bytes)?;
+
+            self.writer.write_all(&[meta.percentage])?;
+            self.writer.write_all(&meta.data_block_count.to_le_bytes())?;
+            self.writer.write_all(&meta.parity_block_count.to_le_bytes())?;
+            self.writer.write_all(&meta.parity_bytes_len.to_le_bytes())?;
+        }
+        footer.write(&mut self.writer)?; 
 
         record_finalize_telemetry(chunk_table_started.elapsed(), finalize_started.elapsed());
         Ok(self.writer)
@@ -353,6 +373,9 @@ impl<W: Write> ArchiveWriter<W> {
         let descriptor = ChunkDescriptor::from_block(&block, self.next_payload_offset)?;
         self.next_payload_offset = descriptor.payload_end()?;
         self.writer.write_all(block.data.as_slice())?;
+        if let Some(encoder) = &mut self.recovery_encoder {
+            encoder.push_data(block.data.as_slice());
+        }
         self.pending_descriptors.push(descriptor);
         self.blocks_written += 1;
 
@@ -373,6 +396,10 @@ impl<W: Write + Seek> SeekableArchiveWriter<W> {
             DEFAULT_DEDUP_WINDOW_BLOCKS,
             manifest,
         )
+    }
+
+    pub fn enable_recovery(&mut self, percentage: u8) {
+        self.0.enable_recovery(percentage);
     }
 
     pub fn with_password(mut self, password: Option<String>) -> Self {

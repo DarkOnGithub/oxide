@@ -49,6 +49,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         writer_queue_blocks,
         result_wait_ms,
         telemetry_details,
+        recovery,
     } = args;
     let mut archive_password: Option<String> = None;
 
@@ -112,6 +113,7 @@ pub fn archive(args: ArchiveArgs) -> AppResult {
         producer_threads,
         Arc::clone(&buffer_pool),
         archive_password,
+        recovery,
     )?;
     let output_file = File::create(&output_path)?;
     let telemetry_options = RunTelemetryOptions {
@@ -426,6 +428,7 @@ fn build_archive_pipeline(
     producer_threads: usize,
     buffer_pool: Arc<BufferPool>,
     password: Option<String>,
+    recovery: Option<u8>,
 ) -> AppResult<ArchivePipeline> {
     let performance = pipeline_performance_from_resolved_settings(settings, producer_threads);
 
@@ -436,6 +439,7 @@ fn build_archive_pipeline(
         settings.compression,
     );
     config.password = password;
+    config.recovery_percentage = recovery;
     config.chunking_policy = settings.chunking_policy;
     config.imported_dictionary_bank = settings
         .dictionary_from
@@ -541,4 +545,16 @@ fn get_secure_password(prompt: &str, require_confirmation: bool) -> AppResult<St
 
     let password = dialog.interact()?;
     Ok(password)
+}
+
+
+/// Pour toi William les 2 fcts :
+pub fn protect(_args: crate::cli::ProtectArgs) -> AppResult {
+    println!("🚧 Protect command is under construction by Developer B!");
+    Ok(())
+}
+
+pub fn repair(_args: crate::cli::RepairArgs) -> AppResult {
+    println!("🚧 Repair command is under construction by Developer B!");
+    Ok(())
 }
