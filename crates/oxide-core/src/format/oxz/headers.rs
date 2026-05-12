@@ -599,9 +599,11 @@ pub struct RecoveryMetadata {
     pub parity_block_count: u32,
     /// The exact size (in bytes) of the mathematical data appended before this structure
     pub parity_bytes_len: u64,
+    /// The size of the largest block (required for Reed-Solomon padding alignment)
+    pub max_block_len: u32,
 }
 
 impl RecoveryMetadata {
-    /// The fixed size that this structure will take on disk (1 + 4 + 4 + 8)
-    pub const SIZE_ON_DISK: usize = 17;
+    /// The fixed size that this structure will take on disk (1 + 4 + 4 + 8 + 4)
+    pub const SIZE_ON_DISK: usize = 21;
 }
