@@ -176,8 +176,9 @@ impl<R: Read + Seek> ArchiveReader<R> {
 
         let mut recovery_metadata = None;
         if global_header.flags & super::headers::HEADER_FLAG_RECOVERY != 0 {
-            reader.seek(SeekFrom::Start(global_header.footer_offset.saturating_sub(17)))?;
-            let mut rec_buf = [0u8; 17];
+            // Seek back 21 bytes from the footer position to read the new contract
+            reader.seek(SeekFrom::Start(global_header.footer_offset.saturating_sub(21)))?;
+            let mut rec_buf = [0u8; 21];
             reader.read_exact(&mut rec_buf)?;
             
             let meta = crate::format::oxz::headers::RecoveryMetadata {
@@ -185,8 +186,10 @@ impl<R: Read + Seek> ArchiveReader<R> {
                 data_block_count: u32::from_le_bytes(rec_buf[1..5].try_into().unwrap()),
                 parity_block_count: u32::from_le_bytes(rec_buf[5..9].try_into().unwrap()),
                 parity_bytes_len: u64::from_le_bytes(rec_buf[9..17].try_into().unwrap()),
+                max_block_len: u32::from_le_bytes(rec_buf[17..21].try_into().unwrap()),
             };
 
+            // Validate that the recovery data doesn't overlap or leave gaps
             let chunk_table_end = global_header
                 .chunk_table_offset
                 .checked_add(global_header.chunk_table_len as u64)
