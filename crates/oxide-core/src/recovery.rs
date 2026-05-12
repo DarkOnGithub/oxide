@@ -178,12 +178,14 @@ pub fn repair_corrupted_archive(
 ) -> Result<()> {
     let mut in_file = File::open(input_path)?;
     
-    std::fs::copy(input_path, output_path)?;
-    let mut out_file = std::fs::OpenOptions::new().read(true).write(true).open(output_path)?;
-
+    // 1. Read metadata FIRST before doing any heavy disk I/O copies
     let reader = ArchiveReader::new(in_file.try_clone()?)?;
     let meta = reader.recovery_metadata().ok_or(crate::OxideError::RecoveryDataInvalid)?.clone();
     
+    // 2. Metadata is valid, NOW we can safely clone the file to patch it
+    std::fs::copy(input_path, output_path)?;
+    let mut out_file = std::fs::OpenOptions::new().read(true).write(true).open(output_path)?;
+
     let data_count = meta.data_block_count as usize;
     let parity_count = meta.parity_block_count as usize;
     
@@ -210,10 +212,17 @@ pub fn repair_corrupted_archive(
         
         match in_file.read_exact(&mut block_data) {
             Ok(_) => {
-                max_len = max_len.max(block_data.len());
-                shards[i as usize] = Some(block_data);
+                // Verify the cryptographic checksum of the block to detect bit rot or overwrites
+                if crate::checksum::verify_checksum(&block_data, desc.checksum) {
+                    max_len = max_len.max(block_data.len());
+                    shards[i as usize] = Some(block_data);
+                } else {
+                    // Checksum mismatch: the block is physically there, but its contents are corrupted
+                    missing_count += 1;
+                }
             }
             Err(_) => {
+                // Failed to read (EOF or physical disk error)
                 missing_count += 1;
             }
         }
