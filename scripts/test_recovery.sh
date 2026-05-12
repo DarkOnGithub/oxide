@@ -11,6 +11,9 @@ TEST_DIR="recovery_test_workspace"
 mkdir -p "$TEST_DIR"
 cd "$TEST_DIR"
 
+# Point Cargo to the specific CLI package using the workspace manifest
+CARGO_CMD="cargo run --manifest-path ../Cargo.toml -p oxide-cli -q --"
+
 # 2. Create dummy data (1MB of random bytes)
 echo "[1/7] Generating 1MB of random test data..."
 dd if=/dev/urandom of=test_data.bin bs=1M count=1 2>/dev/null
@@ -18,11 +21,11 @@ ORIGINAL_MD5=$(md5sum test_data.bin | awk '{print $1}')
 
 # 3. Archive the data
 echo "[2/7] Archiving data (oxide archive)..."
-cargo run -q --manifest-path ../Cargo.toml -- archive test_data.bin -o archive.oxz
+$CARGO_CMD archive test_data.bin -o archive.oxz
 
 # 4. Protect the archive
 echo "[3/7] Protecting archive with 10% recovery (oxide protect)..."
-cargo run -q --manifest-path ../Cargo.toml -- protect archive.oxz --recovery 10
+$CARGO_CMD protect archive.oxz --recovery 10
 
 # 5. Corrupt the archive intentionally
 echo "[4/7] Corrupting archive (simulating bit rot/bad sectors)..."
@@ -34,7 +37,7 @@ dd if=/dev/zero of=archive_corrupted.oxz bs=1K count=50 seek=100 conv=notrunc 2>
 echo "[5/7] Attempting to extract corrupted archive..."
 # Disable exit-on-error temporarily because this MUST fail
 set +e
-cargo run -q --manifest-path ../Cargo.toml -- extract archive_corrupted.oxz -o extracted_corrupted.bin
+$CARGO_CMD extract archive_corrupted.oxz -o extracted_corrupted.bin
 EXTRACT_STATUS=$?
 set -e
 
@@ -46,11 +49,11 @@ fi
 
 # 7. Repair the archive
 echo "[6/7] Repairing archive (oxide repair)..."
-cargo run -q --manifest-path ../Cargo.toml -- repair archive_corrupted.oxz -o archive_repaired.oxz
+$CARGO_CMD repair archive_corrupted.oxz -o archive_repaired.oxz
 
 # 8. Extract the repaired archive
 echo "[7/7] Extracting the repaired archive (oxide extract)..."
-cargo run -q --manifest-path ../Cargo.toml -- extract archive_repaired.oxz -o test_data_repaired.bin
+$CARGO_CMD extract archive_repaired.oxz -o test_data_repaired.bin
 
 # 9. Verify integrity
 echo "======================================"
