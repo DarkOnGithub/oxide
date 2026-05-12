@@ -180,12 +180,29 @@ impl<R: Read + Seek> ArchiveReader<R> {
             let mut rec_buf = [0u8; 17];
             reader.read_exact(&mut rec_buf)?;
             
-            recovery_metadata = Some(crate::format::oxz::headers::RecoveryMetadata {
+            let meta = crate::format::oxz::headers::RecoveryMetadata {
                 percentage: rec_buf[0],
                 data_block_count: u32::from_le_bytes(rec_buf[1..5].try_into().unwrap()),
                 parity_block_count: u32::from_le_bytes(rec_buf[5..9].try_into().unwrap()),
                 parity_bytes_len: u64::from_le_bytes(rec_buf[9..17].try_into().unwrap()),
-            });
+            };
+
+            let chunk_table_end = global_header
+                .chunk_table_offset
+                .checked_add(global_header.chunk_table_len as u64)
+                .ok_or(OxideError::InvalidFormat("chunk table range overflow"))?;
+
+            let expected_recovery_start = global_header
+                .footer_offset
+                .checked_sub(crate::format::oxz::headers::RecoveryMetadata::SIZE_ON_DISK as u64)
+                .and_then(|pos| pos.checked_sub(meta.parity_bytes_len))
+                .ok_or(OxideError::RecoveryDataInvalid)?;
+
+            if expected_recovery_start != chunk_table_end {
+                return Err(OxideError::RecoveryDataInvalid);
+            }
+
+            recovery_metadata = Some(meta);
         }
 
         Self::validate_chunk_layout(

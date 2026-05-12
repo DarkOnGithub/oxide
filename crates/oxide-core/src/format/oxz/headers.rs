@@ -167,7 +167,21 @@ impl GlobalHeader {
             .chunk_table_offset
             .checked_add(self.chunk_table_len as u64)
             .ok_or(OxideError::InvalidFormat("chunk table range overflow"))?;
-        if chunk_table_end != self.footer_offset {
+            
+        if self.flags & HEADER_FLAG_RECOVERY != 0 {
+            let min_recovery_len = RecoveryMetadata::SIZE_ON_DISK as u64;
+
+            let max_chunk_table_end = self
+                .footer_offset
+                .checked_sub(min_recovery_len)
+                .ok_or(OxideError::InvalidFormat("recovery metadata overlaps footer"))?;
+
+            if chunk_table_end > max_chunk_table_end {
+                return Err(OxideError::InvalidFormat(
+                    "chunk table overlaps recovery data",
+                ));
+            }
+        } else if chunk_table_end != self.footer_offset {
             return Err(OxideError::InvalidFormat("chunk table must end at footer"));
         }
 
