@@ -11,7 +11,9 @@ use crate::types::duration_to_us;
 use crate::recovery::RecoveryEncoder;
 use crate::{ArchiveSourceKind, CompressedBlock, CompressionAlgo, OxideError, Result};
 
-use super::headers::{FOOTER_FLAG_COMPRESSED_CHUNK_TABLE, FOOTER_FLAG_COMPRESSED_MANIFEST};
+use super::headers::{
+    FOOTER_FLAG_COMPRESSED_CHUNK_TABLE, FOOTER_FLAG_COMPRESSED_MANIFEST, HEADER_FLAG_RECOVERY,
+};
 use super::{
     ArchiveManifest, ChunkDescriptor, DEFAULT_REORDER_PENDING_LIMIT, Footer, GLOBAL_HEADER_SIZE,
     GlobalHeader, ReorderBuffer, encode_chunk_table,
@@ -225,7 +227,12 @@ impl<W: Write> ArchiveWriter<W> {
             None
         };
 
-        let header = GlobalHeader::new(source_kind, block_count, 0, 0, 0, 0, 0, salt_opt);
+        let mut header = GlobalHeader::new(source_kind, block_count, 0, 0, 0, 0, 0, salt_opt);
+
+        if self.recovery_encoder.is_some() {
+            header.flags |= HEADER_FLAG_RECOVERY;
+        }
+        
         let started = Instant::now();
         header.write(&mut self.writer)?;
         profile::event(
@@ -326,7 +333,7 @@ impl<W: Write> ArchiveWriter<W> {
             .write_all(metadata.chunk_table_bytes.as_slice())?;
 
         if let Some(encoder) = self.recovery_encoder.take() {
-            let (meta, parity_bytes) = encoder.finish();
+            let (meta, parity_bytes) = encoder.finish()?;
             
             self.writer.write_all(&parity_bytes)?;
 
