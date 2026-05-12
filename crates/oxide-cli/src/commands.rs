@@ -548,13 +548,59 @@ fn get_secure_password(prompt: &str, require_confirmation: bool) -> AppResult<St
 }
 
 
-/// Pour toi William les 2 fcts :
-pub fn protect(_args: crate::cli::ProtectArgs) -> AppResult {
-    println!("🚧 Protect command is under construction by Developer B!");
+pub fn protect(args: crate::cli::ProtectArgs) -> AppResult {
+    let crate::cli::ProtectArgs { input, output, recovery } = args;
+
+    let output_path = output.clone().unwrap_or_else(|| {
+        let mut path = input.clone();
+        path.set_extension("oxz.tmp");
+        path
+    });
+
+    println!("🛡️ Starting protection ({}%) for: {}", recovery, input.display());
+
+    if let Err(e) = oxide_core::recovery::protect_existing_archive(&input, &output_path, recovery) {
+        if output.is_none() && output_path.exists() {
+            let _ = std::fs::remove_file(&output_path);
+        }
+        return Err(e.into());
+    }
+
+    if output.is_none() {
+        std::fs::rename(&output_path, &input)?;
+        println!("✅ Successfully protected and secured: {}", input.display());
+    } else {
+        println!("✅ Successfully protected to: {}", output_path.display());
+    }
+
     Ok(())
 }
 
-pub fn repair(_args: crate::cli::RepairArgs) -> AppResult {
-    println!("🚧 Repair command is under construction by Developer B!");
+pub fn repair(args: crate::cli::RepairArgs) -> AppResult {
+    let crate::cli::RepairArgs { input, output } = args;
+
+    let output_path = output.clone().unwrap_or_else(|| {
+        let mut path = input.clone();
+        path.set_extension("repaired.oxz");
+        path
+    });
+
+    println!("🛠️ Starting repair for: {}", input.display());
+
+    // On lance la résurrection !
+    if let Err(e) = oxide_core::recovery::repair_corrupted_archive(&input, &output_path) {
+        if output.is_none() && output_path.exists() {
+            let _ = std::fs::remove_file(&output_path);
+        }
+        return Err(e.into());
+    }
+
+    if output.is_none() {
+        std::fs::rename(&output_path, &input)?;
+        println!("✅ Successfully repaired: {}", input.display());
+    } else {
+        println!("✅ Successfully repaired to: {}", output_path.display());
+    }
+
     Ok(())
 }
