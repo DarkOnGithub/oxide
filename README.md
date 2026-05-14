@@ -4,22 +4,25 @@
 
 # Oxide
 
-Oxide is a Rust archiver built around a custom `.oxz` container, a parallel archive pipeline, and a CLI focused on fast day-to-day archive workflows. The workspace includes the core engine, the `oxide` command-line tool, a documentation site, benchmark suites, and dataset helpers used to exercise the pipeline.
+Oxide is a Rust archiver built around the custom `.oxz` container, a parallel block pipeline, and a CLI for fast archive, extraction, encryption, and recovery workflows. The workspace includes the core engine, the `oxide` command-line tool, a GUI crate, documentation, benchmark material, and dataset helpers.
 
 ## Highlights
 
-- Archives a single file or an entire directory tree into `.oxz`
+- Archives a single file or a complete directory tree into `.oxz`
 - Extracts full archives or selected paths from directory archives
 - Prints archive contents as a tree without unpacking them
-- Uses fixed-size parallel block processing with `lz4` or `zstd`
-- Falls back to raw storage for many already-compressed formats
-- Emits live progress, summaries, and optional detailed telemetry tables
+- Supports `lz4`, `zstd`, and `lzma` compression
+- Provides `fast`, `balanced`, and `ultra` presets for throughput, mixed workloads, and stronger compression
+- Supports optional password encryption through `--encrypt`, plus standalone `encrypt` and `decrypt` commands
+- Supports Reed-Solomon recovery data through `--recovery`, `protect`, and `repair`
+- Uses raw storage for many already-compressed or incompressible blocks to avoid wasting CPU and growing archives
+- Emits live progress, final summaries, and optional detailed telemetry tables
 
 ## Workspace
 
-- `crates/oxide-core` - archive format, pipeline, compression, telemetry, tests, and benches
+- `crates/oxide-core` - archive format, compression, pipeline, extraction, telemetry, recovery, tests, and benches
 - `crates/oxide-cli` - the `oxide` binary, CLI parsing, preset resolution, progress UI, reports, and tree rendering
-- `crates/oxide-gui` - placeholder GUI crate
+- `crates/oxide-gui` - GUI application crate
 - `docs/` - VitePress documentation site
 - `datasets/` - sample corpora used for experiments and benchmarking
 - `scripts/` - helper scripts for dataset preparation
@@ -41,51 +44,20 @@ To install it into your Cargo bin directory:
 cargo install --path crates/oxide-cli
 ```
 
-## Benchmarks And Test Coverage
-
-The workspace includes:
-
-- integration tests for archive, extraction, telemetry, scheduling, and archive format behavior in `crates/oxide-core/tests`
-- Criterion benchmarks in `crates/oxide-core/benches` for memory management, scanner performance, and work scheduling
-
-### Performance Snapshots
-
-The tables below summarize representative archive runs for the three preset modes.
-
-#### Silesia Corpus
-
-| Tool | Mode | Avg sec | Avg MiB/s | Avg output | Ratio |
-| --- | --- | ---: | ---: | ---: | ---: |
-| gensquashfs | fast | 0.280 | 772.10 | 110.37 MiB | 0.511 |
-| mksquashfs | fast | 0.183 | 1183.04 | 110.37 MiB | 0.511 |
-| **oxide** | **fast** | **0.182** | **1187.78** | **111.11 MiB** | **0.514** |
-| gensquashfs | balanced | 0.484 | 446.30 | 74.10 MiB | 0.343 |
-| **mksquashfs** | **balanced** | **0.461** | **469.72** | **74.11 MiB** | **0.343** |
-| oxide | balanced | 0.466 | 465.81 | 74.20 MiB | 0.343 |
-| gensquashfs | ultra | 7.181 | 30.10 | 68.36 MiB | 0.316 |
-| mksquashfs | ultra | 7.056 | 30.64 | 68.36 MiB | 0.316 |
-| **oxide** | **ultra** | **6.758** | **31.99** | **68.49 MiB** | **0.317** |
-
-#### Mixed Data Set, Approximately 5 GiB
-
-| Tool | Mode | Avg sec | Avg MiB/s | Avg output | Ratio |
-| --- | --- | ---: | ---: | ---: | ---: |
-| gensquashfs | fast | 6.645 | 783.93 | 4.72 GiB | 0.929 |
-| mksquashfs | fast | 4.649 | 1120.49 | 4.72 GiB | 0.928 |
-| **oxide** | **fast** | **3.817** | **1364.99** | **4.72 GiB** | **0.928** |
-| gensquashfs | balanced | 8.810 | 591.30 | 4.47 GiB | 0.878 |
-| mksquashfs | balanced | 7.224 | 721.09 | 4.47 GiB | 0.878 |
-| **oxide** | **balanced** | **7.128** | **731.03** | **4.47 GiB** | **0.878** |
-| gensquashfs | ultra | 94.174 | 55.34 | 4.38 GiB | 0.862 |
-| mksquashfs | ultra | 94.826 | 54.97 | 4.38 GiB | 0.862 |
-| **oxide** | **ultra** | **91.021** | **57.24** | **4.39 GiB** | **0.862** |
-
 ## Quick Start
 
 Create an archive. If `--output` is omitted, Oxide writes to `<input>.oxz`.
 
 ```bash
 oxide archive path/to/input
+```
+
+Create an archive with a preset:
+
+```bash
+oxide archive --preset fast path/to/input
+oxide archive --preset balanced path/to/input
+oxide archive --preset ultra path/to/input
 ```
 
 Extract an archive. If `--output` is omitted, Oxide strips `.oxz` from the input name when possible.
@@ -98,6 +70,18 @@ Inspect an archive without extracting it:
 
 ```bash
 oxide tree path/to/archive.oxz
+```
+
+Encrypt an archive at creation time:
+
+```bash
+oxide archive --encrypt path/to/input
+```
+
+Add recovery data while archiving:
+
+```bash
+oxide archive --recovery 5 path/to/input
 ```
 
 Show help:
@@ -120,14 +104,21 @@ Useful options:
 
 - `-o, --output <PATH>` - destination archive path
 - `--preset <NAME>` - archive profile from the preset file
-- `--compression <lz4|zstd>` - override the compression algorithm
-- `--zstd-level <1-22>` - explicit zstd level
+- `--preset-file <PATH>` - custom preset config file
+- `--compression <lz4|lzma|zstd>` - override the compression algorithm
+- `--compression-level <N>` - explicit codec-specific compression level
 - `--skip-compression` - store payloads without compression
-- `--workers <N>` - compression worker count
+- `--encrypt` - encrypt the created archive; `OXIDE_PASSWORD` can provide the password non-interactively
+- `--recovery <1-20>` - add Reed-Solomon recovery data during archive creation
+- `--dictionary-from <PATH>` - reuse an archive dictionary bank from an existing `.oxz`
+- `--chunking <fixed|cdc>` - choose fixed-size chunking or content-defined chunking
 - `--block-size <SIZE>` - target block size such as `64K`, `1M`, or `4M`
+- `--min-block-size <SIZE>` - minimum block size for CDC chunking
+- `--max-block-size <SIZE>` - maximum block size for CDC chunking
+- `--workers <N>` - compression worker count; `0` means automatic
 - `--telemetry-details` - print extended telemetry tables
 
-Oxide also exposes lower-level throughput and buffering controls such as `--inflight-bytes`, `--pool-capacity`, `--stream-read-buffer`, `--producer-threads`, and `--writer-queue-blocks` for tuning large archive runs.
+Lower-level throughput and buffering controls are also available: `--inflight-bytes`, `--inflight-blocks-per-worker`, `--pool-capacity`, `--pool-buffers`, `--stream-read-buffer`, `--producer-threads`, `--directory-mmap-threshold`, `--writer-queue-blocks`, `--result-wait-ms`, and `--stats-interval-ms`.
 
 ### `extract`
 
@@ -140,9 +131,12 @@ oxide extract [OPTIONS] <INPUT>
 Useful options:
 
 - `-o, --output <PATH>` - destination path
-- `--only <PATH>` - extract a specific archive-relative path
-- `--only-regex <REGEX>` - extract paths that match a regex
-- `--workers <N>` - decode worker count
+- `--only <PATH>` - extract a specific archive-relative path; repeatable
+- `--only-regex <REGEX>` - extract paths that match a regex; repeatable
+- `--preset <NAME>` - decode tuning preset from the preset file
+- `--preset-file <PATH>` - custom preset config file
+- `--workers <N>` - decode worker count; `0` means automatic
+- `--extract-write-shards <N>` - directory extraction write shards; `0` means adaptive auto, `1` disables sharding
 - `--stats-interval-ms <MS>` - progress update interval
 - `--telemetry-details` - print extended telemetry tables
 
@@ -154,62 +148,154 @@ Prints a tree view of archive contents with sizes.
 oxide tree <INPUT>
 ```
 
+### `encrypt`
+
+Encrypts an existing `.oxz` archive. Without `--output`, Oxide safely rewrites the input archive through a temporary file.
+
+```bash
+oxide encrypt [OPTIONS] <INPUT>
+```
+
+Useful options:
+
+- `-o, --output <PATH>` - write the encrypted archive to a separate path
+
+### `decrypt`
+
+Decrypts an encrypted `.oxz` archive. Without `--output`, Oxide safely rewrites the input archive through a temporary file.
+
+```bash
+oxide decrypt [OPTIONS] <INPUT>
+```
+
+Useful options:
+
+- `-o, --output <PATH>` - write the decrypted archive to a separate path
+
+### `protect`
+
+Adds Reed-Solomon recovery data to an existing archive.
+
+```bash
+oxide protect [OPTIONS] <INPUT>
+```
+
+Useful options:
+
+- `-o, --output <PATH>` - write the protected archive to a separate path
+- `--recovery <1-20>` - recovery data percentage; defaults to `5`
+
+### `repair`
+
+Repairs a corrupted archive using embedded recovery data.
+
+```bash
+oxide repair [OPTIONS] <INPUT>
+```
+
+Useful options:
+
+- `-o, --output <PATH>` - destination path for the repaired archive
+
 ## Presets
 
 Archive settings are loaded from [`crates/oxide-cli/presets.json`](/home/user/Rust/oxide/crates/oxide-cli/presets.json). The default preset is `balanced`.
 
-| Preset | Compression | Intended tradeoff |
-| --- | --- | --- |
-| `fast` | `lz4` | highest throughput, lighter CPU usage |
-| `balanced` | `zstd` level 6 | default profile for mixed data |
-| `ultra` | `zstd` level 19 | stronger compression, higher CPU cost |
+| Preset | Compression | Block size | Dictionary | Intended tradeoff |
+| --- | --- | ---: | --- | --- |
+| `fast` | `lz4` | `3M` | off | highest throughput and low codec cost |
+| `balanced` | `zstd` level 2 | `2M` | off | default profile for mixed data, with stronger ratio than `fast` |
+| `ultra` | `lzma` level 7 | `3M` | off | stronger compression with higher CPU cost |
 
-You can override any preset choice with CLI flags or provide a custom preset file with `--preset-file`.
+All presets keep fixed chunking by default. The CLI can still override the preset with `--compression`, `--compression-level`, `--block-size`, `--chunking`, `--workers`, or a custom `--preset-file`.
 
-## Pipeline Notes
+## Engine Improvements
 
-The core engine is organized around block-based parallel processing:
+The current `.oxz` format uses a compact header, sequential payload blocks, a manifest, a compact block table, and a footer that stores the final section offsets and block counts. This layout keeps archive writing sequential: Oxide can stream blocks first, then append the metadata needed to reopen and extract the archive.
 
-- files are chunked with fixed-size boundaries to keep scanning cheap and predictable
-- directory archival builds a manifest that records paths, kinds, sizes, modes, timestamps, and uid/gid metadata
-- many already-compressed formats such as `jpg`, `png`, `mp3`, `zip`, and `zst` are marked for raw storage instead of wasteful recompression
-- extraction supports full restore, filtered restore, and archive inspection through the manifest reader
+Block descriptors are compact because payload offsets are reconstructed from encoded block sizes instead of being stored for every block. The descriptor keeps the encoded size, original size, checksum or deduplication reference, and flags for compression, raw storage, and dictionary behavior.
 
-## Development
+Compression now uses three codec paths: `lz4` for `fast`, `zstd` for `balanced`, and `lzma` for `ultra`. The pipeline can skip compression for known already-compressed formats, store a block raw when compression would grow it, and use entropy checks to avoid expensive work on data that is likely incompressible.
 
-The repository CI currently builds and tests the workspace with Cargo.
+Archiving is organized as a bounded producer, worker, and ordered-writer pipeline. Directory input can use prefetching, memory mapping for larger files, reusable per-worker scratch buffers, backpressure between stages, and a stable output order even when blocks finish out of order.
 
-```bash
-cargo build
-cargo test
-cargo clippy --all-features
+Extraction uses parallel block decode, preallocated output buffers based on metadata, worker-local scratch space, filtered restoration, and optional write sharding for directory restores. This keeps decode and file output from being serialized behind a single slow block or destination file.
+
+## Benchmarks And Test Coverage
+
+The workspace includes integration tests for archive, extraction, telemetry, scheduling, archive format behavior, encryption, and recovery, plus Criterion benchmarks for memory management, scanner performance, and work scheduling.
+
+### Benchmark Context
+
+The benchmark data below was measured on a Ryzen 9 7950X with 32 logical threads. The mixed dataset is approximately 5.7 GB and combines Silesia, `enwik9`, Linux source code, DIV2K images, and NYC Taxi Parquet data. `Peak RSS` is the peak resident memory used by the process.
+
+The archive score combines throughput, compression ratio, and memory:
+
+```text
+S_archive = 100
+  * (MiB/s / max_MiB/s)^0.60
+  * (min_ratio / ratio)^0.30
+  * (log(1 + min_peakRSS) / log(1 + peakRSS))^0.10
 ```
 
-Run the CLI locally:
+The extraction score uses throughput and memory because output size is fixed:
 
-```bash
-cargo run -p oxide-cli -- --help
+```text
+S_extract = 100
+  * (MiB/s / max_MiB/s)^0.90
+  * (log(1 + min_peakRSS) / log(1 + peakRSS))^0.10
 ```
 
-## Documentation Site
+Higher scores indicate a better combined result.
 
-The documentation site lives in [`docs/`](/home/user/Rust/oxide/docs) and uses VitePress.
+### Archiving, `fast`
 
-```bash
-cd docs
-npm install
-npm run docs:dev
-```
+| Tool | Mode | Avg s | MiB/s | Ratio | Peak RSS | Score |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| **oxide** | **fast** | **4.000** | **1463.1** | 0.727 | 2.4 GB | **94.1** |
+| squashfs | fast | 4.930 | 1187.2 | 0.727 | 1.4 GB | 83.2 |
+| tar+zstd | fast | 5.173 | 1131.4 | **0.672** | **105.5 MB** | 83.9 |
 
-Good entry points:
+### Archiving, `balanced`
 
-- [`docs/index.md`](/home/user/Rust/oxide/docs/index.md)
-- [`docs/cli/index.md`](/home/user/Rust/oxide/docs/cli/index.md)
-- [`docs/cli/archive.md`](/home/user/Rust/oxide/docs/cli/archive.md)
-- [`docs/cli/extract.md`](/home/user/Rust/oxide/docs/cli/extract.md)
-- [`docs/cli/presets.md`](/home/user/Rust/oxide/docs/cli/presets.md)
-- [`docs/about/index.md`](/home/user/Rust/oxide/docs/about/index.md)
+| Tool | Mode | Avg s | MiB/s | Ratio | Peak RSS | Score |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| **oxide** | **balanced** | **4.485** | **1305.2** | 0.665 | 3.0 GB | **90.2** |
+| squashfs | balanced | 4.815 | 1215.5 | 0.666 | 1.4 GB | 86.7 |
+| tar+zstd | balanced | 5.238 | 1117.5 | **0.659** | **428.7 MB** | 83.2 |
 
-## Status
+### Archiving, `ultra`
 
-The core archive engine and CLI are the active parts of the project. The GUI crate currently contains only a placeholder binary.
+| Tool | Mode | Avg s | MiB/s | Ratio | Peak RSS | Score |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| **oxide** | **ultra** | **37.560** | **155.8** | 0.637 | 4.5 GB | **25.5** |
+| 7zip | ultra | 89.904 | 65.1 | 0.629 | **2.7 GB** | 15.2 |
+| dwarfs | ultra | 88.414 | 66.2 | 0.634 | 10.1 GB | 15.2 |
+| pixz | ultra | 198.498 | 29.5 | **0.626** | 29.5 GB | 9.4 |
+
+### Extraction, `fast`
+
+| Tool | Mode | Avg s | MiB/s | Peak RSS | Score |
+| --- | --- | ---: | ---: | ---: | ---: |
+| **oxide** | **fast** | **2.993** | **1955.6** | 2.6 GB | **94.2** |
+| squashfs | fast | 3.415 | 1714.1 | 589.1 MB | 84.2 |
+| tar+zstd | fast | 4.175 | 1402.1 | **11.6 MB** | 71.8 |
+
+### Extraction, `balanced`
+
+| Tool | Mode | Avg s | MiB/s | Peak RSS | Score |
+| --- | --- | ---: | ---: | ---: | ---: |
+| **oxide** | **balanced** | **2.891** | **2024.6** | 2.6 GB | **97.2** |
+| squashfs | balanced | 3.247 | 1803.0 | 591.2 MB | 88.2 |
+| tar+zstd | balanced | 4.216 | 1388.3 | **13.2 MB** | 71.2 |
+
+### Extraction, `ultra`
+
+| Tool | Mode | Avg s | MiB/s | Peak RSS | Score |
+| --- | --- | ---: | ---: | ---: | ---: |
+| **oxide** | **ultra** | **3.196** | **1831.4** | 2.0 GB | **88.9** |
+| 7zip | ultra | 10.723 | 545.9 | 2.2 GB | 29.9 |
+| dwarfs | ultra | 4.197 | 1394.7 | **2.0 GB** | 69.6 |
+| pixz | ultra | 7.346 | 796.8 | 9.8 GB | 41.7 |
+
+Oxide prioritizes throughput. In archiving, it sometimes accepts a slightly weaker ratio and higher memory use to reduce total processing time. In extraction, the same choice is clearer: Oxide keeps the best throughput across the three tested modes.
