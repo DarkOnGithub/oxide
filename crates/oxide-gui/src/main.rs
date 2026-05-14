@@ -295,7 +295,7 @@ impl eframe::App for AppCompresseur {
                                 if erreurs == 0 {
                                     Ok(format!("Archive saine !"))
                                 } else {
-                                    Err(format!("Archive corrompue : {} blocs illisibles sur {}.", erreurs, total))
+                                    Err(format!("Archive corrompue ! {} blocs illisibles sur {}.", erreurs, total))
                                 }
                             };
                             verifier_archive()
