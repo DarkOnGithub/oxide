@@ -91,7 +91,7 @@ impl Default for AppCompresseur {
             receveur_dialogue: None,
 
             fenetre_options_ouverte: false,
-            config_algo: CompressionAlgo::Zstd,
+            config_algo: CompressionAlgo::Zstd, // Preset "Balanced" par défaut
             config_block_size_kb: 2048,
             config_workers: thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
         }
@@ -101,7 +101,7 @@ impl Default for AppCompresseur {
 impl eframe::App for AppCompresseur {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 
-        // 1. Écoute de l'explorateur de fichiers asynchrone
+        // 1. Écoute de l'explorateur de fichiers
         if let Some(rx) = &self.receveur_dialogue {
             if let Ok(resultat) = rx.try_recv() {
                 self.dialogue_ouvert = false;
@@ -113,7 +113,7 @@ impl eframe::App for AppCompresseur {
             }
         }
 
-        // 2. Écoute de la progression de la tâche
+        // 2. Écoute de la progression
         if let Some(rx) = &self.receveur_msg {
             while let Ok(msg) = rx.try_recv() {
                 match msg {
@@ -127,24 +127,31 @@ impl eframe::App for AppCompresseur {
             }
         }
 
-        // --- FENÊTRE D'OPTIONS DE COMPRESSION ---
+        // --- FENÊTRE D'OPTIONS DE COMPRESSION (ÉPURÉE) ---
         if self.fenetre_options_ouverte {
-            egui::Window::new("Paramètres de Compression")
+            egui::Window::new("Profil de Compression")
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label("Réglages rapides (Presets) :");
-                    ui.horizontal_wrapped(|ui| {
+                    ui.label("Choisissez un niveau de performance :");
+                    ui.add_space(10.0);
+                    
+                    ui.horizontal(|ui| {
+                        // Preset FAST
                         if ui.button("🚀 Fast").clicked() {
                             self.config_algo = CompressionAlgo::Lz4;
                             self.config_block_size_kb = 3072;
                             self.config_workers = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
                         }
+                        
+                        // Preset BALANCED
                         if ui.button("⚖️ Balanced").clicked() {
                             self.config_algo = CompressionAlgo::Zstd;
                             self.config_block_size_kb = 2048;
                             self.config_workers = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
                         }
+                        
+                        // Preset ULTRA
                         if ui.button("💎 Ultra").clicked() {
                             self.config_algo = CompressionAlgo::Lzma;
                             self.config_block_size_kb = 3072;
@@ -152,37 +159,23 @@ impl eframe::App for AppCompresseur {
                         }
                     });
 
-                    ui.separator();
-                    ui.label("Ajustement manuel :");
-                    ui.add_space(5.0);
+                    // Optionnel : Afficher le preset actuellement sélectionné pour l'utilisateur
+                    ui.add_space(15.0);
+                    let nom_preset = match self.config_algo {
+                        CompressionAlgo::Lz4 => "Fast (Optimisé pour la vitesse)",
+                        CompressionAlgo::Zstd => "Balanced (Compromis idéal)",
+                        CompressionAlgo::Lzma => "Ultra (Taille minimale)",
+                    };
+                    ui.label(egui::RichText::new(format!("Actuel : {}", nom_preset)).italics());
 
-                    ui.label("Algorithme :");
-                    ui.horizontal_wrapped(|ui| {
-                        ui.selectable_value(&mut self.config_algo, CompressionAlgo::Lz4, "Lz4");
-                        ui.selectable_value(&mut self.config_algo, CompressionAlgo::Zstd, "Zstd");
-                        ui.selectable_value(&mut self.config_algo, CompressionAlgo::Lzma, "Lzma");
-                    });
-
-                    ui.add_space(10.0);
-                    ui.label(format!("Taille des blocs : {} KB", self.config_block_size_kb));
-                    ui.add(egui::Slider::new(&mut self.config_block_size_kb, 64..=8192).step_by(64.0));
-
-                    ui.add_space(10.0);
-                    
-                    // --- MODIFICATION ICI ---
-                    ui.label("Threads de travail :");
-                    // Détection dynamique du nombre maximal de threads de la machine
-                    let max_threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-                    ui.add(egui::Slider::new(&mut self.config_workers, 1..=max_threads));
-
-                    ui.add_space(20.0);
+                    ui.add_space(15.0);
                     if ui.button("✅ Valider et Fermer").clicked() {
                         self.fenetre_options_ouverte = false;
                     }
                 });
         }
 
-        // --- PANEL PRINCIPAL (NON-RESPONSIVE) ---
+        // --- PANEL PRINCIPAL ---
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Oxide Toolkit");
             ui.separator();
@@ -240,7 +233,7 @@ impl eframe::App for AppCompresseur {
 
             ui.add_space(10.0);
 
-            // --- GESTION DU MOT DE PASSE AVEC CONFIRMATION ---
+            // --- GESTION DU MOT DE PASSE AVEC CONFIRMATION ET OPTIONNEL ---
             if self.mode_actuel == Mode::Chiffrer {
                 ui.horizontal(|ui| {
                     ui.label("Mot de passe :");
@@ -251,13 +244,16 @@ impl eframe::App for AppCompresseur {
                     ui.add(egui::TextEdit::singleline(&mut self.confirmation_mot_de_passe).password(true));
                 });
                 
-                // Alerte visuelle si déséquilibre
                 if !self.confirmation_mot_de_passe.is_empty() && self.mot_de_passe != self.confirmation_mot_de_passe {
                     ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "⚠ Les mots de passe ne correspondent pas");
                 }
             } else if self.mode_actuel == Mode::Dechiffrer || self.mode_actuel == Mode::Extraire || self.mode_actuel == Mode::Verifier {
                 ui.horizontal(|ui| {
-                    ui.label("Mot de passe :");
+                    if self.mode_actuel == Mode::Dechiffrer {
+                        ui.label("Mot de passe :");
+                    } else {
+                        ui.label("Mot de passe (optionnel) :");
+                    }
                     ui.add(egui::TextEdit::singleline(&mut self.mot_de_passe).password(true));
                 });
             }
@@ -272,10 +268,10 @@ impl eframe::App for AppCompresseur {
 
             ui.add_space(15.0);
 
-            // Validation pour s'assurer qu'on ne peut pas cliquer si les mots de passe sont mauvais
             let mdp_valide = match self.mode_actuel {
                 Mode::Chiffrer => !self.mot_de_passe.is_empty() && self.mot_de_passe == self.confirmation_mot_de_passe,
-                Mode::Dechiffrer | Mode::Extraire | Mode::Verifier => !self.mot_de_passe.is_empty(),
+                Mode::Dechiffrer => !self.mot_de_passe.is_empty(), 
+                Mode::Extraire | Mode::Verifier => true, 
                 _ => true,
             };
 
