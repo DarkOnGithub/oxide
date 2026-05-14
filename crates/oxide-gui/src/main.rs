@@ -18,6 +18,7 @@ enum Mode {
     Chiffrer,
     Dechiffrer,
     Proteger, 
+    Verifier, // <-- NOUVEAU MODE
     Reparer,  
 }
 
@@ -67,7 +68,7 @@ pub struct AppCompresseur {
     message_fin: Option<Result<String, String>>,
     receveur_msg: Option<Receiver<AppMsg>>,
     mot_de_passe: String,
-    pourcentage_protection: u8, // <-- Nouvelle variable pour le curseur
+    pourcentage_protection: u8,
 }
 
 impl Default for AppCompresseur {
@@ -80,7 +81,7 @@ impl Default for AppCompresseur {
             message_fin: None,
             receveur_msg: None,
             mot_de_passe: String::new(),
-            pourcentage_protection: 5, // Valeur par défaut (5%) comme dans la CLI
+            pourcentage_protection: 5,
         }
     }
 }
@@ -106,16 +107,19 @@ impl eframe::App for AppCompresseur {
             ui.heading("Oxide Toolkit");
             ui.separator();
 
+            // SÉLECTEUR DE MODES
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.mode_actuel, Mode::Compresser, "📦 Compresser");
                 ui.selectable_value(&mut self.mode_actuel, Mode::Extraire, "📂 Extraire");
                 ui.selectable_value(&mut self.mode_actuel, Mode::Chiffrer, "🔒 Chiffrer");
                 ui.selectable_value(&mut self.mode_actuel, Mode::Dechiffrer, "🔓 Déchiffrer");
                 ui.selectable_value(&mut self.mode_actuel, Mode::Proteger, "🛡️ Protéger");
+                ui.selectable_value(&mut self.mode_actuel, Mode::Verifier, "🔍 Vérifier");
                 ui.selectable_value(&mut self.mode_actuel, Mode::Reparer, "🛠️ Réparer");
             });
             ui.separator();
 
+            // SÉLECTION DE FICHIER
             ui.horizontal(|ui| {
                 if ui.button("📄 Choisir un fichier").clicked() && !self.en_cours {
                     if let Some(chemin) = rfd::FileDialog::new().pick_file() {
@@ -144,21 +148,19 @@ impl eframe::App for AppCompresseur {
 
             ui.add_space(10.0);
 
-            // --- OPTIONS SPÉCIFIQUES ---
-            if self.mode_actuel == Mode::Chiffrer || self.mode_actuel == Mode::Dechiffrer || self.mode_actuel == Mode::Extraire {
+            // OPTIONS SPÉCIFIQUES
+            if self.mode_actuel == Mode::Chiffrer || self.mode_actuel == Mode::Dechiffrer || self.mode_actuel == Mode::Extraire || self.mode_actuel == Mode::Verifier {
                 ui.horizontal(|ui| {
                     ui.label("Mot de passe :");
                     ui.add(egui::TextEdit::singleline(&mut self.mot_de_passe).password(true));
                 });
             }
 
-            // AJOUT DU CURSEUR POUR LA PROTECTION
             if self.mode_actuel == Mode::Proteger {
                 ui.group(|ui| {
                     ui.label("Niveau de redondance (Reed-Solomon) :");
-                    // Le range est de 1 à 20% conformément aux spécifications d'Oxide
                     ui.add(egui::Slider::new(&mut self.pourcentage_protection, 1..=20).suffix("%"));
-                    ui.label(egui::RichText::new("Plus le % est élevé, mieux l'archive résistera à la corruption, mais plus le fichier sera lourd.").small());
+                    ui.label(egui::RichText::new("Plus le % est élevé, mieux l'archive résistera à la corruption.").small());
                 });
             }
 
@@ -170,6 +172,7 @@ impl eframe::App for AppCompresseur {
                 Mode::Chiffrer => "🔒 Verrouiller l'archive",
                 Mode::Dechiffrer => "🔓 Déverrouiller l'archive",
                 Mode::Proteger => "🛡️ Appliquer la protection",
+                Mode::Verifier => "🔍 Vérifier l'intégrité",
                 Mode::Reparer => "🛠️ Tenter une réparation",
             };
 
@@ -178,6 +181,7 @@ impl eframe::App for AppCompresseur {
                 egui::Button::new(texte_bouton)
             );
 
+            // LOGIQUE D'EXÉCUTION
             if btn_action.clicked() {
                 self.en_cours = true;
                 self.progression = 0.0;
@@ -190,7 +194,7 @@ impl eframe::App for AppCompresseur {
                 let chemin_source = self.fichier_selectionne.clone().unwrap();
                 let mode = self.mode_actuel;
                 let mdp = self.mot_de_passe.clone();
-                let recovery_pct = self.pourcentage_protection; // On capture la valeur choisie
+                let recovery_pct = self.pourcentage_protection;
 
                 thread::spawn(move || {
                     let mut sink = EguiTelemetrySink { tx: tx.clone(), ctx: ctx_clone.clone() };
@@ -250,7 +254,6 @@ impl eframe::App for AppCompresseur {
                         Mode::Proteger => {
                             let mut chemin_dest = chemin_source.clone();
                             chemin_dest.set_extension("protected.oxz");
-                            // UTILISATION DE LA VALEUR DU SLIDER ICI
                             match oxide_core::recovery::protect_existing_archive(&chemin_source, &chemin_dest, recovery_pct) {
                                 Ok(_) => Ok(format!("Données de récupération ajoutées ({}%).", recovery_pct)),
                                 Err(_) => Err("Échec de la protection.".to_string()),
@@ -261,8 +264,41 @@ impl eframe::App for AppCompresseur {
                             chemin_dest.set_extension("repaired.oxz");
                             match oxide_core::recovery::repair_corrupted_archive(&chemin_source, &chemin_dest) {
                                 Ok(_) => Ok("Archive réparée avec succès !".to_string()),
-                                Err(_) => Err("Impossible de réparer l'archive.".to_string()),
+                                Err(_) => Err("Impossible de réparer l'archive (Données RS absentes ou corruption trop grave).".to_string()),
                             }
+                        },
+                        Mode::Verifier => {
+                            // On utilise une closure interne pour pouvoir utiliser '?' et 'return' proprement
+                            let mut verifier_archive = || -> Result<String, String> {
+                                let fichier = File::open(&chemin_source)
+                                    .map_err(|_| "Impossible d'ouvrir le fichier.".to_string())?;
+
+                                let mut reader = oxide_core::format::ArchiveReader::new(fichier)
+                                    .map_err(|_| "Ce fichier n'est pas une archive valide ou l'en-tête est détruit.".to_string())?;
+
+                                if !mdp.is_empty() {
+                                    reader = reader.with_password(Some(mdp.clone()))
+                                        .map_err(|_| "Mot de passe incorrect ou erreur de déchiffrement.".to_string())?;
+                                }
+
+                                let total = reader.block_count();
+                                let mut erreurs = 0;
+
+                                for i in 0..total {
+                                    if reader.read_block(i).is_err() {
+                                        erreurs += 1;
+                                    }
+                                    let _ = tx.send(AppMsg::Progression(i as f32 / total as f32));
+                                    ctx_clone.request_repaint();
+                                }
+
+                                if erreurs == 0 {
+                                    Ok(format!("Archive saine !"))
+                                } else {
+                                    Err(format!("Archive corrompue : {} blocs illisibles sur {}.", erreurs, total))
+                                }
+                            };
+                            verifier_archive()
                         }
                     };
 
@@ -293,7 +329,7 @@ impl eframe::App for AppCompresseur {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([550.0, 380.0]) // Légère augmentation de la hauteur
+            .with_inner_size([650.0, 380.0]) // Légèrement plus large pour les 7 onglets
             .with_resizable(false),
         ..Default::default()
     };
