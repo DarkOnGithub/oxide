@@ -587,7 +587,6 @@ pub fn repair(args: crate::cli::RepairArgs) -> AppResult {
 
     println!("🛠️ Starting repair for: {}", input.display());
 
-    // On lance la résurrection !
     if let Err(e) = oxide_core::recovery::repair_corrupted_archive(&input, &output_path) {
         if output.is_none() && output_path.exists() {
             let _ = std::fs::remove_file(&output_path);

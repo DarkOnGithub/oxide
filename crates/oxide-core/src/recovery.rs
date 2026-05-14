@@ -131,7 +131,6 @@ pub fn protect_existing_archive(
         return Err(OxideError::InvalidFormat("Archive is too small"));
     }
 
-    // 1. Quick check for existing protection (Byte 6)
     let mut header_flags = [0u8; 2];
     in_file.seek(SeekFrom::Start(6))?;
     in_file.read_exact(&mut header_flags)?;
@@ -140,12 +139,10 @@ pub fn protect_existing_archive(
         return Err(OxideError::InvalidFormat("Archive is already protected"));
     }
 
-    // 2. Read the original footer
     in_file.seek(SeekFrom::End(-40))?;
     let mut footer_bytes = [0u8; 40];
     in_file.read_exact(&mut footer_bytes)?;
 
-    // 3. Dynamic shard sizing to stay under 256 total shards (Reed-Solomon Galois-8 limit)
     let target_data_shards = 200u64;
     let mut shard_size = (file_len + target_data_shards - 1) / target_data_shards;
     shard_size = shard_size.max(1024 * 1024); // Minimum 1MB chunks
@@ -176,7 +173,6 @@ pub fn protect_existing_archive(
             bytes_read += n;
         }
         
-        // HOT FIX: Pre-flip the flag in the RAM shard so mathematical parity perfectly matches the final file!
         if i == 0 && bytes_to_read >= 8 {
             let new_flags = flags | HEADER_FLAG_RECOVERY;
             let flag_bytes = new_flags.to_le_bytes();
@@ -186,14 +182,10 @@ pub fn protect_existing_archive(
         
         checksums.push(crate::checksum::compute_checksum(&shards[i]));
     }
-
-    // 4. Compute Parity
     rs.encode(&mut shards).map_err(|_| OxideError::RecoveryDataInvalid)?;
 
     let mut out_file = File::create(output_path)?;
     
-    // 5. Write the protected file structure
-    // A. The original data (with the modified flag)
     for i in 0..data_count {
         let start_pos = (i as u64) * shard_size;
         let end_pos = ((i as u64 + 1) * shard_size).min(file_len);
@@ -201,18 +193,14 @@ pub fn protect_existing_archive(
         out_file.write_all(&shards[i][..bytes_to_write])?;
     }
     
-    // B. The physical CRC32 map (to detect corruption without parsing Oxide chunks)
     for crc in &checksums {
         out_file.write_all(&crc.to_le_bytes())?;
     }
     
-    // C. The Parity Shards
     for i in data_count..(data_count + parity_count) {
         out_file.write_all(&shards[i])?;
     }
     
-    // D. The 21-byte Contract
-    // HACK: We artificially add 40 bytes to parity_bytes_len so ArchiveReader skips the original footer properly!
     let parity_bytes_len = (parity_count as u64 * shard_size) + (data_count as u64 * 4) + 40;
     let meta = RecoveryMetadata {
         percentage,
@@ -228,7 +216,6 @@ pub fn protect_existing_archive(
     out_file.write_all(&meta.parity_bytes_len.to_le_bytes())?;
     out_file.write_all(&meta.max_block_len.to_le_bytes())?;
     
-    // E. The duplicated valid footer for ArchiveReader
     out_file.write_all(&footer_bytes)?;
 
     Ok(())
@@ -245,7 +232,6 @@ pub fn repair_corrupted_archive(
         return Err(OxideError::RecoveryDataInvalid);
     }
     
-    // 1. Read metadata from the physical end of the file (completely bypassing ArchiveReader!)
     in_file.seek(SeekFrom::End(-61))?;
     let mut rec_buf = [0u8; 21];
     in_file.read_exact(&mut rec_buf)?;
@@ -272,7 +258,6 @@ pub fn repair_corrupted_archive(
     let checksums_len = (data_count * 4) as u64;
     let pure_parity_len = (parity_count * shard_size) as u64;
     
-    // We artificially added 40 bytes to parity_bytes_len during protect
     let actual_parity_struct_len = meta.parity_bytes_len.saturating_sub(40);
     
     if actual_parity_struct_len != checksums_len + pure_parity_len {
@@ -281,7 +266,6 @@ pub fn repair_corrupted_archive(
 
     let original_file_len = file_len - 61 - actual_parity_struct_len;
 
-    // 2. Read physical checksums
     in_file.seek(SeekFrom::Start(original_file_len))?;
     let mut expected_checksums = Vec::with_capacity(data_count);
     for _ in 0..data_count {
@@ -290,7 +274,6 @@ pub fn repair_corrupted_archive(
         expected_checksums.push(u32::from_le_bytes(crc_buf));
     }
 
-    // 3. Read parity
     let mut shards = vec![None; data_count + parity_count];
     for i in 0..parity_count {
         let mut shard = vec![0u8; shard_size];
