@@ -20,57 +20,59 @@
     </div>
 
     <div class="tables-container" v-if="currentData">
-      <div class="table-section" v-if="currentData['Archive'] && currentData['Archive'].length > 0">
-        <h3>Performances d'Archivage</h3>
-        <div class="table-responsive">
-          <table>
-            <thead>
-              <tr>
-                <th>Outil</th>
-                <th>Mode</th>
-                <th class="numeric">Débit (MiB/s)</th>
-                <th class="numeric">Temps (s)</th>
-                <th class="numeric">Ratio</th>
-                <th class="numeric">Pic RAM</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, idx) in currentData['Archive']" :key="idx" :class="{ 'highlight-row': row.tool === 'oxide' }">
-                <td><span class="tool-badge" :class="row.tool">{{ row.tool }}</span></td>
-                <td><span class="mode-badge" :class="row.mode">{{ row.mode }}</span></td>
-                <td class="numeric highlight-val">{{ row.mib_s }}</td>
-                <td class="numeric">{{ row.avg_s }}</td>
-                <td class="numeric">{{ row.ratio }}</td>
-                <td class="numeric">{{ row.peak_rss }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <div v-for="mode in ['fast', 'balanced', 'ultra']" :key="mode" class="mode-group">
+        <h3 class="mode-header">Mode {{ mode.charAt(0).toUpperCase() + mode.slice(1) }}</h3>
+        
+        <div class="tables-grid">
+          <div class="table-section" v-if="getRows('Archive', mode).length > 0">
+            <h4>Archivage</h4>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Outil</th>
+                    <th class="numeric">Débit (MiB/s)</th>
+                    <th class="numeric">Temps (s)</th>
+                    <th class="numeric">Ratio</th>
+                    <th class="numeric">Pic RAM</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, idx) in getRows('Archive', mode)" :key="idx" :class="{ 'highlight-row': row.tool === 'oxide' }">
+                    <td><span class="tool-badge" :class="row.tool">{{ row.tool }}</span></td>
+                    <td class="numeric highlight-val">{{ row.mib_s }}</td>
+                    <td class="numeric">{{ row.avg_s }}</td>
+                    <td class="numeric">{{ row.ratio }}</td>
+                    <td class="numeric">{{ row.peak_rss }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
 
-      <div class="table-section" v-if="currentData['Extract'] && currentData['Extract'].length > 0">
-        <h3>Performances d'Extraction</h3>
-        <div class="table-responsive">
-          <table>
-            <thead>
-              <tr>
-                <th>Outil</th>
-                <th>Mode</th>
-                <th class="numeric">Débit (MiB/s)</th>
-                <th class="numeric">Temps (s)</th>
-                <th class="numeric">Pic RAM</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, idx) in currentData['Extract']" :key="idx" :class="{ 'highlight-row': row.tool === 'oxide' }">
-                <td><span class="tool-badge" :class="row.tool">{{ row.tool }}</span></td>
-                <td><span class="mode-badge" :class="row.mode">{{ row.mode }}</span></td>
-                <td class="numeric highlight-val">{{ row.mib_s }}</td>
-                <td class="numeric">{{ row.avg_s }}</td>
-                <td class="numeric">{{ row.peak_rss }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <div class="table-section" v-if="getRows('Extract', mode).length > 0">
+            <h4>Extraction</h4>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Outil</th>
+                    <th class="numeric">Débit (MiB/s)</th>
+                    <th class="numeric">Temps (s)</th>
+                    <th class="numeric">Pic RAM</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, idx) in getRows('Extract', mode)" :key="idx" :class="{ 'highlight-row': row.tool === 'oxide' }">
+                    <td><span class="tool-badge" :class="row.tool">{{ row.tool }}</span></td>
+                    <td class="numeric highlight-val">{{ row.mib_s }}</td>
+                    <td class="numeric">{{ row.avg_s }}</td>
+                    <td class="numeric">{{ row.peak_rss }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1597,6 +1599,11 @@ const currentData = computed(() => {
   return null
 })
 
+const getRows = (op, mode) => {
+  if (!currentData.value || !currentData.value[op]) return []
+  return currentData.value[op].filter(row => row.mode === mode)
+}
+
 watch(selectedCpu, (newCpu) => {
   if (data[newCpu] && !data[newCpu][selectedDataset.value]) {
     selectedDataset.value = Object.keys(data[newCpu])[0]
@@ -1688,19 +1695,38 @@ select:hover {
 .tables-container {
   display: flex;
   flex-direction: column;
-  gap: 3rem;
+  gap: 4rem;
 }
-h3 {
-  margin: 0 0 1rem 0;
-  font-size: 1.4rem;
-  font-weight: 700;
+.mode-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.mode-header {
+  margin: 0;
+  font-size: 1.6rem;
+  font-weight: 800;
   color: var(--vp-c-brand-1);
+  border-bottom: 2px solid var(--vp-c-divider);
+  padding-bottom: 0.5rem;
 }
-.dark h3 {
+.dark .mode-header {
   background: linear-gradient(120deg, #fdba74, #fb923c);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.tables-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2rem;
+}
+h4 {
+  margin: 0 0 1rem 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--vp-c-text-2);
 }
 .table-responsive {
   overflow-x: auto;
@@ -1717,12 +1743,12 @@ h3 {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   white-space: nowrap;
 }
 th, td {
-  padding: 1rem 1.2rem;
-  text-align: left;
+  padding: 0.8rem 1rem;
+  text-align: center;
   border-bottom: 1px solid var(--vp-c-divider);
 }
 .dark th, .dark td {
@@ -1733,7 +1759,7 @@ th {
   color: var(--vp-c-text-2);
   background: var(--vp-c-bg-mute);
   text-transform: uppercase;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   letter-spacing: 0.05em;
 }
 .dark th {
@@ -1750,7 +1776,6 @@ tr:hover td {
   background: rgba(255, 255, 255, 0.02);
 }
 .numeric {
-  text-align: right;
   font-variant-numeric: tabular-nums;
   font-family: var(--vp-font-family-mono);
 }
@@ -1775,10 +1800,10 @@ tr:hover td {
 }
 .tool-badge {
   display: inline-block;
-  padding: 0.3rem 0.6rem;
-  border-radius: 6px;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
   font-weight: 700;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   background: var(--vp-c-bg-mute);
   color: var(--vp-c-text-2);
   border: 1px solid var(--vp-c-divider);
@@ -1798,14 +1823,10 @@ tr:hover td {
   color: #fb923c;
   border-color: rgba(251, 146, 60, 0.3);
 }
-.mode-badge {
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--vp-c-text-2);
-  font-weight: 700;
-}
-.dark .mode-badge {
-  color: #777;
+
+@media (min-width: 960px) {
+  .tables-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 </style>
