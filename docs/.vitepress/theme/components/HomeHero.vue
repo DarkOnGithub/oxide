@@ -275,12 +275,6 @@ import { withBase } from 'vitepress'
 </style>
 
 <style>
-/* Forcefully prevent page scrolling on the home layout */
-html:has(.hero), body:has(.hero) {
-  overflow: hidden !important;
-  height: 100vh !important;
-}
-
 /* Remove default VitePress bottom spacing */
 #VPContent, .VPHome, .VPContent {
   padding-bottom: 0 !important;

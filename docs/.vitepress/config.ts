@@ -26,7 +26,15 @@ export default defineConfig({
                         { text: 'Archive', link: '/cli/archive' },
                         { text: 'Extract', link: '/cli/extract' },
                         { text: 'Tree', link: '/cli/tree' },
+                        { text: 'Encrypt', link: '/cli/encrypt' },
+                        { text: 'Decrypt', link: '/cli/decrypt' },
                         { text: 'Presets', link: '/cli/presets' }
+                    ]
+                },
+                {
+                    text: 'Performances',
+                    items: [
+                        { text: 'Benchmarks', link: '/cli/benchmarks' }
                     ]
                 }
             ],

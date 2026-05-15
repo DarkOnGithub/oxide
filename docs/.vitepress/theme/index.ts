@@ -1,9 +1,10 @@
 import DefaultTheme from 'vitepress/theme'
 import './style.css'
+import BenchmarkTable from './components/BenchmarkTable.vue'
 
 export default {
     extends: DefaultTheme,
     enhanceApp({ app }) {
-        // register global components if needed
+        app.component('BenchmarkTable', BenchmarkTable)
     }
 }

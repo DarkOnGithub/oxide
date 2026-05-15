@@ -56,3 +56,5 @@ Oxide a été conçu et développé dans le cadre du Projet S4 (2026).
 - [🚧] Conception du Format de fichier binaire (En cours)
 - [🚧] Pipeline Manager (Routing dynamique) (En cours)
 
+
+
