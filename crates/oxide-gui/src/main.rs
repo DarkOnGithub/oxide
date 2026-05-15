@@ -60,6 +60,9 @@ pub struct AppCompresseur {
     message_fin: Option<Result<String, String>>,
     receveur_msg: Option<Receiver<AppMsg>>,
     
+    compression_chiffrer: bool,
+    compression_proteger: bool,
+
     mot_de_passe: String,
     confirmation_mot_de_passe: String, 
     pourcentage_protection: u8,
@@ -83,6 +86,9 @@ impl Default for AppCompresseur {
             message_fin: None,
             receveur_msg: None,
             
+            compression_chiffrer: false,
+            compression_proteger: false,
+
             mot_de_passe: String::new(),
             confirmation_mot_de_passe: String::new(), 
             pourcentage_protection: 5,
@@ -91,7 +97,7 @@ impl Default for AppCompresseur {
             receveur_dialogue: None,
 
             fenetre_options_ouverte: false,
-            config_algo: CompressionAlgo::Zstd, // Preset "Balanced" par défaut
+            config_algo: CompressionAlgo::Zstd,
             config_block_size_kb: 2048,
             config_workers: thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
         }
@@ -101,7 +107,6 @@ impl Default for AppCompresseur {
 impl eframe::App for AppCompresseur {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 
-        // 1. Écoute de l'explorateur de fichiers
         if let Some(rx) = &self.receveur_dialogue {
             if let Ok(resultat) = rx.try_recv() {
                 self.dialogue_ouvert = false;
@@ -113,7 +118,6 @@ impl eframe::App for AppCompresseur {
             }
         }
 
-        // 2. Écoute de la progression
         if let Some(rx) = &self.receveur_msg {
             while let Ok(msg) = rx.try_recv() {
                 match msg {
@@ -127,7 +131,7 @@ impl eframe::App for AppCompresseur {
             }
         }
 
-        // --- FENÊTRE D'OPTIONS DE COMPRESSION (ÉPURÉE) ---
+        // --- FENÊTRE D'OPTIONS DE COMPRESSION ---
         if self.fenetre_options_ouverte {
             egui::Window::new("Profil de Compression")
                 .collapsible(false)
@@ -137,21 +141,16 @@ impl eframe::App for AppCompresseur {
                     ui.add_space(10.0);
                     
                     ui.horizontal(|ui| {
-                        // Preset FAST
                         if ui.button("🚀 Fast").clicked() {
                             self.config_algo = CompressionAlgo::Lz4;
                             self.config_block_size_kb = 3072;
                             self.config_workers = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
                         }
-                        
-                        // Preset BALANCED
                         if ui.button("⚖️ Balanced").clicked() {
                             self.config_algo = CompressionAlgo::Zstd;
                             self.config_block_size_kb = 2048;
                             self.config_workers = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
                         }
-                        
-                        // Preset ULTRA
                         if ui.button("💎 Ultra").clicked() {
                             self.config_algo = CompressionAlgo::Lzma;
                             self.config_block_size_kb = 3072;
@@ -159,7 +158,6 @@ impl eframe::App for AppCompresseur {
                         }
                     });
 
-                    // Optionnel : Afficher le preset actuellement sélectionné pour l'utilisateur
                     ui.add_space(15.0);
                     let nom_preset = match self.config_algo {
                         CompressionAlgo::Lz4 => "Fast (Optimisé pour la vitesse)",
@@ -180,6 +178,9 @@ impl eframe::App for AppCompresseur {
             ui.heading("Oxide Toolkit");
             ui.separator();
 
+            // Mémorisation du mode actuel AVANT le choix de l'utilisateur
+            let mode_precedent = self.mode_actuel;
+
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.mode_actuel, Mode::Compresser, "📦 Compresser");
                 ui.selectable_value(&mut self.mode_actuel, Mode::Extraire, "📂 Extraire");
@@ -190,6 +191,14 @@ impl eframe::App for AppCompresseur {
                 ui.selectable_value(&mut self.mode_actuel, Mode::Reparer, "🛠️ Réparer");
             });
             ui.separator();
+
+            // Si l'utilisateur vient de cliquer sur un onglet différent
+            if self.mode_actuel != mode_precedent {
+                self.mot_de_passe.clear();
+                self.confirmation_mot_de_passe.clear();
+                self.message_fin = None; // On nettoie les anciens messages
+                self.progression = 0.0;  // On remet la barre à 0
+            }
 
             ui.horizontal(|ui| {
                 if ui.add_enabled(!self.en_cours && !self.dialogue_ouvert, egui::Button::new("📄 Choisir un fichier")).clicked() {
@@ -233,8 +242,36 @@ impl eframe::App for AppCompresseur {
 
             ui.add_space(10.0);
 
-            // --- GESTION DU MOT DE PASSE AVEC CONFIRMATION ET OPTIONNEL ---
-            if self.mode_actuel == Mode::Chiffrer {
+            // --- OPTIONS PAR MODE ---
+            if self.mode_actuel == Mode::Compresser {
+                ui.group(|ui| {
+                    ui.checkbox(&mut self.compression_chiffrer, "🔒 Protéger l'archive avec un mot de passe");
+                    if self.compression_chiffrer {
+                        ui.horizontal(|ui| {
+                            ui.label("Mot de passe :");
+                            ui.add(egui::TextEdit::singleline(&mut self.mot_de_passe).password(true));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Confirmer :");
+                            ui.add(egui::TextEdit::singleline(&mut self.confirmation_mot_de_passe).password(true));
+                        });
+                        
+                        if !self.confirmation_mot_de_passe.is_empty() && self.mot_de_passe != self.confirmation_mot_de_passe {
+                            ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "⚠ Les mots de passe ne correspondent pas");
+                        }
+                    }
+
+                    ui.add_space(5.0);
+
+                    ui.checkbox(&mut self.compression_proteger, "🛡️ Ajouter des données de récupération (Reed-Solomon)");
+                    if self.compression_proteger {
+                        ui.horizontal(|ui| {
+                            ui.label("Niveau de redondance :");
+                            ui.add(egui::Slider::new(&mut self.pourcentage_protection, 1..=20).suffix("%"));
+                        });
+                    }
+                });
+            } else if self.mode_actuel == Mode::Chiffrer {
                 ui.horizontal(|ui| {
                     ui.label("Mot de passe :");
                     ui.add(egui::TextEdit::singleline(&mut self.mot_de_passe).password(true));
@@ -256,9 +293,7 @@ impl eframe::App for AppCompresseur {
                     }
                     ui.add(egui::TextEdit::singleline(&mut self.mot_de_passe).password(true));
                 });
-            }
-
-            if self.mode_actuel == Mode::Proteger {
+            } else if self.mode_actuel == Mode::Proteger {
                 ui.group(|ui| {
                     ui.label("Niveau de redondance (Reed-Solomon) :");
                     ui.add(egui::Slider::new(&mut self.pourcentage_protection, 1..=20).suffix("%"));
@@ -268,15 +303,20 @@ impl eframe::App for AppCompresseur {
 
             ui.add_space(15.0);
 
+            // Validation de sécurité pour le mot de passe
             let mdp_valide = match self.mode_actuel {
+                Mode::Compresser => {
+                    if self.compression_chiffrer {
+                        !self.mot_de_passe.is_empty() && self.mot_de_passe == self.confirmation_mot_de_passe
+                    } else { true }
+                },
                 Mode::Chiffrer => !self.mot_de_passe.is_empty() && self.mot_de_passe == self.confirmation_mot_de_passe,
                 Mode::Dechiffrer => !self.mot_de_passe.is_empty(), 
-                Mode::Extraire | Mode::Verifier => true, 
                 _ => true,
             };
 
             let texte_bouton = match self.mode_actuel {
-                Mode::Compresser => "🚀 Lancer la compression",
+                Mode::Compresser => "🚀 Lancer la création de l'archive",
                 Mode::Extraire => "📂 Lancer l'extraction",
                 Mode::Chiffrer => "🔒 Verrouiller l'archive",
                 Mode::Dechiffrer => "🔓 Déverrouiller l'archive",
@@ -303,6 +343,9 @@ impl eframe::App for AppCompresseur {
                 let mode = self.mode_actuel;
                 let mdp = self.mot_de_passe.clone();
                 let recovery_pct = self.pourcentage_protection;
+                
+                let compression_chiffrer = self.compression_chiffrer;
+                let compression_proteger = self.compression_proteger;
 
                 let algo = self.config_algo;
                 let block_size = self.config_block_size_kb * 1024;
@@ -313,26 +356,48 @@ impl eframe::App for AppCompresseur {
                     
                     let resultat = match mode {
                         Mode::Compresser => {
-                            let mut chemin_dest = chemin_source.clone();
-                            if chemin_source.is_dir() {
-                                chemin_dest.set_file_name(format!("{}.oxz", chemin_source.file_name().unwrap().to_string_lossy()));
-                            } else {
-                                chemin_dest.set_extension("oxz");
-                            }
+                            let mut run_compression = || -> Result<String, String> {
+                                let mut chemin_dest = chemin_source.clone();
+                                if chemin_source.is_dir() {
+                                    chemin_dest.set_file_name(format!("{}.oxz", chemin_source.file_name().unwrap().to_string_lossy()));
+                                } else {
+                                    chemin_dest.set_extension("oxz");
+                                }
 
-                            let pool = Arc::new(BufferPool::new(64 * 1024 * 1024, 8));
-                            let config = ArchivePipelineConfig::new(block_size, workers, pool, algo);
-                            let pipeline = ArchivePipeline::new(config);
-                            
-                            let options = RunTelemetryOptions { progress_interval: Duration::from_millis(50), emit_final_progress: true, include_telemetry_snapshot: false };
-                            
-                            if let Ok(fichier_sortie) = File::create(&chemin_dest) {
-                                if pipeline.archive_path_seekable(&chemin_source, fichier_sortie, options, Some(&mut sink)).is_ok() {
-                                    Ok(format!("Archivé avec succès ({}).", match algo { 
-                                        CompressionAlgo::Zstd => "Zstd", CompressionAlgo::Lz4 => "Lz4", CompressionAlgo::Lzma => "Lzma"
-                                    }))
-                                } else { Err("Erreur lors de la compression".to_string()) }
-                            } else { Err("Impossible de créer le fichier".to_string()) }
+                                let pool = Arc::new(BufferPool::new(64 * 1024 * 1024, 8));
+                                let config = ArchivePipelineConfig::new(block_size, workers, pool, algo);
+                                let pipeline = ArchivePipeline::new(config);
+                                let options = RunTelemetryOptions { progress_interval: Duration::from_millis(50), emit_final_progress: true, include_telemetry_snapshot: false };
+                                
+                                let fichier_sortie = File::create(&chemin_dest).map_err(|_| "Impossible de créer le fichier".to_string())?;
+                                
+                                if pipeline.archive_path_seekable(&chemin_source, fichier_sortie, options, Some(&mut sink)).is_err() {
+                                    return Err("Erreur lors de la compression".to_string());
+                                }
+                                
+                                if compression_chiffrer {
+                                    let temp_enc = chemin_dest.with_extension("oxz.enc");
+                                    if oxide_core::encrypt_existing_archive(&chemin_dest, &temp_enc, &mdp).is_ok() {
+                                        let _ = std::fs::rename(&temp_enc, &chemin_dest); 
+                                    } else {
+                                        return Err("L'archive a été créée mais le chiffrement a échoué.".to_string());
+                                    }
+                                }
+
+                                if compression_proteger {
+                                    let temp_prot = chemin_dest.with_extension("oxz.prot");
+                                    if oxide_core::recovery::protect_existing_archive(&chemin_dest, &temp_prot, recovery_pct).is_ok() {
+                                        let _ = std::fs::rename(&temp_prot, &chemin_dest);
+                                    } else {
+                                        return Err("L'archive a été créée mais la protection a échoué.".to_string());
+                                    }
+                                }
+
+                                Ok(format!("Archivé avec succès ({}).", match algo { 
+                                    CompressionAlgo::Zstd => "Zstd", CompressionAlgo::Lz4 => "Lz4", CompressionAlgo::Lzma => "Lzma"
+                                }))
+                            };
+                            run_compression()
                         },
                         Mode::Extraire => {
                             let mut chemin_dest = chemin_source.clone();
@@ -431,7 +496,7 @@ impl eframe::App for AppCompresseur {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 420.0])
+            .with_inner_size([720.0, 480.0])
             .with_resizable(false),
         ..Default::default()
     };
