@@ -106,6 +106,19 @@ impl Default for AppCompresseur {
 
 impl eframe::App for AppCompresseur {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let (plein_ecran, basculer_plein_ecran, quitter_plein_ecran) = ctx.input(|i| {
+            let plein_ecran = i.viewport().fullscreen.unwrap_or(false);
+            (
+                plein_ecran,
+                i.key_pressed(egui::Key::F11),
+                plein_ecran && i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if basculer_plein_ecran {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!plein_ecran));
+        } else if quitter_plein_ecran {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
 
         if let Some(rx) = &self.receveur_dialogue {
             if let Ok(resultat) = rx.try_recv() {
@@ -497,7 +510,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([720.0, 480.0])
-            .with_resizable(false),
+            .with_min_inner_size([720.0, 480.0])
+            .with_resizable(true),
         ..Default::default()
     };
     eframe::run_native("Oxide Toolkit", options, Box::new(|_cc| Box::<AppCompresseur>::default()))
