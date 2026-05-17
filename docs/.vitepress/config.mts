@@ -9,7 +9,7 @@ export default defineConfig({
         logo: '/logo.svg',
         nav: [
             { text: 'Documentation', link: '/cli/' },
-            { text: 'A propos', link: '/about/' }
+            { text: 'À propos', link: '/about/' }
         ],
 
         sidebar: {

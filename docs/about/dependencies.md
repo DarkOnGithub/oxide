@@ -1,51 +1,85 @@
 ---
 title: Dépendances
-description: Bibliothèques open-source ayant permis de construire Oxide
+description: Bibliothèques et briques open-source utilisées dans l'écosystème Oxide
 ---
 
 # Dépendances
 
-Oxide repose sur de nombreuses briques open-source performantes de l'écosystème Rust et Web.
+Oxide repose sur plusieurs bibliothèques Rust et Web réparties entre le moteur, la CLI, la GUI et le site de documentation.
 
 ## Cœur et Compression (`oxide-core`)
 
-La librairie centrale gérant la compression et les algorithmes fait appel aux paquets suivants :
+La crate `oxide-core` concentre le format d'archive, la compression, l'extraction, le chiffrement et la résilience.
 
-- **Concurrence & Multithreading** : 
-  - `crossbeam-channel` & `crossbeam-deque` : Structures de données performantes pour la communication entre nos nombreux threads.
-  - `num_cpus` : Outil permettant de sonder dynamiquement le nombre de cœurs processeurs disponibles pour adapter la parallélisation.
-  
-- **Gestion Mémoire & Entrées/Sorties (I/O)** :
-  - `memmap2` : Lecture de fichiers mappés en mémoire (mmap) pour limiter les copies inutiles et accélérer drastiquement les traitements.
-  - `bytes` & `memchr` : Utilitaires pour la manipulation rapide de buffers binaires orientés réseau.
-  - `jwalk` : Traitement optimisé à grande vitesse des parcours récursifs de répertoires.
-  - `libc` : Couche d'interaction très bas-niveau avec le système d'exploitation.
+### Concurrence et pipeline
 
-- **Filtres et Détection de Contenu** :
-  - `infer` : Inférence magique et ultra-rapide des formats de fichiers à partir de leur en-tête.
-  - `image` & `symphonia` : Bibliothèques expertes pour extraire ou valider les données brutes des médias (images et audio).
-  - `regex` : Moteur ultra-rapide pour l'analyse textuelle avancée.
+- `crossbeam-channel` : communication entre les étapes du pipeline
+- `crossbeam-deque` : structures utiles pour l'ordonnancement parallèle
+- `num_cpus` : adaptation du nombre de workers à la machine
 
-- **Utilitaires Génériques** :
-  - `serde` : Standard de sérialisation et dé-sérialisation des données.
-  - `anyhow` & `thiserror` : Structures modernes pour la gestion fine et traçable des erreurs et exceptions.
-  - `tracing` : Instrumentations et logs asynchrones de l'application.
+### Compression et traitement binaire
+
+- `lz4_flex` : implémentation du mode `fast`
+- `zstd` : compression équilibrée et support des dictionnaires
+- `liblzma` : compression `lzma` pour le mode `ultra`
+- `bytes` et `memchr` : manipulation rapide de buffers binaires
+- `regex` : filtres et sélections textuelles côté moteur
+
+### Sécurité et intégrité
+
+- `argon2` : dérivation de clé à partir du mot de passe
+- `aes-gcm` : chiffrement authentifié par bloc
+- `rand` : génération de sel et d'aléa cryptographique
+- `crc32c` : vérification locale des blocs
+- `blake3` : hachage rapide
+- `reed-solomon-erasure` : génération et réparation des blocs de redondance
+
+### Entrées / sorties et système
+
+- `memmap2` : lecture mémoire mappée pour certains gros fichiers
+- `jwalk` : parcours rapide des arborescences
+- `libc` : accès système bas niveau lorsque nécessaire
+
+### Sérialisation, erreurs et observabilité
+
+- `serde` : sérialisation des structures de configuration et de métadonnées
+- `anyhow` et `thiserror` : gestion d'erreurs
+- `tracing` : instrumentation et logs
 
 ## Interface Ligne de Commande (`oxide`)
 
-L'utilitaire `oxide` fournit une expérience utilisateur puissante et agréable grâce à :
+La crate `oxide-cli` fournit le binaire `oxide` et les commandes utilisateur.
 
-- `clap` : Le standard absolu en Rust pour parser et valider avec fiabilité les commandes et arguments du terminal.
-- `nu-ansi-term` & `terminal_size` : Affichage de textes formatés, adaptés de manière dynamique à la largeur de l'écran du terminal.
-- `serde_json` : Émission de la télémétrie et log au format JSON si demandé.
-- `tracing-subscriber` : Routeur et formateur performant des logs à l'écran.
+- `clap` : parsing et validation des commandes
+- `dialoguer` : interactions terminales pour les saisies utilisateur
+- `nu-ansi-term` : coloration et lisibilité des sorties console
+- `terminal_size` : adaptation de l'affichage à la largeur du terminal
+- `serde` et `serde_json` : export JSON et lecture de presets
+- `tracing-subscriber` : affichage et filtrage des logs
+
+## Interface Graphique (`oxide-gui`)
+
+La crate `oxide-gui` embarque une application native dédiée aux usages non CLI.
+
+- `eframe` : couche d'application native
+- `egui` : framework GUI en mode immédiat (via `eframe`)
+- `rfd` : boîtes de dialogue natives pour les fichiers et dossiers
+
+## Outils de test et développement
+
+- `tempfile` : création de fichiers temporaires dans les tests du moteur
 
 ## Site de Documentation (Web)
 
-Toute cette documentation est générée et propulsée par un écosystème web moderne :
+Le site `docs/` est généré comme site statique.
 
-- **VitePress & Vue.js** : Générateur de site statique ultra-rapide (SSG) de nouvelle génération, permettant une navigation fluide (type SPA) et l'intégration de design personnalisés via d'élégants composants Vue.
+- `vitepress` : générateur de site statique et navigation documentaire
+- `vue` : composants et thèmes utilisés dans les pages d'accueil et d'affichage
 
 ## Identité Visuelle
 
 - L'esthétique de notre **logo** s'inspire du travail de [SAWARATSUKI / KawaiiLogos](https://github.com/SAWARATSUKI/KawaiiLogos).
+
+## Remarque
+
+Cette page synthétise les dépendances les plus structurantes du projet. Les fichiers `Cargo.toml` et `package.json` restent la source de vérité pour la liste exacte et versionnée.

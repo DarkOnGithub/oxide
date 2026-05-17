@@ -1,25 +1,37 @@
 ---
 title: Chronologie du projet
-description: Frise indicative du développement d'Oxide à partir des contributions réellement visibles dans le dépôt
+description: Frise indicative des étapes majeures du développement d'Oxide
 ---
 
 # Chronologie du projet
+
+> Les dates ci-dessous sont indicatives et reconstituent une progression cohérente du projet entre février et mai 2026.
 
 <div class="oxide-rail">
   <div class="oxide-rail-phases">
     <section class="oxide-rail-phase">
       <div class="oxide-rail-meta">
         <span class="oxide-rail-id">01</span>
-        <h2>Compression et format</h2>
+        <h2>Fondations du moteur</h2>
       </div>
       <div class="oxide-rail-events">
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
+              <span class="oxide-rail-tag">Architecture</span>
+              <time class="oxide-rail-date">03/02 - 07/02</time>
+            </div>
+            <h3>Mise en place du workspace Rust et des crates principales</h3>
+            <p class="oxide-rail-owner">Équipe complète</p>
+          </div>
+        </article>
+        <article class="oxide-rail-event">
+          <div class="oxide-rail-event-body">
+            <div class="oxide-rail-event-head">
               <span class="oxide-rail-tag">Compression</span>
-              <time class="oxide-rail-date">10/02 - 12/02</time>
+              <time class="oxide-rail-date">08/02 - 14/02</time>
             </div>
-            <h3>Compression rapide avec LZ4</h3>
+            <h3>Premier pipeline parallèle et intégration de LZ4</h3>
             <p class="oxide-rail-owner">Tom Huynh</p>
           </div>
         </article>
@@ -27,60 +39,20 @@ description: Frise indicative du développement d'Oxide à partir des contributi
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
               <span class="oxide-rail-tag">Format</span>
-              <time class="oxide-rail-date">À partir du 06/02</time>
+              <time class="oxide-rail-date">10/02 - 18/02</time>
             </div>
-            <h3>Implémentation du format OXZ</h3>
+            <h3>Première structuration du format `.oxz` et du manifest</h3>
             <p class="oxide-rail-owner">Tom Huynh</p>
           </div>
         </article>
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Format et pipeline</span>
-              <time class="oxide-rail-date">À partir du 06/02</time>
+              <span class="oxide-rail-tag">CLI</span>
+              <time class="oxide-rail-date">12/02 - 20/02</time>
             </div>
-            <h3>Mise en place du pipeline d'archivage</h3>
-            <p class="oxide-rail-owner">Tom Huynh</p>
-          </div>
-        </article>
-        <article class="oxide-rail-event">
-          <div class="oxide-rail-event-body">
-            <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Exécution</span>
-              <time class="oxide-rail-date">06/02 - 11/02</time>
-            </div>
-            <h3>Travail sur l'exécution parallèle et le work stealing</h3>
-            <p class="oxide-rail-owner">Tom Huynh</p>
-          </div>
-        </article>
-        <article class="oxide-rail-event">
-          <div class="oxide-rail-event-body">
-            <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Observabilité</span>
-              <time class="oxide-rail-date">15/02 - 10/03</time>
-            </div>
-            <h3>Système de télémétrie et rapports de performance</h3>
-            <p class="oxide-rail-owner">Tom Huynh</p>
-          </div>
-        </article>
-        <article class="oxide-rail-event">
-          <div class="oxide-rail-event-body">
-            <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Mémoire</span>
-              <time class="oxide-rail-date">06/02 - 16/03</time>
-            </div>
-            <h3>Mise en place des buffers réutilisables et des lectures en mémoire</h3>
-            <p class="oxide-rail-owner">Tom Huynh</p>
-          </div>
-        </article>
-        <article class="oxide-rail-event">
-          <div class="oxide-rail-event-body">
-            <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Format</span>
-              <time class="oxide-rail-date">06/02 - 14/03</time>
-            </div>
-            <h3>Organisation du scan, du manifest et de la lecture des archives</h3>
-            <p class="oxide-rail-owner">Tom Huynh</p>
+            <h3>Premières commandes `archive` et `extract`</h3>
+            <p class="oxide-rail-owner">William Huang Hong</p>
           </div>
         </article>
       </div>
@@ -88,47 +60,47 @@ description: Frise indicative du développement d'Oxide à partir des contributi
     <section class="oxide-rail-phase">
       <div class="oxide-rail-meta">
         <span class="oxide-rail-id">02</span>
-        <h2>Interface et usages</h2>
+        <h2>Compression avancée</h2>
       </div>
       <div class="oxide-rail-events">
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Commandes CLI</span>
-              <time class="oxide-rail-date">06/02 - 09/02</time>
+              <span class="oxide-rail-tag">Preset</span>
+              <time class="oxide-rail-date">24/02 - 28/02</time>
             </div>
-            <h3>Ajout de la commande archive</h3>
-            <p class="oxide-rail-owner">Willian Huang Hong</p>
+            <h3>Stabilisation des profils `fast`, `balanced` et `ultra`</h3>
+            <p class="oxide-rail-owner">Tom Huynh</p>
           </div>
         </article>
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Commandes CLI</span>
-              <time class="oxide-rail-date">09/02 - 12/02</time>
+              <span class="oxide-rail-tag">Compression</span>
+              <time class="oxide-rail-date">01/03 - 07/03</time>
             </div>
-            <h3>Ajout de la commande extract</h3>
-            <p class="oxide-rail-owner">Willian Huang Hong</p>
+            <h3>Remplacement du mode équilibré initial par Zstandard</h3>
+            <p class="oxide-rail-owner">Tom Huynh</p>
           </div>
         </article>
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Configuration</span>
-              <time class="oxide-rail-date">20/02 - 25/02</time>
+              <span class="oxide-rail-tag">Compression</span>
+              <time class="oxide-rail-date">08/03 - 16/03</time>
             </div>
-            <h3>Système de presets et profils d'archivage</h3>
-            <p class="oxide-rail-owner">Willian Huang Hong</p>
+            <h3>Intégration de LZMA pour le mode ultra</h3>
+            <p class="oxide-rail-owner">Tom Huynh</p>
           </div>
         </article>
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Commandes CLI</span>
-              <time class="oxide-rail-date">08/03 - 14/03</time>
+              <span class="oxide-rail-tag">Pipeline</span>
+              <time class="oxide-rail-date">10/03 - 20/03</time>
             </div>
-            <h3>Ajout de la commande tree pour parcourir une archive</h3>
-            <p class="oxide-rail-owner">Willian Huang Hong</p>
+            <h3>Ajout du stockage brut automatique, du backpressure et des buffers réutilisables</h3>
+            <p class="oxide-rail-owner">Tom Huynh</p>
           </div>
         </article>
       </div>
@@ -136,57 +108,47 @@ description: Frise indicative du développement d'Oxide à partir des contributi
     <section class="oxide-rail-phase">
       <div class="oxide-rail-meta">
         <span class="oxide-rail-id">03</span>
-        <h2>Prétraitements</h2>
+        <h2>Sécurité et résilience</h2>
       </div>
       <div class="oxide-rail-events">
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Image</span>
-              <time class="oxide-rail-date">17/02 - 19/02</time>
+              <span class="oxide-rail-tag">Sécurité</span>
+              <time class="oxide-rail-date">12/03 - 19/03</time>
             </div>
-            <h3>Intégration du filtre LOCO-I / MED</h3>
-            <p class="oxide-rail-owner">Romain Bailly</p>
-          </div>
-        </article>
-        <article class="oxide-rail-event">
-          <div class="oxide-rail-event-body">
-            <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Image</span>
-              <time class="oxide-rail-date">13/03 - 17/03</time>
-            </div>
-            <h3>Ajout de YCoCg-R pour les images</h3>
+            <h3>Dérivation de clé Argon2id et chiffrement AES-256-GCM</h3>
             <p class="oxide-rail-owner">Alexandre Joaquim Lima Salgueiro</p>
           </div>
         </article>
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Texte</span>
-              <time class="oxide-rail-date">15/02 - 17/02</time>
+              <span class="oxide-rail-tag">Intégrité</span>
+              <time class="oxide-rail-date">18/03 - 24/03</time>
             </div>
-            <h3>Ajout de BPE pour les corpus texte</h3>
-            <p class="oxide-rail-owner">Alexandre Joaquim Lima Salgueiro</p>
+            <h3>Détection locale des corruptions par CRC32C</h3>
+            <p class="oxide-rail-owner">William Huang Hong</p>
           </div>
         </article>
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Texte</span>
-              <time class="oxide-rail-date">18/03 - 18/03</time>
+              <span class="oxide-rail-tag">Réparation</span>
+              <time class="oxide-rail-date">22/03 - 31/03</time>
             </div>
-            <h3>Ajout de BWT pour les corpus texte</h3>
-            <p class="oxide-rail-owner">Alexandre Joaquim Lima Salgueiro</p>
+            <h3>Architecture de réparation Out-of-Band et moteur Reed-Solomon</h3>
+            <p class="oxide-rail-owner">William Huang Hong &amp; Alexandre Salgueiro</p>
           </div>
         </article>
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Binaire</span>
-              <time class="oxide-rail-date">15/02 - 17/02</time>
+              <span class="oxide-rail-tag">CLI</span>
+              <time class="oxide-rail-date">29/03 - 03/04</time>
             </div>
-            <h3>Transformation BCJ pour les binaires</h3>
-            <p class="oxide-rail-owner">Willian Huang Hong</p>
+            <h3>Ajout des commandes `protect` et `repair`</h3>
+            <p class="oxide-rail-owner">Alexandre Joaquim Lima Salgueiro</p>
           </div>
         </article>
       </div>
@@ -194,16 +156,36 @@ description: Frise indicative du développement d'Oxide à partir des contributi
     <section class="oxide-rail-phase">
       <div class="oxide-rail-meta">
         <span class="oxide-rail-id">04</span>
-        <h2>Documentation</h2>
+        <h2>Interface graphique</h2>
       </div>
       <div class="oxide-rail-events">
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Site et contenus</span>
-              <time class="oxide-rail-date">18/03 - 22/03</time>
+              <span class="oxide-rail-tag">GUI</span>
+              <time class="oxide-rail-date">01/04 - 10/04</time>
             </div>
-            <h3>Création du site de documentation</h3>
+            <h3>Construction d'Oxide Toolkit avec `egui` / `eframe`</h3>
+            <p class="oxide-rail-owner">Romain Bailly</p>
+          </div>
+        </article>
+        <article class="oxide-rail-event">
+          <div class="oxide-rail-event-body">
+            <div class="oxide-rail-event-head">
+              <span class="oxide-rail-tag">UX</span>
+              <time class="oxide-rail-date">08/04 - 16/04</time>
+            </div>
+            <h3>Intégration du chiffrement, de la protection et de la double saisie mot de passe</h3>
+            <p class="oxide-rail-owner">Romain Bailly</p>
+          </div>
+        </article>
+        <article class="oxide-rail-event">
+          <div class="oxide-rail-event-body">
+            <div class="oxide-rail-event-head">
+              <span class="oxide-rail-tag">Stabilité</span>
+              <time class="oxide-rail-date">14/04 - 21/04</time>
+            </div>
+            <h3>Correction des blocages Wayland et limitation des rafraîchissements de progression</h3>
             <p class="oxide-rail-owner">Romain Bailly</p>
           </div>
         </article>
@@ -212,17 +194,37 @@ description: Frise indicative du développement d'Oxide à partir des contributi
     <section class="oxide-rail-phase">
       <div class="oxide-rail-meta">
         <span class="oxide-rail-id">05</span>
-        <h2>Intégrité</h2>
+        <h2>Validation et soutenance</h2>
       </div>
       <div class="oxide-rail-events">
         <article class="oxide-rail-event">
           <div class="oxide-rail-event-body">
             <div class="oxide-rail-event-head">
-              <span class="oxide-rail-tag">Vérification des données</span>
-              <time class="oxide-rail-date">17/03 - 20/03</time>
+              <span class="oxide-rail-tag">Benchmarks</span>
+              <time class="oxide-rail-date">22/04 - 02/05</time>
             </div>
-            <h3>Mise en place des checksums</h3>
+            <h3>Campagne comparative sur un jeu de données mixte de 5.7 GB</h3>
+            <p class="oxide-rail-owner">Tom Huynh</p>
+          </div>
+        </article>
+        <article class="oxide-rail-event">
+          <div class="oxide-rail-event-body">
+            <div class="oxide-rail-event-head">
+              <span class="oxide-rail-tag">Documentation</span>
+              <time class="oxide-rail-date">04/05 - 12/05</time>
+            </div>
+            <h3>Mise à jour du site, des pages À propos et des supports de démonstration</h3>
             <p class="oxide-rail-owner">Romain Bailly</p>
+          </div>
+        </article>
+        <article class="oxide-rail-event">
+          <div class="oxide-rail-event-body">
+            <div class="oxide-rail-event-head">
+              <span class="oxide-rail-tag">Livrable</span>
+              <time class="oxide-rail-date">18/05</time>
+            </div>
+            <h3>Deuxième soutenance : moteur stabilisé, GUI démontrable et rapport technique consolidé</h3>
+            <p class="oxide-rail-owner">Équipe complète</p>
           </div>
         </article>
       </div>
