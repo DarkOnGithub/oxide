@@ -341,6 +341,7 @@ impl<W: Write> ArchiveWriter<W> {
             self.writer.write_all(&meta.data_block_count.to_le_bytes())?;
             self.writer.write_all(&meta.parity_block_count.to_le_bytes())?;
             self.writer.write_all(&meta.parity_bytes_len.to_le_bytes())?;
+            self.writer.write_all(&meta.max_block_len.to_le_bytes())?;
         }
         footer.write(&mut self.writer)?; 
 
