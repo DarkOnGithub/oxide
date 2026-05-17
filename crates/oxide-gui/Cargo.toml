@@ -4,3 +4,6 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
+eframe = "0.27"
+rfd = "0.14"
+oxide-core = { path = "../oxide-core" }
