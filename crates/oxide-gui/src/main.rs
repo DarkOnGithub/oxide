@@ -353,7 +353,7 @@ impl eframe::App for AppCompresseur {
 
                     ui.checkbox(
                         &mut self.compression_proteger,
-                        "🛡️ Ajouter des données de récupération (Reed-Solomon)",
+                        "🛡️ Ajouter des données de récupération",
                     );
                     if self.compression_proteger {
                         ui.horizontal(|ui| {
@@ -400,7 +400,7 @@ impl eframe::App for AppCompresseur {
                 });
             } else if self.mode_actuel == Mode::Proteger {
                 ui.group(|ui| {
-                    ui.label("Niveau de redondance (Reed-Solomon) :");
+                    ui.label("Niveau de redondance :");
                     ui.add(egui::Slider::new(&mut self.pourcentage_protection, 1..=20).suffix("%"));
                     ui.label(
                         egui::RichText::new(
