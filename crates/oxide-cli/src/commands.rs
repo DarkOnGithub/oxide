@@ -22,6 +22,44 @@ use crate::report::{
 use crate::tree::print_archive_tree;
 use crate::ui::{StreamTarget, Tone, tagged_message};
 
+pub fn gui() -> AppResult {
+    let gui_executable = gui_executable_name();
+    let mut candidates = Vec::new();
+
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        candidates.push(parent.join(gui_executable));
+    }
+
+    candidates.push(gui_executable.into());
+
+    for candidate in candidates {
+        match std::process::Command::new(&candidate).status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => {
+                return Err(
+                    format!("{} exited with status {}", candidate.display(), status).into(),
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!("failed to launch {}: {error}", candidate.display()).into());
+            }
+        }
+    }
+
+    Err("oxide-gui executable not found; build or install the oxide-gui package first".into())
+}
+
+fn gui_executable_name() -> &'static str {
+    if cfg!(windows) {
+        "oxide-gui.exe"
+    } else {
+        "oxide-gui"
+    }
+}
+
 pub fn archive(args: ArchiveArgs) -> AppResult {
     let ArchiveArgs {
         input,
@@ -547,9 +585,12 @@ fn get_secure_password(prompt: &str, require_confirmation: bool) -> AppResult<St
     Ok(password)
 }
 
-
 pub fn protect(args: crate::cli::ProtectArgs) -> AppResult {
-    let crate::cli::ProtectArgs { input, output, recovery } = args;
+    let crate::cli::ProtectArgs {
+        input,
+        output,
+        recovery,
+    } = args;
 
     let output_path = output.clone().unwrap_or_else(|| {
         let mut path = input.clone();
@@ -557,7 +598,11 @@ pub fn protect(args: crate::cli::ProtectArgs) -> AppResult {
         path
     });
 
-    println!("🛡️ Starting protection ({}%) for: {}", recovery, input.display());
+    println!(
+        "🛡️ Starting protection ({}%) for: {}",
+        recovery,
+        input.display()
+    );
 
     if let Err(e) = oxide_core::recovery::protect_existing_archive(&input, &output_path, recovery) {
         if output.is_none() && output_path.exists() {

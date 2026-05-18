@@ -11,12 +11,18 @@ use oxide_core::CompressionAlgo;
     long_about = "Archive and extract .oxz files with processing stats"
 )]
 pub struct Cli {
+    /// Open the Oxide graphical interface.
+    #[arg(long)]
+    pub gui: bool,
+
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Open the Oxide graphical interface.
+    Gui,
     /// Archive a file or directory into an .oxz archive.
     Archive(Box<ArchiveArgs>),
     /// Extract an .oxz archive to a file or directory.

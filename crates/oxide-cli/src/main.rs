@@ -21,10 +21,16 @@ fn main() {
 }
 
 fn run() -> AppResult {
-    print_startup_banner();
     let cli = Cli::parse();
 
-    match cli.command {
+    if cli.gui || matches!(cli.command, None | Some(Commands::Gui)) {
+        return commands::gui();
+    }
+
+    print_startup_banner();
+
+    match cli.command.expect("command presence checked above") {
+        Commands::Gui => unreachable!("gui command handled before CLI banner"),
         Commands::Archive(args) => commands::archive(*args)?,
         Commands::Extract(args) => commands::extract(args)?,
         Commands::Tree(args) => commands::tree(args)?,

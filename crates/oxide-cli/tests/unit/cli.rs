@@ -43,12 +43,36 @@ fn default_extract_output_path_falls_back_when_extension_is_missing() {
 }
 
 #[test]
+fn no_args_defaults_to_gui() {
+    let cli = Cli::try_parse_from(["oxide"]).expect("empty arguments should parse");
+
+    assert!(cli.command.is_none());
+    assert!(!cli.gui);
+}
+
+#[test]
+fn gui_flag_requests_gui() {
+    let cli = Cli::try_parse_from(["oxide", "--gui"]).expect("gui flag should parse");
+
+    assert!(cli.gui);
+    assert!(cli.command.is_none());
+}
+
+#[test]
+fn gui_command_requests_gui() {
+    let cli = Cli::try_parse_from(["oxide", "gui"]).expect("gui command should parse");
+
+    assert!(!cli.gui);
+    assert!(matches!(cli.command, Some(Commands::Gui)));
+}
+
+#[test]
 fn archive_command_accepts_preset_flag() {
     let cli = Cli::try_parse_from(["oxide", "archive", "demo/input", "--preset", "compact"])
         .expect("archive arguments should parse");
 
     match cli.command {
-        Commands::Archive(args) => assert_eq!(args.preset.as_deref(), Some("compact")),
+        Some(Commands::Archive(args)) => assert_eq!(args.preset.as_deref(), Some("compact")),
         _ => panic!("expected archive command"),
     }
 }
@@ -59,7 +83,7 @@ fn archive_command_accepts_zstd_compression() {
         .expect("archive arguments should parse");
 
     match cli.command {
-        Commands::Archive(args) => {
+        Some(Commands::Archive(args)) => {
             assert!(matches!(
                 args.compression,
                 Some(super::CompressionArg::Zstd)
@@ -75,7 +99,7 @@ fn archive_command_accepts_lzma_compression() {
         .expect("archive arguments should parse");
 
     match cli.command {
-        Commands::Archive(args) => {
+        Some(Commands::Archive(args)) => {
             assert!(matches!(
                 args.compression,
                 Some(super::CompressionArg::Lzma)
@@ -97,7 +121,7 @@ fn archive_command_accepts_compression_level_flag() {
     .expect("archive arguments should parse");
 
     match cli.command {
-        Commands::Archive(args) => assert_eq!(args.compression_level, Some(19)),
+        Some(Commands::Archive(args)) => assert_eq!(args.compression_level, Some(19)),
         _ => panic!("expected archive command"),
     }
 }
@@ -108,7 +132,7 @@ fn archive_command_accepts_skip_compression_flag() {
         .expect("archive arguments should parse");
 
     match cli.command {
-        Commands::Archive(args) => assert!(args.skip_compression),
+        Some(Commands::Archive(args)) => assert!(args.skip_compression),
         _ => panic!("expected archive command"),
     }
 }
@@ -119,7 +143,7 @@ fn extract_command_accepts_telemetry_flag() {
         .expect("extract arguments should parse");
 
     match cli.command {
-        Commands::Extract(args) => assert!(args.telemetry_details),
+        Some(Commands::Extract(args)) => assert!(args.telemetry_details),
         _ => panic!("expected extract command"),
     }
 }
@@ -130,7 +154,7 @@ fn extract_command_accepts_preset_flag() {
         .expect("extract arguments should parse");
 
     match cli.command {
-        Commands::Extract(args) => assert_eq!(args.preset.as_deref(), Some("fast")),
+        Some(Commands::Extract(args)) => assert_eq!(args.preset.as_deref(), Some("fast")),
         _ => panic!("expected extract command"),
     }
 }
@@ -141,7 +165,7 @@ fn extract_command_workers_default_is_none_for_preset_resolution() {
         .expect("extract arguments should parse");
 
     match cli.command {
-        Commands::Extract(args) => assert_eq!(args.workers, None),
+        Some(Commands::Extract(args)) => assert_eq!(args.workers, None),
         _ => panic!("expected extract command"),
     }
 }
@@ -158,7 +182,7 @@ fn extract_command_accepts_extract_write_shards_flag() {
     .expect("extract arguments should parse");
 
     match cli.command {
-        Commands::Extract(args) => assert_eq!(args.extract_write_shards, 3),
+        Some(Commands::Extract(args)) => assert_eq!(args.extract_write_shards, 3),
         _ => panic!("expected extract command"),
     }
 }
@@ -169,7 +193,7 @@ fn extract_command_defaults_extract_write_shards_to_auto() {
         .expect("extract arguments should parse");
 
     match cli.command {
-        Commands::Extract(args) => assert_eq!(args.extract_write_shards, 0),
+        Some(Commands::Extract(args)) => assert_eq!(args.extract_write_shards, 0),
         _ => panic!("expected extract command"),
     }
 }
@@ -188,7 +212,7 @@ fn extract_command_accepts_repeated_only_flags() {
     .expect("extract arguments should parse");
 
     match cli.command {
-        Commands::Extract(args) => assert_eq!(args.only, ["nested", "assets/logo.png"]),
+        Some(Commands::Extract(args)) => assert_eq!(args.only, ["nested", "assets/logo.png"]),
         _ => panic!("expected extract command"),
     }
 }
@@ -207,7 +231,7 @@ fn extract_command_accepts_repeated_only_regex_flags() {
     .expect("extract arguments should parse");
 
     match cli.command {
-        Commands::Extract(args) => assert_eq!(args.only_regex, [".*\\.png$", "^docs/"]),
+        Some(Commands::Extract(args)) => assert_eq!(args.only_regex, [".*\\.png$", "^docs/"]),
         _ => panic!("expected extract command"),
     }
 }
